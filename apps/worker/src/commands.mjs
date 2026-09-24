@@ -342,10 +342,16 @@ export function createCommands(context) {
         }
       }
 
+      const metaCommentary = result.lesson.finalNote?.assembly?.metaCommentary?.count || 0
+      if (metaCommentary) {
+        stderr(`警告：成品笔记里有 ${metaCommentary} 处"写作过程"的话（本节点/写作目标/待补写…），不该出现在交付物里`)
+      }
+
       const summary = {
         course,
         lesson: lessonTitle,
         status: result.lesson.status,
+        metaCommentary,
         stopReason: result.stopReason,
         idleReason: result.idleDetail?.reason || null,
         nodeCount: result.lesson.nodes.length,

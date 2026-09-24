@@ -44,7 +44,9 @@ export {
 export {
   assembleFinalNote,
   buildFinalNoteMarkdown,
+  META_COMMENTARY_PHRASES,
   demoteBodyHeadings,
+  findMetaCommentary,
   renderCoreQuestions,
   renderIndexTables,
   renderKnowledgeMap,
@@ -53,6 +55,7 @@ export {
   renderPositionInCourse,
   renderQuizOverview,
   renderThreads,
+  renderTimeline,
   chineseIndex,
   extractNodeMetadata,
   normalizedSpliceData,

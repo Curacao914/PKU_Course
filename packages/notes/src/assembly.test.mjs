@@ -7,9 +7,11 @@ import {
   chineseIndex,
   demoteBodyHeadings,
   extractNodeMetadata,
+  findMetaCommentary,
   normalizedSpliceData,
   outlineTopic,
   renderMetaBlock,
+  renderTimeline,
   stripMetaBlock
 } from './assembly.mjs'
 
@@ -162,6 +164,31 @@ test('buildFinalNoteMarkdown assembles sections in outline order', () => {
   // 元数据来自**节点**字段与正文标记，不是大纲条目
   assert.match(markdown, /📑 笔记元数据/)
   assert.ok(!/\{\{[^}]+\}\}/.test(markdown), '不得残留占位符')
+})
+
+test('the timeline table keeps every section traceable to its classroom position', () => {
+  // 笔记按体系展开之后，"这段是第几分钟讲的"这条线索不能丢：回听原音、核对老师原话都靠它。
+  const lesson = {
+    title: '第10-12节',
+    transcript: ['[00:00:10 – 00:00:20] 第一句', '', '[00:35:02 – 00:35:20] 第二句'].join('\n'),
+    outline: [
+      { id: 'o1', title: '一、共犯', lineRange: [1, 1] },
+      { id: 'o2', title: '二、罪数', lineRange: [2, 2] }
+    ]
+  }
+  const table = renderTimeline(lesson)
+  assert.match(table, /时间轴与体系对照/)
+  assert.match(table, /00:00:10/)
+  assert.match(table, /00:35:02/)
+  assert.match(table, /L2–L2/)
+  assert.match(table, /一、共犯/, '章节序号沿用中式层级')
+})
+
+test('meta commentary in a finished note is counted rather than silently shipped', () => {
+  const hits = findMetaCommentary('正文没问题\n\n## 本节点小结\n\n写作目标：说明变量\n\n待补写')
+  assert.equal(hits.length, 3)
+  assert.equal(hits[0].phrase, '本节点')
+  assert.deepEqual(findMetaCommentary('正常的课堂内容，讨论共犯的成立条件。'), [])
 })
 
 test('nodes outside the outline still reach the final note', () => {

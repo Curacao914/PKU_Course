@@ -1,4 +1,4 @@
-import { cleanText } from '@course/core'
+import { cleanText, transcriptLines } from '@course/core'
 
 /**
  * 机械拼装：把已批准节点、接缝数据与元数据合成单课最终笔记。
@@ -413,6 +413,62 @@ export function renderIndexTables(indexTables = {}, lesson = {}) {
   return [...sections.flatMap(section => [section, ''])].join('\n').trim()
 }
 
+/**
+ * 时间轴 ↔ 体系 对照表。
+ *
+ * 笔记按知识体系展开之后，"这段内容老师是在第几分钟讲的"这条线索不能丢：
+ * 想回去听原音、或想核对老师原话时，行号与时间是唯一的索引。
+ * 因此每节都保留它在转录里的位置，并在附录给一张对照表。
+ * 纯程序生成，不花模型调用。
+ */
+export function renderTimeline(lesson = {}) {
+  const outline = lesson.outline || []
+  if (!outline.length) return ''
+  const lines = transcriptLines(lesson.transcript || '')
+  const clockOf = lineNumber => {
+    const text = lines[Math.max(0, Number(lineNumber || 1) - 1)] || ''
+    const match = text.match(/\[(\d{2}:\d{2}:\d{2})/)
+    return match ? match[1] : ''
+  }
+
+  const rows = outline.map((node, index) => {
+    const [start, end] = node.lineRange || []
+    const clock = clockOf(start)
+    const clockEnd = clockOf(end)
+    const span = clock ? (clockEnd ? `${clock}–${clockEnd}` : clock) : '—'
+    return `| ${chineseIndex(index)}、${outlineTopic(node)} | L${start}–L${end} | ${span} |`
+  })
+
+  return [
+    '### 时间轴与体系对照',
+    '',
+    '> 笔记按知识体系展开；下表给出每一节在课堂原声里的位置，便于回听与核对。',
+    '',
+    '| 章节 | 转录行 | 课堂时间 |',
+    '|------|--------|---------|',
+    ...rows
+  ].join('\n')
+}
+
+/**
+ * 元话语检查：成品笔记里不该出现"关于写作过程"的话。
+ *
+ * 提示词已经禁止，但模型偶尔仍会写「本节点小结」「待补写」。这里不删（删可能误伤正文），
+ * 而是**记录下来并让上层可见**：一处都不该有的东西出现 10 次，说明提示词或拼装出了问题。
+ */
+export const META_COMMENTARY_PHRASES = [
+  '本节点', '写作目标', '对应缺口', '待补写', '尚未完成', '待确认补充', '占位符', 'TODO'
+]
+
+export function findMetaCommentary(markdown = '') {
+  const hits = []
+  String(markdown || '').split('\n').forEach((line, index) => {
+    const phrase = META_COMMENTARY_PHRASES.find(item => line.includes(item))
+    if (phrase) hits.push({ line: index + 1, phrase, text: line.trim().slice(0, 80) })
+  })
+  return hits
+}
+
 /** 自测总览：把各节的自测题汇总到复习层，复习时不用在正文里翻找。 */
 export function renderQuizOverview(sectionQuizzes = {}, lesson = {}) {
   const blocks = (lesson.outline || [])
@@ -491,6 +547,8 @@ export function buildFinalNoteMarkdown({ courseSpec = {}, lesson = {}, spliceDat
 
   const appendix = renderAppendix(spliceData.appendix || {})
   if (appendix) parts.push('', appendix, '')
+  const timeline = renderTimeline(lesson)
+  if (timeline) parts.push('', timeline, '')
   parts.push('', renderKnowledgeLink(spliceData.knowledgeLink || {}, lesson), '', '***', '', renderMetaBlock(lesson.nodes || []))
 
   return parts
@@ -522,11 +580,14 @@ export function assembleFinalNote(lesson, spliceData = {}, { courseSpec = {}, tr
   if (/\{\{[^}]+\}\}/.test(markdown)) throw new Error('拼装后的笔记仍残留接缝占位符')
 
   const stamp = (at instanceof Date ? at : new Date(at ?? Date.now())).toISOString()
+  // 元话语检查：不删（删可能误伤正文），而是把次数与样例记进装配结果，让上层看得见。
+  const metaHits = findMetaCommentary(markdown)
   const assembly = {
     spliceData: normalized,
     trace,
     assembledAt: stamp,
-    nodeVersions: Object.fromEntries(nodes.map(node => [node.id, node.versions?.length || 0]))
+    nodeVersions: Object.fromEntries(nodes.map(node => [node.id, node.versions?.length || 0])),
+    metaCommentary: { count: metaHits.length, samples: metaHits.slice(0, 5) }
   }
 
   return {
