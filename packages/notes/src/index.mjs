@@ -25,3 +25,23 @@ export {
   getNextCourseWorkerTasks,
   workerStatusPatch
 } from './worker-tasks.mjs'
+
+export {
+  DEFAULT_COURSE_SPEC,
+  REVIEW_SCORE_KEYS,
+  applyNodeReview,
+  approveNode,
+  approveNodeHuman,
+  assertOutlineCoverage,
+  createNodeFromOutline,
+  deriveLessonStatus,
+  normalizeIssue,
+  normalizeReviewReport,
+  normalizeReviewScores,
+  normalizedReviewDecision,
+  planNodes,
+  recordNodeTaskFailure,
+  requestNodeRevision,
+  saveNodeDraft,
+  scoresMeetThreshold
+} from './node-lifecycle.mjs'

@@ -3,8 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "AI 撰写：角色提示词、模型调用、成本窗口、任务编排",
+  "description": "AI 撰写：角色提示词、模型调用、成本窗口、节点生命周期与任务编排",
   "exports": {
     ".": "./src/index.mjs"
+  },
+  "dependencies": {
+    "@course/core": "*"
   }
 }
