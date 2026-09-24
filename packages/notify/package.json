@@ -3,6 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "微信推送：relay 内核 + 本机队列消费",
-  "main": "src/index.js"
+  "description": "微信推送：本机账本队列 + OpenClaw 通道发送",
+  "exports": {
+    ".": "./src/index.mjs"
+  }
 }

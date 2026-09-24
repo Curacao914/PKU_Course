@@ -56,6 +56,15 @@ export function resolveWorkerConfig(env = process.env, options = {}) {
         brief: env.COURSE_BRIEF_MODEL || ''
       }
     },
+    notify: {
+      openclawBin: env.OPENCLAW_BIN || 'openclaw',
+      openclawHome: env.OPENCLAW_HOME || '',
+      openclawStateDir: env.OPENCLAW_STATE_DIR || '',
+      target: env.COURSE_WECHAT_TARGET || env.LAW_TECH_WECHAT_TARGET || '',
+      publicUrl: env.COURSE_PUBLIC_URL || 'https://course.law-tech.dev',
+      pollSeconds: Number(env.COURSE_NOTIFY_POLL_SECONDS || 30),
+      maxAttempts: Number(env.COURSE_NOTIFY_MAX_ATTEMPTS || 3)
+    },
     asr: {
       entry: ASR_WORKER_ENTRY,
       chunkMinutes: Number(env.COURSE_ASR_CHUNK_MINUTES || 45),
@@ -103,6 +112,14 @@ export function describeConfig(config) {
     chromePath: config.chromePath || '(自动探测)',
     limits: config.limits,
     asr: { ...config.asr },
+    notify: {
+      openclawBin: config.notify.openclawBin,
+      openclawHome: config.notify.openclawHome || '(未设置)',
+      openclawStateDir: config.notify.openclawStateDir || (config.notify.openclawHome ? '(跟随 HOME)' : '(未设置)'),
+      target: config.notify.target ? 'set' : 'missing',
+      publicUrl: config.notify.publicUrl,
+      pollSeconds: config.notify.pollSeconds
+    },
     ai: {
       baseUrl: config.ai.baseUrl,
       provider: config.ai.provider,

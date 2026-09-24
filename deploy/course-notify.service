@@ -1,0 +1,26 @@
+[Unit]
+Description=course.law-tech.dev 微信通知投递
+Documentation=https://course.law-tech.dev
+# 通道由 Gateway 提供；Gateway 不在时投递没有意义
+Wants=openclaw-gateway.service
+After=network-online.target openclaw-gateway.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/course-runtime
+EnvironmentFile=-%h/.course-worker/env
+# OPENCLAW_HOME 与 OPENCLAW_STATE_DIR 必须同时设置：只设 HOME 时 CLI 会报
+# "Unknown channel: openclaw-weixin"（已实测对照）。PATH 里保留 ~/.local/bin，
+# 与既有 relay 单元保持一致。
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=OPENCLAW_BIN=%h/.local/bin/openclaw
+Environment=OPENCLAW_HOME=%h/.openclaw-candidate
+Environment=OPENCLAW_STATE_DIR=%h/.openclaw-candidate
+ExecStart=__NODE__ apps/worker/bin/course.mjs notify --loop
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

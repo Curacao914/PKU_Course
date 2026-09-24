@@ -71,6 +71,8 @@ export async function runCli(argv = [], deps = {}) {
     which: deps.which ?? defaultWhich,
     openStore: deps.openStore ?? (path => openLedger(path)),
     callModel: deps.callModel,
+    sender: deps.sender,
+    sleep: deps.sleep,
     stdout,
     stderr
   })

@@ -96,6 +96,12 @@ export function openLedger(databasePath = ':memory:', options = {}) {
       UPDATE deliveries
       SET status = ?, external_id = ?, last_error = ?, sent_at = ?, updated_at = ?
       WHERE id = ?
+    `),
+    retryDelivery: db.prepare(`
+      UPDATE deliveries
+      SET status = 'pending', claimed_at = NULL, claimed_by = '', last_error = ?,
+          scheduled_for = COALESCE(?, scheduled_for), updated_at = ?
+      WHERE id = ?
     `)
   }
 
@@ -272,6 +278,13 @@ export function openLedger(databasePath = ':memory:', options = {}) {
       const at = nowIso(now)
       const sentAt = status === 'sent' ? at : null
       const result = statements.ackDelivery.run(String(status), String(externalId), String(error), sentAt, at, id)
+      return result.changes > 0
+    },
+
+    /** 把失败的投递放回队列并推迟重试时间（退避）。次数上限由调用方判断。 */
+    retryDelivery({ id, error = '', nextAttemptAt = null, now } = {}) {
+      const at = nowIso(now)
+      const result = statements.retryDelivery.run(String(error || ''), nextAttemptAt, at, id)
       return result.changes > 0
     },
 

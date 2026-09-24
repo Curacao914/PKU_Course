@@ -5,6 +5,7 @@ import path from 'node:path'
 
 import { createValidatedAcquisitionRuntime } from '@course/acquisition'
 import { callCourseModel, createInitialLesson, runLessonNotes } from '@course/notes'
+import { createWechatSender, runDeliveryCycle } from '@course/notify'
 import { buildNoteRecord, readSiteIndex, writeSite } from '@course/publish'
 
 /** 文件名安全化：课程名与课次里常有斜杠与冒号。 */
@@ -26,7 +27,19 @@ import { describeConfig, pythonEnvironment } from './config.mjs'
  * 上下文进入，因此命令本身可以在没有 Chrome、没有网络、没有凭据的情况下测试。
  */
 export function createCommands(context) {
-  const { config, acquire, runPython, which, openStore, callModel: injectedCallModel, stdout, stderr } = context
+  const {
+    config, acquire, runPython, which, openStore,
+    callModel: injectedCallModel, sender: injectedSender, sleep = defaultSleep,
+    stdout, stderr
+  } = context
+
+  function defaultSleep(ms, signal) {
+    return new Promise(resolve => {
+      if (signal?.aborted) { resolve(); return }
+      const timer = setTimeout(resolve, ms)
+      signal?.addEventListener('abort', () => { clearTimeout(timer); resolve() }, { once: true })
+    })
+  }
 
   function withLedger(work) {
     const store = openStore(config.ledgerPath)
@@ -336,6 +349,70 @@ export function createCommands(context) {
     }
   }
 
+  /**
+   * 把账本里排队的通知发到微信。
+   *
+   * 队列来自本机账本，不依赖任何远端接口——旧 relay 每 30 秒去轮询 Vercel 的
+   * 三个端点，一旦那边不可用就只剩日志里的 "fetch failed"。
+   * --probe 用 openclaw 的 dry-run 验证通道与目标，不会真的发消息。
+   */
+  async function notify(options) {
+    const target = config.notify.target
+    if (!target) throw new Error('缺少推送目标：请在 ~/.course-worker/env 设置 COURSE_WECHAT_TARGET')
+
+    const sender = injectedSender || createWechatSender({
+      openclawBin: config.notify.openclawBin,
+      openclawHome: config.notify.openclawHome,
+      openclawStateDir: config.notify.openclawStateDir,
+      target
+    })
+
+    if (options.flags.has('probe')) {
+      const probe = await sender.probe()
+      emit({ probe: true, ok: probe.ok, target: config.notify.target ? 'set' : 'missing', detail: probe.detail }, options)
+      return probe.ok ? 0 : 1
+    }
+
+    const store = openStore(config.ledgerPath)
+    try {
+      const cycleOptions = {
+        store,
+        sender,
+        publicSiteUrl: config.notify.publicUrl,
+        maxAttempts: config.notify.maxAttempts,
+        maxItems: Number(options.options['max-items'] || 10),
+        workerId: options.options['worker-id'] || `notify:${os.hostname()}`,
+        onEvent: event => stderr(`  ${event.status} ${event.dedupeKey}${event.error ? ` — ${event.error}` : ''}`)
+      }
+
+      if (!options.flags.has('loop')) {
+        const summary = await runDeliveryCycle(cycleOptions)
+        emit({ mode: 'once', ...summary }, options)
+        return summary.failed > 0 ? 1 : 0
+      }
+
+      // 常驻循环：间隔可配；每轮都是独立事务，中断不会丢状态
+      const signal = options.signal
+      let rounds = 0
+      let totals = { sent: 0, retried: 0, failed: 0 }
+      while (!signal?.aborted) {
+        const summary = await runDeliveryCycle(cycleOptions)
+        rounds += 1
+        totals = {
+          sent: totals.sent + summary.sent,
+          retried: totals.retried + summary.retried,
+          failed: totals.failed + summary.failed
+        }
+        if (summary.results.length) stderr(`第 ${rounds} 轮：发送 ${summary.sent}，重试 ${summary.retried}，失败 ${summary.failed}`)
+        await sleep(config.notify.pollSeconds * 1000, signal)
+      }
+      emit({ mode: 'loop', rounds, ...totals }, options)
+      return 0
+    } finally {
+      store.close()
+    }
+  }
+
   async function status(options) {
     const snapshot = withLedger(store => ({
       path: store.path,
@@ -480,7 +557,7 @@ export function createCommands(context) {
     }
   }
 
-  return { doctor, discover, download, transcribe, notes, publish, status }
+  return { doctor, discover, download, transcribe, notes, publish, notify, status }
 }
 
 export const USAGE = `用法：course <命令> [选项]
@@ -500,6 +577,8 @@ export const USAGE = `用法：course <命令> [选项]
                                            从转录稿生成单课笔记（大纲 → 节点 → 审查 → 拼装 → 终审）
   publish    --from <笔记目录> [--course <名称>] [--lesson <课次>] [--out <站点目录>] [--origin <域名>]
                                            把笔记发布到站点，内容变化时排入一条微信通知
+  notify     [--probe] [--loop] [--max-items <条数>]
+                                           把账本里排队的通知发到微信；--probe 只验证通道不发消息
 
 账本：download / transcribe 若带 --replay-key 且账本中已有该回放，会先领取任务，
 成功后推进阶段；失败则记录原因并退避 5 分钟。账本没有该回放时按独立运行处理。

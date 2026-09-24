@@ -422,6 +422,59 @@ test('publish refuses a directory without a notes run summary', async () => {
   assert.match(errors.join('\n'), /找不到 .*notes-run-summary\.json/)
 })
 
+test('notify probes the channel without sending and reports missing targets', async () => {
+  const probes = []
+  const sender = {
+    target: 'wxid_test',
+    probe: async () => { probes.push(1); return { ok: true, detail: 'dry-run 成功' } },
+    send: async () => { throw new Error('不应被调用') }
+  }
+  const { deps, lines } = harness({ sender })
+  const withTarget = { ...deps, env: { ...deps.env, COURSE_WECHAT_TARGET: 'wxid_test' } }
+
+  assert.equal(await runCli(['notify', '--probe'], withTarget), 0)
+  assert.equal(parse(lines.at(-1)).ok, true)
+  assert.equal(probes.length, 1)
+
+  // 未配置目标时直接报错，不静默什么也不做
+  const bare = harness({ sender })
+  assert.equal(await runCli(['notify', '--probe'], bare.deps), 1)
+  assert.match(bare.errors.join('\n'), /缺少推送目标/)
+})
+
+test('notify refuses to run without a configured target', async () => {
+  const { deps, errors } = harness({ sender: { target: 'x', probe: async () => ({ ok: true }), send: async () => ({}) } })
+  assert.equal(await runCli(['notify'], deps), 1)
+  assert.match(errors.join('\n'), /缺少推送目标/)
+})
+
+test('notify sends queued deliveries and reports the counts', async () => {
+  const sentMessages = []
+  const sender = {
+    target: 'wxid_test',
+    probe: async () => ({ ok: true, detail: 'ok' }),
+    send: async message => { sentMessages.push(message); return { externalId: `wx-${sentMessages.length}` } }
+  }
+  const { deps, lines, ledger } = harness({ sender })
+  const env = { ...deps.env, COURSE_WECHAT_TARGET: 'wxid_test' }
+  ledger.enqueueDelivery({
+    dedupeKey: 'course-note:notes/刑法分论/第10-12节',
+    purpose: 'course-note',
+    bodyText: '刑法分论 · 第10-12节\n摘要若干。',
+    objectUrl: '/notes/刑法分论/第10-12节.html',
+    // 已到期的排队项（默认情况下 scheduled_for 为入队时刻）
+    scheduledFor: '2026-01-01T00:00:00.000Z'
+  })
+
+  assert.equal(await runCli(['notify'], { ...deps, env }), 0)
+  const payload = parse(lines.at(-1))
+  assert.equal(payload.sent, 1)
+  assert.equal(sentMessages.length, 1)
+  assert.match(sentMessages[0], /打开课程笔记/)
+  assert.match(sentMessages[0], /https:\/\/course.law-tech.dev\/notes\//, '相对路径应补成绝对地址')
+  assert.equal(ledger.claimDelivery({ workerId: 'w', now: '2026-09-25T01:00:00.000Z' }), null, '发送后不再排队')
+})
+
 test('transcribe advances the ledger task to transcript_ready', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
   const media = path.join(dir, 'media.mp4')

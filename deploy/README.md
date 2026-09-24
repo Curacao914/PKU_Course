@@ -112,6 +112,39 @@ GET  /does-not-exist   → 404
 包括 `cli.law-tech.dev`。改完务必复查 openclaw-gateway / relay / readyz 三项。
 本次改动后三项均正常。
 
+## 微信推送（已打通）
+
+```
+course-notify.service  →  每 30 秒读一次本机账本  →  openclaw message send --channel openclaw-weixin
+```
+
+| 项 | 值 |
+|---|---|
+| 服务 | `course-notify.service`（user systemd，已 enable，`notify --loop`） |
+| 队列 | 本机账本 `deliveries` 表——**不经过任何远端接口** |
+| 目标 | `COURSE_WECHAT_TARGET`（取自 OpenClaw 的配对状态，写入 `~/.course-worker/env`） |
+| 探测 | `course notify --probe` 用 openclaw 的 dry-run 验证通道，不发真消息 |
+
+**必须同时设置 `OPENCLAW_HOME` 与 `OPENCLAW_STATE_DIR`。** 实测对照：
+
+```
+只设 OPENCLAW_HOME            → Error: Unknown channel: openclaw-weixin
+HOME 与 STATE_DIR 都设        → 正常返回 {"action":"send", ...}
+```
+
+插件与账号状态分别从这两个目录解析，只设一个时通道不会被注册。relay 的 systemd 单元
+也是两个都设，这正是它能工作的原因。
+
+**首条真实投递已验证**（2026-09-24）：`status=sent`，
+`externalId=openclaw-weixin:1790262057530-b0b1fafc`。
+
+### 顺带发现：既有 relay 一直在失败
+
+`law-tech-wechat-relay.service` 的日志里密集出现 `[wechat-outbound] fetch failed`——
+它每轮轮询 `law-tech.dev` 的 outbound 接口都连不上，也就是说**旧的推送路径目前实际是断的**，
+只是错误被记成一行 "fetch failed" 不容易察觉。新链路不依赖远端接口，因此不受影响。
+旧 relay 是否停用，等新链路连续运行一段时间后再决定。
+
 ## 待建（后续步骤）
 
 - `course-worker.timer`：定时执行发现 → 下载 → 转录 → 笔记 → 发布 → 推送。
