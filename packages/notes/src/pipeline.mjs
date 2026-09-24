@@ -108,9 +108,13 @@ export function applyTaskAction(lesson, action, { courseSpec = {}, autoApproveOu
       }
     }
     case 'save-node-review': {
+      const reviewed = applyNodeReview(lesson, action.nodeId, action.reviewerReport || {}, { courseSpec, trace: action.trace, at })
+      const node = (reviewed.nodes || []).find(item => item.id === action.nodeId)
+      // 记"实际生效的结论"而不是模型自报的 decision：判定现在只看有没有 blocking 问题，
+      // 两者可能不同（模型答 revise 但列不出 blocking 时按通过处理）。
       return {
-        lesson: applyNodeReview(lesson, action.nodeId, action.reviewerReport || {}, { courseSpec, trace: action.trace, at }),
-        note: `review-${action.reviewerReport?.decision || 'unknown'}`
+        lesson: reviewed,
+        note: `review-${action.reviewerReport?.decision || 'unknown'}→${node?.reviewDecision || 'unknown'}`
       }
     }
     case 'assemble': {

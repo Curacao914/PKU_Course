@@ -1,4 +1,4 @@
-import { cleanText } from '@course/core'
+import { cleanText, transcriptLines } from '@course/core'
 
 /**
  * 节点生命周期：从大纲切分节点，到每个节点通过审查。
@@ -137,9 +137,10 @@ export function assertOutlineCoverage(outline = [], lineCount) {
 }
 
 function linesForRange(transcript, range = []) {
+  // 必须按"逻辑行"（见 @course/core 的 transcriptLines）切片：大纲的 [Lx] 行号是按
+  // 逻辑行编的，此前这里按物理行切，导致每个节点拿到的原文偏移了约一倍。
   const [start = 1, end = start] = range
-  return cleanText(transcript)
-    .split('\n')
+  return transcriptLines(transcript)
     .slice(Math.max(0, Number(start) - 1), Math.max(Number(start), Number(end)))
     .join('\n')
 }

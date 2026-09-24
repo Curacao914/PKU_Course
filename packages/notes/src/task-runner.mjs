@@ -1,4 +1,4 @@
-import { cleanText } from '@course/core'
+import { cleanText, transcriptLines } from '@course/core'
 
 import { buildPrompt, callCourseModel } from './ai-adapter.mjs'
 // 审查只回答"要不要重写这一段"，不再有五项评分，因此这里也不需要量纲归一化。
@@ -16,9 +16,8 @@ import { buildPrompt, callCourseModel } from './ai-adapter.mjs'
  *      modelRepairNodeCount=0 与 fallbackGaps，便于事后判断是谁补的。
  */
 
-export function transcriptLines(text) {
-  return cleanText(text).split('\n').filter(Boolean)
-}
+// 行定义只有一处实现（@course/core）：给大纲编号、判大纲覆盖、切节点原文必须同源。
+export { transcriptLines }
 
 /** 给转录加绝对行号 [Lx]：大纲与节点的 lineRange 都以它为准。 */
 export function numberTranscript(text, range = null) {

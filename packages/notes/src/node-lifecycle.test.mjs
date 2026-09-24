@@ -226,6 +226,21 @@ test('exhausted auto revisions let a node through with warnings instead of stall
   assert.equal(target.reviewerReports.at(-1).value.autoRevisionExhausted, true)
 })
 
+test('node slices follow logical transcript lines, not physical ones', () => {
+  // 转写稿每句话之间有一个空行：物理行数是逻辑行的两倍。
+  // 大纲的 [Lx] 行号与 assertOutlineCoverage 都按逻辑行算，切片也必须按逻辑行，
+  // 否则每个节点拿到的原文会整体偏移约一倍——这曾让模型以为"本节内容材料里没有"。
+  const blankSeparated = Array.from({ length: 6 }, (_, index) => `[L${index + 1}] 第 ${index + 1} 句`).join('\n\n')
+  const nodes = planNodes({
+    lesson: { transcript: blankSeparated, pptText: [] },
+    outline: [{ id: 'o1', title: '主题', lineRange: [3, 4], writerBrief: '目标' }],
+    courseSpec: { nodeSplitThreshold: 100000, nodeSplitLineThreshold: 100000 }
+  })
+
+  assert.equal(nodes.length, 1)
+  assert.equal(nodes[0].sourceText, '[L3] 第 3 句\n[L4] 第 4 句', '切片必须落在逻辑行 3-4 上')
+})
+
 test('an unchanged revision still counts toward the revision cap', () => {
   let current = lesson([node('n1')])
   current = saveNodeDraft(current, 'n1', '第一版正文')

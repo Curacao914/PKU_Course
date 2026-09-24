@@ -9,4 +9,4 @@ export {
   validateCoursePipelineAdapter
 } from './adapter-contract.mjs'
 
-export { cleanText } from './text.mjs'
+export { cleanText, transcriptLines } from './text.mjs'
