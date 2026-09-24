@@ -613,6 +613,7 @@ export function createValidatedAcquisitionRuntime(input = {}) {
 
   let context = null
   let portalPage = null
+  let profileLock = null
 
   async function ensureBrowser() {
     if (context) return { context, page: portalPage }
@@ -648,7 +649,12 @@ export function createValidatedAcquisitionRuntime(input = {}) {
     }
 
     // 浏览器关掉就放锁，避免进程正常结束却把锁留到超时
-    context.on('close', () => lock.release())
+    context.on('close', () => {
+      lock.release()
+      context = null
+      portalPage = null
+    })
+    profileLock = lock
     portalPage = context.pages()[0] || await context.newPage()
     return { context, page: portalPage }
   }
@@ -871,10 +877,18 @@ export function createValidatedAcquisitionRuntime(input = {}) {
     }
   }
 
+  /** 关闭浏览器并释放 profile 锁；重复调用安全。 */
   async function close() {
-    if (context) await context.close()
+    const current = context
     context = null
     portalPage = null
+    try {
+      await current?.close()
+    } catch {
+      // 已经关掉或已崩溃都无所谓，下面照样放锁
+    }
+    profileLock?.release()
+    profileLock = null
   }
 
   return { scratchRoot, discover, download, close }

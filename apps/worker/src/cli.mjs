@@ -29,11 +29,47 @@ function defaultRunPython({ python, args, env }) {
   })
 }
 
-function defaultAcquire({ log } = {}) {
-  // 延迟加载：只有真正需要浏览器时才导入 Playwright。
-  return import('@course/acquisition').then(({ createValidatedAcquisitionRuntime }) =>
-    createValidatedAcquisitionRuntime({ log })
-  )
+/**
+ * 采集运行时是**每进程单例**。
+ *
+ * 早先每次调用都新建实例：discover 用完浏览器不关闭，紧接着 download 再要同一个
+ * profile，就被前一个实例持有的锁挡住，等满 120 秒超时——一个 cycle 里
+ * 第一步成功、第二步必然失败。
+ *
+ * 延迟加载：只有真正需要浏览器时才导入 Playwright。
+ * 关键配置显式注入而不是依赖 process.env——env 文件的值不一定会进进程环境，
+ * 漏掉会表现为「找不到 Chrome」这类与真实原因无关的报错。
+ */
+let acquisitionRuntime = null
+
+function defaultAcquire({ log, config } = {}) {
+  if (!acquisitionRuntime) {
+    acquisitionRuntime = import('@course/acquisition').then(({ createValidatedAcquisitionRuntime }) =>
+      createValidatedAcquisitionRuntime({
+        log,
+        executablePath: config?.chromePath || undefined,
+        scratchRoot: config?.scratchRoot,
+        profileDir: config?.profileDir,
+        headless: config?.headless,
+        username: config?.sources?.PKU_USERNAME || undefined,
+        password: config?.sources?.PKU_PASSWORD || undefined
+      })
+    )
+  }
+  return acquisitionRuntime
+}
+
+/** 命令结束后关闭浏览器：它占着 profile 锁，也占着这台 1.9G 机器上几百兆内存。 */
+async function closeAcquisitionRuntime() {
+  if (!acquisitionRuntime) return
+  const pending = acquisitionRuntime
+  acquisitionRuntime = null
+  try {
+    const runtime = await pending
+    await runtime?.close?.()
+  } catch {
+    // 关闭失败不影响命令结果
+  }
 }
 
 /**
@@ -88,5 +124,8 @@ export async function runCli(argv = [], deps = {}) {
     stderr(`命令 ${parsed.command} 失败：${error instanceof Error ? error.message : String(error)}`)
     if (error && typeof error === 'object' && error.retryable) stderr('该错误被标记为可重试。')
     return 1
+  } finally {
+    // 命令结束后必须关掉浏览器：它占着 profile 锁，也占着这台 1.9G 机器上几百兆内存
+    await closeAcquisitionRuntime()
   }
 }
