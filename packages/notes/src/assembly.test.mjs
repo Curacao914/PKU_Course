@@ -141,12 +141,22 @@ test('buildFinalNoteMarkdown assembles sections in outline order', () => {
 
   assert.match(markdown, /^# 第10-12节 共犯与罪数/)
   assert.match(markdown, /> 课程：刑法分论 · 车浩/)
-  assert.match(markdown, /## 课程概览/)
+  // 分层：先体系（位置/地图/线索/问题/目标），再分节正文，最后检索层
+  assert.match(markdown, /## 本课在课程中的位置/)
+  assert.match(markdown, /## 知识地图/)
+  assert.match(markdown, /```mermaid/)
+  assert.match(markdown, /flowchart TD/, '没有模型图源时由程序生成结构图')
+  assert.match(markdown, /## 体系线索/)
+  assert.match(markdown, /## 核心问题/)
+  assert.match(markdown, /## 学习目标/)
+  assert.match(markdown, /## 复习层/)
   assert.match(markdown, /### 一、共犯的成立条件/)
   assert.match(markdown, /### 二、罪数判断/)
   assert.ok(markdown.includes('共犯的成立需要共同故意与共同行为。'), '节点正文必须逐字进入')
   assert.ok(markdown.indexOf('共犯的成立需要') < markdown.indexOf('罪数的判断以行为个数'), '章节顺序与大纲一致')
   assert.match(markdown, /> \*\*自测\*\*/)
+  assert.ok(markdown.indexOf('## 本课在课程中的位置') < markdown.indexOf('### 一、共犯的成立条件'), '体系层必须在正文之前')
+  assert.ok(markdown.indexOf('### 一、共犯的成立条件') < markdown.indexOf('## 复习层'), '检索层必须在正文之后')
   assert.match(markdown, /## 知识连接/)
   assert.match(markdown, /## 附录：补充与发散/)
   // 元数据来自**节点**字段与正文标记，不是大纲条目

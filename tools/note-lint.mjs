@@ -77,9 +77,14 @@ function analyze(file) {
   // 6) 结构缺件
   const has = pattern => pattern.test(markdown)
   const structure = {
-    课程概览: has(/课程概览/),
-    核心问题: has(/核心问题|要回答的问题/),
-    学习目标: has(/应当能够|学习目标/),
+    体系位置: has(/本课在课程中的位置/),
+    知识地图: has(/^##\s*知识地图/m),
+    体系线索: has(/^##\s*体系线索/m),
+    核心问题: has(/核心问题/),
+    学习目标: has(/学习目标|应当能够/),
+    分节正文: has(/^###\s*[一二三四五六七八九十]+、/m),
+    复习层: has(/^##\s*复习层/m),
+    索引表: has(/概念索引|法条索引|案例索引/),
     自测: has(/自测|练习|思考题/),
     知识连接: has(/知识连接|课程关联|与其他/),
     附录: has(/附录/),
@@ -90,6 +95,7 @@ function analyze(file) {
 
   // 7) 图示与表格
   const diagrams = (markdown.match(MERMAID_BLOCK) || []).length
+  if (!diagrams) add('warn', 'no-knowledge-map', '没有任何 Mermaid 图：体系层缺了"知识地图"')
   const tables = lines.filter(text => /^\s*\|.+\|\s*$/.test(text)).length
   const lists = lines.filter(text => /^\s*([-*]|\d+[.)])\s+/.test(text)).length
 

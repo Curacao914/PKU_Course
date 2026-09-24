@@ -161,8 +161,30 @@ export function normalizedSpliceData(lesson = {}, value = {}) {
     use: '作为后续课程中相关规则、制度或案例分析的理解基础'
   }))
 
+  const system = value.systemLayer || value.system_layer || {}
+  const rawMap = system.knowledgeMap || value.knowledgeMap || {}
+  const indexTables = value.indexTables || value.index_tables || {}
+  const systemLayer = {
+    positionInCourse: spliceString(system.positionInCourse || system.position_in_course),
+    inheritsFrom: spliceString(knowledge.inheritsFrom || knowledge.inherits_from),
+    laysGroundworkFor,
+    lectureThread,
+    knowledgeMap: {
+      mermaid: spliceString(rawMap.mermaid || system.mermaid),
+      caption: spliceString(rawMap.caption || system.mapCaption)
+    },
+    threads: (Array.isArray(system.threads) ? system.threads : []).filter(Boolean),
+    pitfalls: (Array.isArray(system.pitfalls) ? system.pitfalls : []).filter(Boolean)
+  }
+
   return {
     courseOverview: { coreQuestions, shouldBeAbleTo, lectureThread },
+    systemLayer,
+    indexTables: {
+      concepts: (indexTables.concepts || []).filter(Boolean),
+      statutes: (indexTables.statutes || indexTables.provisions || []).filter(Boolean),
+      cases: (indexTables.cases || []).filter(Boolean)
+    },
     sectionSummaries,
     sectionQuizzes,
     knowledgeLink: {
@@ -230,6 +252,182 @@ export function renderAppendix(value = {}) {
   return lines.join('\n')
 }
 
+// ---------------------------------------------------------------- 体系层
+// 笔记要"先给体系、再进细节"：顶部四件套（位置/知识地图/体系线索/核心问题·目标）
+// 让读者在 30 秒内建立框架，正文与索引表再承担细节与检索。
+
+const MERMAID_START = /^\s*(flowchart|graph|timeline|mindmap|sequenceDiagram|classDiagram|stateDiagram(-v2)?)\b/
+
+/** Mermaid 节点 id 必须安全：中文标题不能直接当 id。 */
+const mermaidId = (value, index) => `N${index + 1}`
+const mermaidLabel = value => String(value || '').replace(/["`]/g, '').replace(/\s+/g, ' ').trim()
+
+/**
+ * 知识地图。
+ *
+ * 模型给的图源只在"看起来是合法 Mermaid"时才用；否则由程序按已确认大纲生成一张
+ * 结构图——宁可给一张朴素但一定渲染得出来的图，也不要给读者一段渲染失败的代码。
+ */
+export function renderKnowledgeMap(systemLayer = {}, lesson = {}) {
+  const raw = spliceString(systemLayer.knowledgeMap?.mermaid || systemLayer.mermaid || '')
+    .replace(/^```(mermaid)?/i, '')
+    .replace(/```$/, '')
+    .trim()
+  const caption = spliceString(systemLayer.knowledgeMap?.caption || systemLayer.mapCaption || '')
+
+  let mermaid = raw
+  if (!MERMAID_START.test(raw) || raw.length < 20) {
+    const sections = lesson.outline || []
+    const lines = ['flowchart TD', `  ROOT["${mermaidLabel(lesson.title || '本课')}"]`]
+    sections.forEach((node, index) => {
+      lines.push(`  ${mermaidId(node.id, index)}["${mermaidLabel(outlineTopic(node))}"]`)
+    })
+    sections.forEach((node, index) => {
+      lines.push(index === 0
+        ? `  ROOT --> ${mermaidId(node.id, index)}`
+        : `  ${mermaidId(sections[index - 1].id, index - 1)} --> ${mermaidId(node.id, index)}`)
+    })
+    mermaid = lines.join('\n')
+  }
+
+  return [
+    '## 知识地图',
+    '',
+    '```mermaid',
+    mermaid,
+    '```',
+    caption ? `\n> ${caption}` : ''
+  ].filter(Boolean).join('\n')
+}
+
+/** 本课在课程中的位置：承接什么、为后面什么铺垫。 */
+export function renderPositionInCourse(systemLayer = {}, lesson = {}) {
+  const position = spliceString(systemLayer.positionInCourse)
+  const inherited = spliceString(systemLayer.inheritsFrom)
+  const groundwork = (systemLayer.laysGroundworkFor || []).filter(Boolean)
+  const lines = ['## 本课在课程中的位置', '']
+  if (position) lines.push(position)
+  else {
+    lines.push(`本课是「${lesson.title || '本讲'}」这一讲的内容${lesson.blueprint?.mainLine ? `，围绕${lesson.blueprint.mainLine}展开` : ''}。`)
+  }
+  if (inherited) lines.push('', `**承接**：${inherited}`)
+  if (groundwork.length) {
+    lines.push('', '**为后续铺垫**：')
+    groundwork.forEach(item => lines.push(`- ${typeof item === 'string' ? item : `${spliceString(item.concept, '本课内容')} → ${spliceString(item.use, '后续课程的深化')}`}`))
+  }
+  const thread = spliceString(systemLayer.lectureThread || lesson.blueprint?.mainLine || '')
+  if (thread) {
+    lines.push('', '**课程脉络**', '')
+    lines.push(...thread.split('\n').map(line => `> ${line}`))
+  }
+  return lines.join('\n')
+}
+
+/** 核心问题：Why / How / 区别三类，读者带着问题往下读。 */
+export function renderCoreQuestions(value = {}, lesson = {}) {
+  const questions = Array.isArray(value.coreQuestions) ? value.coreQuestions.filter(Boolean).slice(0, 6) : []
+  const lines = ['## 核心问题', '']
+  ;(questions.length ? questions : [`如何理解${lesson.title || '本课'}的核心问题及其展开逻辑？`])
+    .forEach((item, index) => lines.push(`${index + 1}. ${item}`))
+  return lines.join('\n')
+}
+
+/** 学习目标：写成可勾选的清单，读完可以对账。 */
+export function renderLearningObjectives(value = {}, lesson = {}) {
+  const abilities = Array.isArray(value.shouldBeAbleTo) ? value.shouldBeAbleTo.filter(Boolean).slice(0, 7) : []
+  const lines = ['## 学习目标', '']
+  ;(abilities.length ? abilities : ['沿课程主线复述本课的核心概念、规则与案例论证'])
+    .forEach(item => lines.push(`- [ ] ${item}`))
+  return lines.join('\n')
+}
+
+/** 体系线索：把散在各节的同一主题串成一条线，这是"不再割裂"的关键。 */
+export function renderThreads(systemLayer = {}, lesson = {}) {
+  const threads = (systemLayer.threads || []).filter(item => item && (item.title || item.note || item.content))
+  const lines = ['## 体系线索', '']
+  if (!threads.length) {
+    lines.push(`> 本课按已确认大纲的顺序展开：${(lesson.outline || []).map(node => outlineTopic(node)).join(' → ')}。`)
+    return lines.join('\n')
+  }
+  const byId = new Map((lesson.outline || []).map(node => [node.id, outlineTopic(node)]))
+  threads.forEach((thread, index) => {
+    lines.push(`### 线索${chineseIndex(index)}：${spliceString(thread.title, '本课主线')}`, '')
+    lines.push(spliceString(thread.note || thread.content))
+    const sections = (thread.sections || []).map(id => byId.get(id)).filter(Boolean)
+    if (sections.length) lines.push('', `> 涉及：${sections.join('、')}`)
+    lines.push('')
+  })
+  return lines.join('\n').trim()
+}
+
+/** 易错点与辨析。 */
+export function renderPitfalls(systemLayer = {}) {
+  const pitfalls = (systemLayer.pitfalls || []).filter(item => item && (item.title || item.text || (item.items || []).length))
+  if (!pitfalls.length) return ''
+  const lines = ['### 易错点与辨析', '']
+  pitfalls.forEach(item => {
+    if (typeof item === 'string') { lines.push(`- ${item}`); return }
+    if (item.title) lines.push(`**${spliceString(item.title)}**`, '')
+    ;(item.items || []).forEach(entry => lines.push(`- ${spliceString(entry)}`))
+    if (!item.items?.length && item.text) lines.push(`- ${spliceString(item.text)}`)
+    lines.push('')
+  })
+  return lines.join('\n').trim()
+}
+
+/**
+ * 索引表：概念/法条/案例。
+ *
+ * 复习时需要的不是"再读一遍全文"，而是"按名字找到它在哪、要点是什么"。
+ * 模型没给说明时也要保留名字（索引本身就有价值），说明列留空而不是编造。
+ */
+export function renderIndexTables(indexTables = {}, lesson = {}) {
+  const fallback = (type) => {
+    const seen = new Set()
+    return (lesson.nodes || [])
+      .flatMap(extractNodeMetadata)
+      .filter(([kind, value]) => kind === type && !seen.has(value) && seen.add(value))
+      .map(([, value]) => ({ name: value }))
+  }
+
+  const concepts = (indexTables.concepts || []).length ? indexTables.concepts : fallback('CONCEPT')
+  const statutes = (indexTables.statutes || indexTables.provisions || []).length
+    ? (indexTables.statutes || indexTables.provisions)
+    : fallback('PROVISION')
+  const cases = (indexTables.cases || []).length ? indexTables.cases : fallback('CASE')
+
+  const sections = []
+  if (concepts.length) {
+    sections.push(['### 概念索引', '', '| 概念 | 出现位置 | 一句话解释 | 易混点 |', '|------|---------|-----------|--------|',
+      ...concepts.map(item => `| ${spliceString(item.term || item.name)} | ${spliceString(item.where || item.section)} | ${spliceString(item.definition)} | ${spliceString(item.confusion || item.pitfall)} |`)].join('\n'))
+  }
+  if (statutes.length) {
+    sections.push(['### 法条索引', '', '| 法律·条号 | 核心规定 | 适用条件 | 与本课的关系 |', '|-----------|---------|---------|-------------|',
+      ...statutes.map(item => `| ${spliceString(item.name || item.provision)} | ${spliceString(item.rule || item.content)} | ${spliceString(item.condition)} | ${spliceString(item.relation)} |`)].join('\n'))
+  }
+  if (cases.length) {
+    sections.push(['### 案例索引', '', '| 案例 | 争点 | 结论与规则适用 | 老师的评价 |', '|------|------|---------------|-----------|',
+      ...cases.map(item => `| ${spliceString(item.name || item.case)} | ${spliceString(item.issue)} | ${spliceString(item.holding || item.rule)} | ${spliceString(item.teacherView || item.comment)} |`)].join('\n'))
+  }
+  if (!sections.length) return ''
+  return [...sections.flatMap(section => [section, ''])].join('\n').trim()
+}
+
+/** 自测总览：把各节的自测题汇总到复习层，复习时不用在正文里翻找。 */
+export function renderQuizOverview(sectionQuizzes = {}, lesson = {}) {
+  const blocks = (lesson.outline || [])
+    .map(node => ({ title: outlineTopic(node), items: (sectionQuizzes[node.id] || []).filter(Boolean) }))
+    .filter(block => block.items.length)
+  if (!blocks.length) return ''
+  const lines = ['### 自测总览', '']
+  blocks.forEach(block => {
+    lines.push(`**${block.title}**`, '')
+    block.items.forEach((item, index) => lines.push(`${index + 1}. ${item}`))
+    lines.push('')
+  })
+  return lines.join('\n').trim()
+}
+
 export function buildFinalNoteMarkdown({ courseSpec = {}, lesson = {}, spliceData = {} } = {}) {
   const byOutline = new Map((lesson.outline || []).map(item => [item.id, []]))
   const orphan = []
@@ -240,12 +438,26 @@ export function buildFinalNoteMarkdown({ courseSpec = {}, lesson = {}, spliceDat
 
   const summaries = spliceData.sectionSummaries || {}
   const quizzes = spliceData.sectionQuizzes || {}
+  const systemLayer = spliceData.systemLayer || {}
+  const overview = spliceData.courseOverview || {}
+  const first = (lesson.outline || [])[0]?.lineRange || []
+  const last = (lesson.outline || []).at(-1)?.lineRange || []
+  const provenance = first[0] && last[1] ? `转录 L${first[0]}–L${last[1]}` : ''
+  // 分层：先体系（在哪/是什么/怎么串起来/带什么问题读），再细节（分节正文），最后检索层（索引与自测）。
   const parts = [
     `# ${lesson.title}`,
     '',
-    `> 课程：${courseSpec.courseName || ''}${courseSpec.teacher ? ` · ${courseSpec.teacher}` : ''}`,
+    `> ${[`课程：${courseSpec.courseName || ''}`, courseSpec.teacher, provenance].filter(Boolean).join(' · ')}`,
     '',
-    renderCourseOverview(spliceData.courseOverview || {}, lesson),
+    renderPositionInCourse({ ...systemLayer, lectureThread: overview.lectureThread }, lesson),
+    '',
+    renderKnowledgeMap(systemLayer, lesson),
+    '',
+    renderThreads(systemLayer, lesson),
+    '',
+    renderCoreQuestions(overview, lesson),
+    '',
+    renderLearningObjectives(overview, lesson),
     '',
     '***'
   ]
@@ -266,6 +478,15 @@ export function buildFinalNoteMarkdown({ courseSpec = {}, lesson = {}, spliceDat
     parts.push('', '### 其他', '')
     orphan.forEach(node => parts.push(stripMetaBlock(node.draft), ''))
     parts.push('***')
+  }
+
+  // 检索层：先给索引表，再给易错点与辨析。复习时按名字找，不用重读全文。
+  const indexTables = renderIndexTables(spliceData.indexTables || {}, lesson)
+  const pitfalls = renderPitfalls(systemLayer)
+  const quizOverview = renderQuizOverview(quizzes, lesson)
+  const reviewBlocks = [indexTables, pitfalls, quizOverview].filter(Boolean)
+  if (reviewBlocks.length) {
+    parts.push('', '## 复习层', '', ...reviewBlocks.flatMap(block => [block, '']), '***')
   }
 
   const appendix = renderAppendix(spliceData.appendix || {})

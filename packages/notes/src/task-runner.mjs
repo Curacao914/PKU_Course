@@ -91,7 +91,28 @@ export function validateSpliceData(value) {
         : (knowledgeLink.lays_groundwork_for || []),
       nextLessonPreview: cleanText(knowledgeLink.nextLessonPreview || knowledgeLink.next_lesson_preview || '')
     },
-    appendix: value.appendix && typeof value.appendix === 'object' ? value.appendix : {}
+    appendix: value.appendix && typeof value.appendix === 'object' ? value.appendix : {},
+    // 体系层与索引表：字段名两种写法都收（模型时而 snake_case）。
+    systemLayer: (() => {
+      const system = value.systemLayer || value.system_layer || {}
+      if (!system || typeof system !== 'object') return {}
+      const map = system.knowledgeMap || system.knowledge_map || {}
+      return {
+        positionInCourse: cleanText(system.positionInCourse || system.position_in_course || ''),
+        knowledgeMap: { mermaid: String(map.mermaid || system.mermaid || ''), caption: cleanText(map.caption || '') },
+        threads: (Array.isArray(system.threads) ? system.threads : []).filter(item => item && typeof item === 'object'),
+        pitfalls: (Array.isArray(system.pitfalls) ? system.pitfalls : []).filter(Boolean)
+      }
+    })(),
+    indexTables: (() => {
+      const tables = value.indexTables || value.index_tables || {}
+      const list = key => (Array.isArray(tables[key]) ? tables[key] : []).filter(item => item && typeof item === 'object')
+      return {
+        concepts: list('concepts'),
+        statutes: [...list('statutes'), ...list('provisions')],
+        cases: list('cases')
+      }
+    })()
   }
 }
 
@@ -107,15 +128,24 @@ export function splicePlaceholderContext(lesson = {}) {
   ;(lesson.nodes || []).forEach(node => {
     if (byOutline.has(node.outlineNodeId)) byOutline.get(node.outlineNodeId).push(node)
   })
-  const lines = [`# ${lesson.title || '单课笔记'}`, '', '{{COURSE_OVERVIEW}}', '', '***']
+  const lines = [
+    `# ${lesson.title || '单课笔记'}`, '',
+    '{{POSITION_IN_COURSE}}', '', '{{KNOWLEDGE_MAP}}', '', '{{THREADS}}', '',
+    '{{COURSE_OVERVIEW}}', '', '***'
+  ]
   outline.forEach(node => {
     lines.push('', `### ${node.title || node.id}`, `{{H1_SUMMARY:${node.id}}}`)
     ;(byOutline.get(node.id) || []).forEach(child => {
       lines.push(`[已批准节点：${child.title}；正文由程序机械拼接，不提供给接缝模型]`)
+      // 只给元数据条目（概念/法条/案例的名字），不给正文：索引表建在这些名字上，
+      // 具体解释由接缝模型按"知道就写、不知道就留空"的规则处理。
+      child.concepts?.forEach(value => lines.push(`- CONCEPT: ${value}`))
+      child.statutes?.forEach(value => lines.push(`- PROVISION: ${value}`))
+      child.cases?.forEach(value => lines.push(`- CASE: ${value}`))
     })
     lines.push(`{{H1_QUIZ:${node.id}}}`, '', '***')
   })
-  lines.push('', '{{APPENDIX}}', '', '{{KNOWLEDGE_LINK}}', '', '***', '', '[META 由程序从节点正文抽取并合并]')
+  lines.push('', '{{INDEX_TABLES}}', '', '{{PITFALLS}}', '', '{{APPENDIX}}', '', '{{KNOWLEDGE_LINK}}', '', '***', '', '[META 由程序从节点正文抽取并合并]')
   return lines.join('\n')
 }
 
@@ -292,7 +322,13 @@ export async function executeCourseTask(task, options = {}) {
             statutes: node.statutes || [],
             cases: node.cases || []
           })),
-          instruction: '只生成节点之间的接缝段。不得改写或概括替代任何节点正文；sectionSummaries 与 sectionQuizzes 的键必须使用上述 outline id。'
+          instruction: [
+            '只生成接缝段与体系层，不得改写或概括替代任何节点正文。',
+            'sectionSummaries 与 sectionQuizzes 的键必须使用上述 outline id；threads[].sections 必须使用上述 outline id。',
+            '知识地图用 Mermaid 的 flowchart：节点是本课的核心概念或环节，边表示"先有 A 才能理解 B"这样的依赖关系；不要写装饰性的话，不要用 sequenceDiagram。',
+            '体系线索是本节要交付的重点：把散在各节里的同一条论证线串起来（例如"同一条主线在不同小节各推进一步"），3—5 条。',
+            '索引表只收纳本课确实出现过的概念、法条、案例；说明列写不出来就留空，不要编。'
+          ].join('')
         },
         writerBrief: {
           approvedNodes: nodes.map(node => ({
@@ -307,6 +343,17 @@ export async function executeCourseTask(task, options = {}) {
         pptText: '',
         schema: {
           courseOverview: { coreQuestions: ['string'], shouldBeAbleTo: ['string'], lectureThread: 'string' },
+          systemLayer: {
+            positionInCourse: 'string（本课在整门课中的位置：承接什么、为后面什么铺垫）',
+            knowledgeMap: { mermaid: 'string（flowchart 图源）', caption: 'string' },
+            threads: [{ title: 'string', sections: ['outline id'], note: 'string' }],
+            pitfalls: [{ title: 'string', items: ['string'] }]
+          },
+          indexTables: {
+            concepts: [{ term: 'string', where: 'string', definition: 'string', confusion: 'string' }],
+            statutes: [{ name: 'string', rule: 'string', condition: 'string', relation: 'string' }],
+            cases: [{ name: 'string', issue: 'string', holding: 'string', teacherView: 'string' }]
+          },
           sectionSummaries: summarySchema,
           sectionQuizzes: quizSchema,
           knowledgeLink: {
