@@ -69,7 +69,18 @@ node $COURSE discover --course 刑法分论                   # 列出本学期�
 node $COURSE discover --out ~/.course-worker/catalog.json # 落盘完整目录
 node $COURSE download --course-key <键> --replay-key <键>  # 下载一节课
 node $COURSE transcribe --media <media.mp4> --course 刑法分论 --lesson 第10-12节
+node $COURSE status                                       # 各阶段任务数与明细
 ```
+
+**账本语义**：`discover` 把发现的回放幂等登记进账本（重复扫描只更新展示字段，不动进度）。
+`download` / `transcribe` 若带上 `--replay-key` 且账本里已有该回放，会先**领取任务**再执行：
+
+- 成功 → 推进到 `downloaded` / `transcript_ready`，并记录阶段事件与产物路径；
+- 失败 → **阶段不推进**，写入失败原因并退避 5 分钟（退避期内不会被重复消费）；
+- 任务已被别的进程领取 → 直接拒绝执行，提示 `leased`；
+- 账本里没有该回放 → 按独立运行处理，并在 stderr 明确说明"不记录阶段"。
+
+手动跑单节课的标准顺序：`discover` → `status` 拿到 `replayKey` → `download --replay-key` → `transcribe --replay-key`。
 
 ## 待建（后续步骤）
 

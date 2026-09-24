@@ -63,13 +63,8 @@ function harness(overrides = {}) {
         return { artifacts: { mediaScratchKey: 'media.mp4', mediaChecksum: 'deadbeef' }, runtime: { durationSeconds: 10785.6 } }
       }
     }),
-    openStore: () => ({
-      path: ':memory:',
-      discoverReplays: (...args) => ledger.discoverReplays(...args),
-      listTasks: (...args) => ledger.listTasks(...args),
-      countTasks: () => ledger.countTasks(),
-      close: () => {}
-    }),
+    // 原型继承真实账本，仅屏蔽 close：新增的账本方法无需在测试里逐个转发
+    openStore: () => Object.create(ledger, { close: { value: () => {} } }),
     ...overrides
   }
   return { deps, lines, errors, calls, ledger }
@@ -188,6 +183,57 @@ test('download requires both keys and reports the media path', async () => {
   assert.equal(code, 1)
 })
 
+test('download claims the ledger task, advances the stage and records an event', async () => {
+  const { deps, lines, ledger } = harness()
+  ledger.discoverReplays([{ replay_key: 'replay-1', course_key: 'course-abc', course_name: '刑法分论' }])
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  // 媒体路径由 scratchRoot 推导：<scratchRoot>/replays/<replayKey>/output/media.mp4
+  const mediaPath = path.join(dir, 'replays', 'replay-1', 'output', 'media.mp4')
+  fs.mkdirSync(path.dirname(mediaPath), { recursive: true })
+  fs.writeFileSync(mediaPath, 'fake media')
+
+  const code = await runCli(
+    ['download', '--course-key', 'course-abc', '--replay-key', 'replay-1'],
+    { ...deps, configOverrides: { scratchRoot: dir } }
+  )
+  const payload = parse(lines.at(-1))
+  assert.equal(payload.task.from, 'discovered')
+  assert.equal(payload.task.to, 'downloaded')
+  assert.equal(code, 0)
+
+  const stored = ledger.getTask('replay-1')
+  assert.equal(stored.stage, 'downloaded')
+  assert.equal(stored.claimed_by, '', '提交后应释放租约')
+  assert.equal(stored.artifacts.mediaChecksum, 'deadbeef')
+  assert.equal(ledger.events(payload.task.id).at(-1).stage, 'downloaded')
+})
+
+test('a failed download keeps the previous stage and backs off', async () => {
+  const { deps, errors, ledger } = harness({
+    acquire: async () => ({ download: async () => { throw new Error('upstream 503') } })
+  })
+  ledger.discoverReplays([{ replay_key: 'replay-1', course_key: 'course-abc' }])
+
+  assert.equal(await runCli(['download', '--course-key', 'course-abc', '--replay-key', 'replay-1'], deps), 1)
+  assert.match(errors.join('\n'), /upstream 503/)
+
+  const stored = ledger.getTask('replay-1')
+  assert.equal(stored.stage, 'discovered', '失败不得推进阶段')
+  assert.equal(stored.last_error, 'upstream 503')
+  assert.ok(stored.next_attempt_at, '失败应写入退避时间')
+  assert.equal(ledger.claimTask({ replayKey: 'replay-1', workerId: 'w9' }).claimed, false)
+})
+
+test('a task already leased by someone else refuses the run', async () => {
+  const { deps, errors, ledger } = harness()
+  ledger.discoverReplays([{ replay_key: 'replay-1', course_key: 'course-abc' }])
+  ledger.claimTask({ replayKey: 'replay-1', workerId: 'other-worker' })
+
+  assert.equal(await runCli(['download', '--course-key', 'course-abc', '--replay-key', 'replay-1'], deps), 1)
+  assert.match(errors.join('\n'), /无法领取 replay-1：leased/)
+})
+
 test('transcribe calls the python worker with the resolved paths and only ASR env', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
   const media = path.join(dir, 'media.mp4')
@@ -196,8 +242,11 @@ test('transcribe calls the python worker with the resolved paths and only ASR en
   const { deps, lines, calls } = harness({
     runPython: async payload => {
       calls.python.push(payload)
-      fs.mkdirSync(payload.args[payload.args.indexOf('--output-dir') + 1], { recursive: true })
-      fs.writeFileSync(path.join(dir, 'transcript', 'run-summary.json'), JSON.stringify({ chunkCount: 1, sentenceCount: 2 }))
+      const target = payload.args[payload.args.indexOf('--output-dir') + 1]
+      fs.mkdirSync(target, { recursive: true })
+      // 转录稿与汇总都要真实产出：命令以"是否真的产出转录稿"判定成功，而非仅看退出码
+      fs.writeFileSync(path.join(target, 'raw-transcript.md'), '[00:00:01 – 00:00:03] 正文')
+      fs.writeFileSync(path.join(target, 'run-summary.json'), JSON.stringify({ chunkCount: 1, sentenceCount: 2 }))
       return { code: 0, stdout: 'done', stderr: '' }
     }
   })
@@ -215,6 +264,35 @@ test('transcribe calls the python worker with the resolved paths and only ASR en
   const payload = parse(lines.at(-1))
   assert.equal(payload.summary.sentenceCount, 2)
   assert.match(payload.transcript, /raw-transcript\.md$/)
+})
+
+test('transcribe advances the ledger task to transcript_ready', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const media = path.join(dir, 'media.mp4')
+  fs.writeFileSync(media, 'fake')
+  const outputDir = path.join(dir, 'transcript')
+  const { deps, lines, ledger } = harness({
+    runPython: async () => {
+      fs.mkdirSync(outputDir, { recursive: true })
+      fs.writeFileSync(path.join(outputDir, 'raw-transcript.md'), '[00:00:01 – 00:00:03] 正文')
+      fs.writeFileSync(path.join(outputDir, 'run-summary.json'), JSON.stringify({ chunkCount: 2, sentenceCount: 42, videoDurationSeconds: 5400 }))
+      return { code: 0, stdout: '', stderr: '' }
+    }
+  })
+  ledger.discoverReplays([{ replay_key: 'replay-1', course_key: 'course-abc' }])
+  ledger.reportStage({ id: ledger.getTask('replay-1').id, stage: 'downloaded' })
+
+  const code = await runCli([
+    'transcribe', '--media', media, '--course', '刑法分论', '--lesson', '第10-12节',
+    '--replay-key', 'replay-1', '--output-dir', outputDir
+  ], deps)
+  assert.equal(code, 0)
+  assert.equal(parse(lines.at(-1)).task.to, 'transcript_ready')
+
+  const stored = ledger.getTask('replay-1')
+  assert.equal(stored.stage, 'transcript_ready')
+  assert.equal(stored.artifacts.chunkCount, 2)
+  assert.equal(stored.runtime.sentenceCount, 42)
 })
 
 test('transcribe refuses a missing media file and propagates worker failures', async () => {

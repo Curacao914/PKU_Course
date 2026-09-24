@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 
 import { createValidatedAcquisitionRuntime } from '@course/acquisition'
@@ -20,6 +21,32 @@ export function createCommands(context) {
     } finally {
       store.close()
     }
+  }
+
+  function defaultWorkerId() {
+    return `cli:${os.hostname()}:${process.pid}`
+  }
+
+  /** 失败后延迟重试的间隔：与旧系统一致，避免坏任务被反复消费。 */
+  const RETRY_DELAY_MS = 5 * 60 * 1000
+
+  /**
+   * 在账本里领取一条任务。
+   *
+   * 账本里没有这条回放时不报错——手动跑单节课仍然可用，只是不记录阶段，
+   * 并且会在 stderr 明确说明，避免让人误以为进度已被记账。
+   */
+  function claimForRun(store, replayKey, workerId) {
+    const existing = store.getTask(replayKey)
+    if (!existing) {
+      stderr(`账本中没有 ${replayKey}：本次按独立运行处理，不记录阶段。先跑 course discover 可登记回放。`)
+      return null
+    }
+    const claim = store.claimTask({ replayKey, workerId })
+    if (!claim.claimed) {
+      throw new Error(`无法领取 ${replayKey}：${claim.reason}（当前阶段 ${claim.task?.stage}）`)
+    }
+    return claim.task
   }
 
   function emit(payload, options) {
@@ -107,19 +134,60 @@ export function createCommands(context) {
   async function download(options) {
     const replayKey = requireOption(options.options, 'replay-key', 'download')
     const courseKey = requireOption(options.options, 'course-key', 'download')
-    const runtime = await acquire({ log: message => stderr(String(message)) })
-    const result = await runtime.download(
-      {
-        replay_key: replayKey,
-        course_key: courseKey,
-        course_name: options.options.course || '',
-        title: options.options.title || ''
-      },
-      { log: message => stderr(String(message)) }
-    )
-    const mediaPath = path.join(config.mediaRoot, replayKey, 'output', 'media.mp4')
-    emit({ replayKey, mediaPath, ...result }, options)
-    return fs.existsSync(mediaPath) ? 0 : 1
+    const workerId = options.options['worker-id'] || defaultWorkerId()
+    const store = openStore(config.ledgerPath)
+    try {
+      const task = claimForRun(store, replayKey, workerId)
+      const previousStage = task?.stage || 'discovered'
+      let result
+      try {
+        const runtime = await acquire({ log: message => stderr(String(message)) })
+        result = await runtime.download(
+          {
+            replay_key: replayKey,
+            course_key: courseKey,
+            course_name: options.options.course || '',
+            title: options.options.title || ''
+          },
+          { log: message => stderr(String(message)) }
+        )
+      } catch (error) {
+        if (task) {
+          store.reportStage({
+            id: task.id,
+            stage: previousStage,
+            message: '下载失败',
+            error: error instanceof Error ? error.message : String(error),
+            nextAttemptAt: new Date(Date.now() + RETRY_DELAY_MS).toISOString()
+          })
+        }
+        throw error
+      }
+
+      const mediaPath = path.join(config.mediaRoot, replayKey, 'output', 'media.mp4')
+      const present = fs.existsSync(mediaPath)
+      if (task && present) {
+        store.reportStage({
+          id: task.id,
+          stage: 'downloaded',
+          message: '媒体就绪',
+          data: {
+            artifacts: { mediaPath, mediaChecksum: result?.artifacts?.mediaChecksum || '' },
+            runtime: result?.runtime || {}
+          }
+        })
+      }
+      emit({
+        replayKey,
+        mediaPath,
+        present,
+        task: task ? { id: task.id, from: previousStage, to: present ? 'downloaded' : previousStage } : null,
+        ...result
+      }, options)
+      return present ? 0 : 1
+    } finally {
+      store.close()
+    }
   }
 
   async function transcribe(options) {
@@ -138,18 +206,63 @@ export function createCommands(context) {
       '--lesson', lesson,
       '--chunk-minutes', String(options.options['chunk-minutes'] || config.asr.chunkMinutes)
     ]
-    const result = await runPython({
-      python: config.python,
-      args,
-      env: pythonEnvironment(config)
-    })
-    if (result.stdout) stderr(result.stdout.trim())
-    if (result.stderr) stderr(result.stderr.trim())
-    if (result.code !== 0) return result.code || 1
-    const summaryPath = path.join(outputDir, 'run-summary.json')
-    const summary = fs.existsSync(summaryPath) ? JSON.parse(fs.readFileSync(summaryPath, 'utf8')) : null
-    emit({ outputDir, transcript: path.join(outputDir, 'raw-transcript.md'), summary }, options)
-    return 0
+    const replayKey = options.options['replay-key'] || ''
+    const workerId = options.options['worker-id'] || defaultWorkerId()
+    const store = openStore(config.ledgerPath)
+    try {
+      const task = replayKey ? claimForRun(store, replayKey, workerId) : null
+      const previousStage = task?.stage || 'discovered'
+
+      const result = await runPython({
+        python: config.python,
+        args,
+        env: pythonEnvironment(config)
+      })
+      if (result.stdout) stderr(result.stdout.trim())
+      if (result.stderr) stderr(result.stderr.trim())
+
+      const summaryPath = path.join(outputDir, 'run-summary.json')
+      const summary = fs.existsSync(summaryPath) ? JSON.parse(fs.readFileSync(summaryPath, 'utf8')) : null
+      const transcriptPath = path.join(outputDir, 'raw-transcript.md')
+      const produced = result.code === 0 && fs.existsSync(transcriptPath)
+
+      if (task) {
+        if (produced) {
+          store.reportStage({
+            id: task.id,
+            stage: 'transcript_ready',
+            message: '转录完成',
+            data: {
+              artifacts: { transcriptPath, summaryPath, chunkCount: summary?.chunkCount ?? null },
+              runtime: {
+                videoDurationSeconds: summary?.videoDurationSeconds ?? null,
+                sentenceCount: summary?.sentenceCount ?? null,
+                estimatedCostCny: summary?.estimatedCostCnyBeforeFreeQuota ?? null
+              }
+            }
+          })
+        } else {
+          store.reportStage({
+            id: task.id,
+            stage: previousStage,
+            message: '转录失败',
+            error: result.stderr?.trim() || `python 退出码 ${result.code}`,
+            nextAttemptAt: new Date(Date.now() + RETRY_DELAY_MS).toISOString()
+          })
+        }
+      }
+
+      emit({
+        outputDir,
+        transcript: transcriptPath,
+        produced,
+        task: task ? { id: task.id, from: previousStage, to: produced ? 'transcript_ready' : previousStage } : null,
+        summary
+      }, options)
+      return produced ? 0 : (result.code || 1)
+    } finally {
+      store.close()
+    }
   }
 
   return { doctor, discover, download, transcribe, status }
@@ -165,8 +278,11 @@ export const USAGE = `用法：course <命令> [选项]
                                            登录教学网，列出本学期课程与课堂实录
   download   --course-key <键> --replay-key <键> [--course <名称>] [--title <标题>]
                                            下载一条回放的媒体（HLS 分片 → MP4）
-  transcribe --media <文件> --course <名称> --lesson <课次> [--chunk-minutes <分钟>] [--output-dir <目录>]
+  transcribe --media <文件> --course <名称> --lesson <课次> [--replay-key <键>] [--chunk-minutes <分钟>] [--output-dir <目录>]
                                            调用 Paraformer 转录（分片 + R2 中转 + 断点续跑）
+
+账本：download / transcribe 若带 --replay-key 且账本中已有该回放，会先领取任务，
+成功后推进阶段；失败则记录原因并退避 5 分钟。账本没有该回放时按独立运行处理。
 
 通用选项：
   --json                                   以 JSON 输出（默认即为 JSON）

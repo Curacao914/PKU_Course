@@ -35,6 +35,20 @@ test('discoverReplays is idempotent and never resets progress', () => {
   db.close()
 })
 
+test('a partial rediscovery fills gaps instead of wiping stored fields', () => {
+  const db = ledger()
+  db.discoverReplays([REPLAY])
+  // 只带部分字段的重复登记（例如另一次扫描只返回了课程名）
+  db.discoverReplays([{ replay_key: 'replay-abc', course_key: 'course-1', course_name: '刑法分论（新）' }])
+
+  const task = db.getTask('replay-abc')
+  assert.equal(task.course_name, '刑法分论（新）', '新值应当覆盖')
+  assert.equal(task.title, REPLAY.title, '未提供的字段不得被清空')
+  assert.equal(task.teacher, REPLAY.teacher)
+  assert.equal(task.starts_at_text, REPLAY.starts_at_text)
+  db.close()
+})
+
 test('discoverReplays rejects incomplete records', () => {
   const db = ledger()
   assert.throws(() => db.discoverReplays([{ replay_key: 'x' }]), /需要 replay_key 与 course_key/)
@@ -64,6 +78,35 @@ test('claimNext requires a worker id and returns null when nothing is actionable
   const db = ledger()
   assert.throws(() => db.claimNext({}), /需要 workerId/)
   assert.equal(db.claimNext({ workerId: 'w1' }), null)
+  db.close()
+})
+
+test('claimTask targets one replay and explains every refusal', () => {
+  const db = ledger()
+  db.discoverReplays([REPLAY])
+  const t0 = '2026-09-25T00:00:00.000Z'
+
+  assert.equal(db.claimTask({ replayKey: 'nope', workerId: 'w1' }).reason, 'not_found')
+
+  const ok = db.claimTask({ replayKey: 'replay-abc', workerId: 'w1', now: t0 })
+  assert.equal(ok.claimed, true)
+  assert.equal(ok.task.claimed_by, 'w1')
+
+  assert.equal(db.claimTask({ replayKey: 'replay-abc', workerId: 'w2', now: t0 }).reason, 'leased')
+
+  const task = ok.task
+  db.reportStage({ id: task.id, stage: 'downloaded', nextAttemptAt: '2026-09-25T00:05:00.000Z' })
+  assert.equal(
+    db.claimTask({ replayKey: 'replay-abc', workerId: 'w1', now: '2026-09-25T00:01:00.000Z' }).reason,
+    'backoff'
+  )
+  assert.equal(
+    db.claimTask({ replayKey: 'replay-abc', workerId: 'w1', now: '2026-09-25T00:06:00.000Z' }).claimed,
+    true
+  )
+
+  db.reportStage({ id: task.id, stage: 'completed' })
+  assert.equal(db.claimTask({ replayKey: 'replay-abc', workerId: 'w1' }).reason, 'terminal:completed')
   db.close()
 })
 

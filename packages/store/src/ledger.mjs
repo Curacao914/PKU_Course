@@ -41,10 +41,11 @@ export function openLedger(databasePath = ':memory:', options = {}) {
                          stage, artifacts, runtime, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, 'discovered', ?, ?, ?, ?)
       ON CONFLICT (replay_key) DO UPDATE SET
-        course_name = excluded.course_name,
-        title = excluded.title,
-        starts_at_text = excluded.starts_at_text,
-        teacher = excluded.teacher,
+        -- 空值只补不覆盖：一次只带了部分字段的重复登记，不得把已存的标题/教师清空
+        course_name = COALESCE(NULLIF(excluded.course_name, ''), tasks.course_name),
+        title = COALESCE(NULLIF(excluded.title, ''), tasks.title),
+        starts_at_text = COALESCE(NULLIF(excluded.starts_at_text, ''), tasks.starts_at_text),
+        teacher = COALESCE(NULLIF(excluded.teacher, ''), tasks.teacher),
         updated_at = excluded.updated_at
     `),
     findByReplayKey: db.prepare('SELECT * FROM tasks WHERE replay_key = ?'),
@@ -180,6 +181,36 @@ export function openLedger(databasePath = ':memory:', options = {}) {
         const result = statements.claim.run(workerId, leaseUntil, at, at, candidate.id, at)
         if (result.changes === 0) return null
         return this.getTask(candidate.replay_key)
+      })
+    },
+
+    /**
+     * 领取一条指定回放。
+     *
+     * 手动跑单节课时必须能精确指定，不能"领到哪条算哪条"。
+     * 语义与 claimNext 一致：仅当阶段可执行且租约空闲时才会成功。
+     */
+    claimTask({ replayKey, workerId, leaseSeconds = 900, now } = {}) {
+      if (!workerId) throw new Error('领取任务需要 workerId')
+      const key = String(replayKey || '').trim()
+      if (!key) throw new Error('领取任务需要 replayKey')
+      const at = nowIso(now)
+      const leaseUntil = new Date(new Date(at).getTime() + leaseSeconds * 1000).toISOString()
+      return transaction(() => {
+        const task = hydrate(statements.findByReplayKey.get(key))
+        if (!task) return { claimed: false, reason: 'not_found', task: null }
+        if (!ACTIONABLE_STAGES.includes(task.stage)) {
+          return { claimed: false, reason: `terminal:${task.stage}`, task }
+        }
+        if (task.lease_expires_at && task.lease_expires_at > at) {
+          return { claimed: false, reason: 'leased', task }
+        }
+        if (task.next_attempt_at && task.next_attempt_at > at) {
+          return { claimed: false, reason: 'backoff', task }
+        }
+        const result = statements.claim.run(workerId, leaseUntil, at, at, task.id, at)
+        if (result.changes === 0) return { claimed: false, reason: 'leased', task }
+        return { claimed: true, reason: 'claimed', task: this.getTask(key) }
       })
     },
 
