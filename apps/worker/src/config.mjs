@@ -40,6 +40,9 @@ export function resolveWorkerConfig(env = process.env, options = {}) {
     // 开始下载前的磁盘下限：一节课媒体有 1—2G 峰值，且 swap 与数据同盘，
     // 写满不只是下不了课，而是整机开始出问题。
     minFreeBytes: Number(env.COURSE_WORKER_MIN_FREE_BYTES || DEFAULT_MIN_FREE_BYTES),
+    // 转写成功后是否保留原始媒体。默认删除：一节课 600MB—2GB，
+    // 全部留着会很快吃满盘，而视频本来就在教学平台上，转录稿才是要留的东西。
+    keepMedia: env.COURSE_KEEP_MEDIA === '1',
     limits: resolveAcquisitionLimits(env),
     ai: {
       apiKey: env.COURSE_AI_API_KEY || env.SCHEDULE_AI_API_KEY || env.OPENAI_API_KEY || '',

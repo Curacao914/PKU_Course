@@ -793,6 +793,72 @@ test('transcribe advances the ledger task to transcript_ready', async () => {
   assert.equal(stored.runtime.sentenceCount, 42)
 })
 
+test('transcribe deletes the media and fragments once the transcript exists', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const replayDir = path.join(dir, 'replays', 'replay-1')
+  const media = path.join(replayDir, 'output', 'media.mp4')
+  const fragments = path.join(replayDir, 'fragments', 'primary')
+  fs.mkdirSync(path.dirname(media), { recursive: true })
+  fs.mkdirSync(fragments, { recursive: true })
+  fs.writeFileSync(media, Buffer.alloc(2048))
+  fs.writeFileSync(path.join(fragments, 'segment-000001.ts'), Buffer.alloc(4096))
+
+  const outputDir = path.join(replayDir, 'transcript')
+  const { deps, lines } = harness({
+    runPython: async payload => {
+      const target = payload.args[payload.args.indexOf('--output-dir') + 1]
+      fs.mkdirSync(target, { recursive: true })
+      fs.writeFileSync(path.join(target, 'raw-transcript.md'), '[00:00:01 – 00:00:03] 正文')
+      fs.writeFileSync(path.join(target, 'run-summary.json'), JSON.stringify({ chunkCount: 1, sentenceCount: 1 }))
+      return { code: 0, stdout: '', stderr: '' }
+    }
+  })
+
+  const code = await runCli([
+    'transcribe', '--media', media, '--course', '刑法分论', '--lesson', '第1-2节', '--output-dir', outputDir
+  ], deps)
+  const payload = parse(lines.at(-1))
+
+  assert.equal(code, 0)
+  assert.equal(payload.mediaCleanup.removedBytes, 2048 + 4096)
+  assert.equal(fs.existsSync(media), false, '媒体应被删除')
+  assert.equal(fs.existsSync(path.join(replayDir, 'fragments')), false, '分片目录应被删除')
+  assert.equal(fs.existsSync(path.join(outputDir, 'raw-transcript.md')), true, '转录稿必须保留')
+})
+
+test('COURSE_KEEP_MEDIA=1 keeps the media for a re-run', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const media = path.join(dir, 'replays', 'replay-1', 'output', 'media.mp4')
+  fs.mkdirSync(path.dirname(media), { recursive: true })
+  fs.writeFileSync(media, Buffer.alloc(1024))
+
+  const { deps, lines } = harness({
+    runPython: async payload => {
+      const target = payload.args[payload.args.indexOf('--output-dir') + 1]
+      fs.mkdirSync(target, { recursive: true })
+      fs.writeFileSync(path.join(target, 'raw-transcript.md'), '正文')
+      return { code: 0, stdout: '', stderr: '' }
+    }
+  })
+  await runCli(
+    ['transcribe', '--media', media, '--course', 'c', '--lesson', 'l'],
+    { ...deps, env: { ...deps.env, COURSE_KEEP_MEDIA: '1' } }
+  )
+  assert.equal(fs.existsSync(media), true, '显式保留时不得删除')
+  assert.equal(parse(lines.at(-1)).mediaCleanup, null)
+})
+
+test('a failed transcription keeps the media so it can be retried', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const media = path.join(dir, 'replays', 'replay-1', 'output', 'media.mp4')
+  fs.mkdirSync(path.dirname(media), { recursive: true })
+  fs.writeFileSync(media, Buffer.alloc(1024))
+
+  const { deps } = harness({ runPython: async () => ({ code: 3, stdout: '', stderr: 'ASR down' }) })
+  await runCli(['transcribe', '--media', media, '--course', 'c', '--lesson', 'l'], deps)
+  assert.equal(fs.existsSync(media), true, '失败时必须保留媒体，否则重试要重新下载几 GB')
+})
+
 test('transcribe refuses a missing media file and propagates worker failures', async () => {
   const { deps, errors } = harness()
   assert.equal(await runCli(['transcribe', '--media', '/nope/missing.mp4', '--course', 'c', '--lesson', 'l'], deps), 1)

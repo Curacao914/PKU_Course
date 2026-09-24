@@ -74,6 +74,37 @@ export function createCommands(context) {
   }
 
   /**
+   * 删除一节课的原始媒体与 HLS 分片，保留转录稿。
+   *
+   * 只删我们自己下载的东西（media.mp4 与 fragments 目录），且限定在该回放的
+   * 目录之内——不做"按文件名模式删除"这种会误伤的操作。
+   */
+  function cleanupMedia(mediaPath) {
+    const replayDir = path.dirname(path.dirname(mediaPath))   // <replay>/output/media.mp4 → <replay>
+    const targets = [mediaPath, path.join(replayDir, 'fragments')]
+    let removedBytes = 0
+    const removed = []
+    for (const target of targets) {
+      if (!fs.existsSync(target)) continue
+      removedBytes += directorySize(target)
+      fs.rmSync(target, { recursive: true, force: true })
+      removed.push(path.relative(replayDir, target))
+    }
+    return { removed, removedBytes }
+  }
+
+  function directorySize(target) {
+    const stat = fs.statSync(target)
+    if (stat.isFile()) return stat.size
+    let total = 0
+    for (const entry of fs.readdirSync(target, { withFileTypes: true })) {
+      const child = path.join(target, entry.name)
+      total += entry.isDirectory() ? directorySize(child) : fs.statSync(child).size
+    }
+    return total
+  }
+
+  /**
    * 下载前的磁盘检查。放在真正开始拉流之前，而不是等写失败——
    * 一节课媒体 1—2G，中途失败会留下半截分片还要清理。
    */
@@ -831,6 +862,16 @@ export function createCommands(context) {
       const transcriptPath = path.join(outputDir, 'raw-transcript.md')
       const produced = result.code === 0 && fs.existsSync(transcriptPath)
 
+      // 转写成功即清理原始媒体与分片。视频在教学平台本来就有，留着只会吃满盘；
+      // 转录稿与后续笔记才是要长期保存的东西。失败时保留以便重试。
+      let cleanup = null
+      if (produced && !config.keepMedia) {
+        cleanup = cleanupMedia(media)
+        if (cleanup.removedBytes > 0) {
+          stderr(`已清理媒体与分片，释放 ${formatBytes(cleanup.removedBytes)}`)
+        }
+      }
+
       if (task) {
         if (produced) {
           store.reportStage({
@@ -838,7 +879,13 @@ export function createCommands(context) {
             stage: 'transcript_ready',
             message: '转录完成',
             data: {
-              artifacts: { transcriptPath, summaryPath, chunkCount: summary?.chunkCount ?? null },
+              artifacts: {
+                transcriptPath,
+                summaryPath,
+                chunkCount: summary?.chunkCount ?? null,
+                mediaPath: cleanup ? '' : media,
+                mediaCleaned: Boolean(cleanup)
+              },
               runtime: {
                 videoDurationSeconds: summary?.videoDurationSeconds ?? null,
                 sentenceCount: summary?.sentenceCount ?? null,
@@ -861,6 +908,7 @@ export function createCommands(context) {
         outputDir,
         transcript: transcriptPath,
         produced,
+        mediaCleanup: cleanup,
         task: task ? { id: task.id, from: previousStage, to: produced ? 'transcript_ready' : previousStage } : null,
         summary
       }, options)
