@@ -30,11 +30,29 @@ import {
   writeJsonAtomic
 } from './hls-core.mjs'
 
-const START_URL = process.env.COURSE_START_URL || 'https://course.pku.edu.cn/'
-const CONCURRENCY = Math.max(1, Math.min(8, Number(process.env.COURSE_DOWNLOAD_CONCURRENCY || 6)))
-const FETCH_ATTEMPTS = Math.max(1, Math.min(8, Number(process.env.COURSE_FETCH_ATTEMPTS || 4)))
-const SEGMENT_TIMEOUT_MS = Math.max(10_000, Math.min(180_000, Number(process.env.COURSE_SEGMENT_TIMEOUT_MS || 90_000)))
-const PROGRESS_EVERY = Math.max(1, Math.min(100, Number(process.env.COURSE_DOWNLOAD_PROGRESS_EVERY || 5)))
+// 限额在调用时解析，而不是在 import 时固化。
+//
+// 旧实现把环境变量读进模块顶层 const，带来两个问题：
+//   1. import 之后再设置 process.env（先加载环境文件、再加载本模块）不会生效，
+//      调用方必须先 import 环境加载器，形成隐式的顺序依赖；
+//   2. 超时、并发无法在测试或单次运行中被覆盖。
+// 顺带修掉 Number('abc') → NaN 会静默传播进 Math.max/min 的问题。
+function clampNumber(value, fallback, min, max) {
+  const raw = String(value ?? '').trim()
+  const parsed = raw === '' ? Number.NaN : Number(raw)
+  const number = Number.isFinite(parsed) ? parsed : fallback
+  return Math.max(min, Math.min(max, number))
+}
+
+export function resolveAcquisitionLimits(env = process.env) {
+  return {
+    startUrl: env.COURSE_START_URL || 'https://course.pku.edu.cn/',
+    concurrency: clampNumber(env.COURSE_DOWNLOAD_CONCURRENCY, 6, 1, 8),
+    fetchAttempts: clampNumber(env.COURSE_FETCH_ATTEMPTS, 4, 1, 8),
+    segmentTimeoutMs: clampNumber(env.COURSE_SEGMENT_TIMEOUT_MS, 90_000, 10_000, 180_000),
+    progressEvery: clampNumber(env.COURSE_DOWNLOAD_PROGRESS_EVERY, 5, 1, 100)
+  }
+}
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
@@ -251,7 +269,7 @@ async function waitPortal(context, timeout = 90_000) {
 }
 
 async function ensureLoggedIn(context, page, credentials) {
-  await page.goto(START_URL, { waitUntil: 'domcontentloaded', timeout: 90_000 })
+  await page.goto(resolveAcquisitionLimits().startUrl, { waitUntil: 'domcontentloaded', timeout: 90_000 })
   await page.waitForTimeout(1000)
   for (const candidate of context.pages()) {
     if (await isPortal(candidate)) return { page: candidate, mode: 'existing-session' }
@@ -412,9 +430,10 @@ async function authHeaders(context, capture, rawUrl, range = null) {
 
 async function fetchAuthenticated(context, capture, rawUrl, options = {}) {
   let lastError = null
-  for (let attempt = 1; attempt <= FETCH_ATTEMPTS; attempt += 1) {
+  const { fetchAttempts, segmentTimeoutMs } = resolveAcquisitionLimits()
+  for (let attempt = 1; attempt <= fetchAttempts; attempt += 1) {
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), options.timeoutMs || SEGMENT_TIMEOUT_MS)
+    const timer = setTimeout(() => controller.abort(), options.timeoutMs || segmentTimeoutMs)
     try {
       const response = await fetch(rawUrl, {
         headers: await authHeaders(context, capture, rawUrl, options.range),
@@ -428,7 +447,7 @@ async function fetchAuthenticated(context, capture, rawUrl, options = {}) {
     } catch (error) {
       clearTimeout(timer)
       lastError = error
-      if (attempt < FETCH_ATTEMPTS) await sleep(Math.min(8000, 500 * 2 ** (attempt - 1)))
+      if (attempt < fetchAttempts) await sleep(Math.min(8000, 500 * 2 ** (attempt - 1)))
     }
   }
   const error = new Error(`媒体请求多次失败：${lastError instanceof Error ? lastError.message : String(lastError)}`)
@@ -492,6 +511,7 @@ async function downloadResource(context, capture, resource, targetPath) {
 
 async function runPool(jobs, concurrency, worker, heartbeat, log) {
   let cursor = 0
+  const { progressEvery } = resolveAcquisitionLimits()
   let done = 0
   async function runner() {
     while (true) {
@@ -499,7 +519,7 @@ async function runPool(jobs, concurrency, worker, heartbeat, log) {
       if (index >= jobs.length) return
       await worker(jobs[index])
       done += 1
-      if (done === jobs.length || done % PROGRESS_EVERY === 0) log(`HLS_PROGRESS ${done}/${jobs.length}`)
+      if (done === jobs.length || done % progressEvery === 0) log(`HLS_PROGRESS ${done}/${jobs.length}`)
       if (heartbeat && done % 20 === 0) await heartbeat()
     }
   }
@@ -677,6 +697,7 @@ export function createValidatedAcquisitionRuntime(input = {}) {
   }
 
   async function download(task, runtime = {}) {
+    const limits = resolveAcquisitionLimits()
     const replayKeyValue = String(task.replay_key || '')
     const courseKeyValue = String(task.course_key || '')
     if (!replayKeyValue || !courseKeyValue) throw new Error('任务缺少 replay_key 或 course_key')
@@ -742,7 +763,7 @@ export function createValidatedAcquisitionRuntime(input = {}) {
       lessonName: safeName(`${task.course_name}-${task.title}`),
       playlistFingerprint,
       tracks,
-      concurrency: CONCURRENCY
+      concurrency: limits.concurrency
     })
     assertStateHasNoSecrets(safeState)
     const statePath = path.join(taskRoot, 'state.json')
@@ -768,11 +789,11 @@ export function createValidatedAcquisitionRuntime(input = {}) {
       downloadedResources,
       reusedResources,
       bytes: resourceBytes,
-      concurrency: CONCURRENCY,
+      concurrency: limits.concurrency,
       updatedAt: new Date().toISOString()
     })
     writeProgress('downloading')
-    await runPool(jobs, CONCURRENCY, async ({ track, resource }) => {
+    await runPool(jobs, limits.concurrency, async ({ track, resource }) => {
       const result = await downloadResource(
         browser.context,
         capture.state,
