@@ -77,12 +77,9 @@ export function createCommands(context) {
   }
 
   function emit(payload, options) {
-    const text = JSON.stringify(payload, null, 2)
-    if (options.flags.has('json')) {
-      stdout(text)
-      return
-    }
-    stdout(text)
+    // cycle 会调用这些子命令；给它一个静默模式，避免同一条链路上打出多份 JSON
+    if (options?.quiet) return
+    stdout(JSON.stringify(payload, null, 2))
   }
 
   async function doctor(options = { flags: new Set() }) {
@@ -118,7 +115,7 @@ export function createCommands(context) {
   }
 
   async function discover(options) {
-    const runtime = await acquire({ log: message => stderr(String(message)) })
+    const runtime = await acquire({ log: message => stderr(String(message)), config })
     const result = await runtime.discover({
       courseName: options.options.course || '',
       courseKey: options.options['course-key'] || ''
@@ -413,6 +410,135 @@ export function createCommands(context) {
     }
   }
 
+  /**
+   * 一轮完整链路：扫描 → 逐条推进各阶段 → 投递通知。
+   *
+   * 它不自己实现任何一步，只是按账本里的阶段调用既有命令：每个阶段成功就推进，
+   * 失败就由账本记录原因与退避时间，下一轮从最近成功的阶段继续。
+   * 因此中断、部分失败、重复运行都是安全的。
+   */
+  async function cycle(options) {
+    const workerId = options.options['worker-id'] || `cycle:${os.hostname()}`
+    const maxTasks = Number(options.options['max-tasks'] || 5)
+    const quiet = { ...options, quiet: true }
+    const summary = { workerId, startedAt: new Date().toISOString(), discovered: null, tasks: [], notification: null, errors: [] }
+
+    // 1. 扫描并登记（幂等）
+    try {
+      await discover({ ...quiet, options: { ...options.options } })
+    } catch (error) {
+      summary.errors.push({ step: 'discover', message: error instanceof Error ? error.message : String(error) })
+    }
+
+    // 2. 逐条推进：每次领取一条，按当前阶段调用对应命令
+    const stageCommands = {
+      discovered: 'download',
+      queued: 'download',
+      downloading: 'download',
+      downloaded: 'transcribe',
+      transcribing: 'transcribe',
+      transcript_ready: 'notes',
+      building_textpack: 'notes',
+      writing: 'notes',
+      notes_ready: 'publish',
+      publishing: 'publish'
+    }
+
+    for (let index = 0; index < maxTasks; index += 1) {
+      const store = openStore(config.ledgerPath)
+      let task = null
+      try {
+        task = store.claimNext({ workerId, leaseSeconds: 3600 })
+      } finally {
+        store.close()
+      }
+      if (!task) break
+
+      const command = stageCommands[task.stage]
+      if (!command) {
+        // 可领取却没有对应命令，说明阶段映射与账本脱节——这类问题必须浮出来，
+        // 不能静默跳过并让整轮看起来成功。
+        summary.tasks.push({
+          replayKey: task.replay_key, stage: task.stage, action: 'none', ok: false,
+          note: '该阶段没有对应的处理命令'
+        })
+        continue
+      }
+
+      const commandOptions = {
+        ...quiet,
+        options: {
+          ...options.options,
+          'replay-key': task.replay_key,
+          'course-key': task.course_key,
+          course: task.course_name,
+          title: task.title,
+          lesson: task.title,
+          'worker-id': workerId
+        }
+      }
+      // 各阶段需要的前置产物路径从账本里取
+      const artifacts = task.artifacts || {}
+      if (command === 'transcribe') commandOptions.options.media = artifacts.mediaPath
+      if (command === 'notes') commandOptions.options.transcript = artifacts.transcriptPath
+      if (command === 'publish') commandOptions.options.from = path.dirname(artifacts.notePath || '')
+
+      const missing = command === 'transcribe' ? !commandOptions.options.media
+        : command === 'notes' ? !commandOptions.options.transcript
+          : command === 'publish' ? !commandOptions.options.from
+            : false
+      if (missing) {
+        // 跳过不是成功：前置产物缺失意味着上一阶段的结果没落下来，需要人工看一眼
+        summary.tasks.push({
+          replayKey: task.replay_key, stage: task.stage, action: command, ok: false,
+          note: '缺少前置产物，跳过'
+        })
+        continue
+      }
+
+      try {
+        const code = await (command === 'download' ? download(commandOptions)
+          : command === 'transcribe' ? transcribe(commandOptions)
+            : command === 'notes' ? notes(commandOptions)
+              : publish(commandOptions))
+        summary.tasks.push({ replayKey: task.replay_key, stage: task.stage, action: command, ok: code === 0 })
+      } catch (error) {
+        summary.tasks.push({
+          replayKey: task.replay_key, stage: task.stage, action: command, ok: false,
+          error: error instanceof Error ? error.message : String(error)
+        })
+      }
+    }
+
+    // 3. 投递已排队的通知
+    try {
+      const store = openStore(config.ledgerPath)
+      try {
+        const sender = injectedSender || createWechatSender({
+          openclawBin: config.notify.openclawBin,
+          openclawHome: config.notify.openclawHome,
+          openclawStateDir: config.notify.openclawStateDir,
+          target: config.notify.target
+        })
+        const delivered = await runDeliveryCycle({
+          store, sender,
+          publicSiteUrl: config.notify.publicUrl,
+          maxAttempts: config.notify.maxAttempts,
+          workerId: `${workerId}:notify`
+        })
+        summary.notification = { sent: delivered.sent, retried: delivered.retried, failed: delivered.failed }
+      } finally {
+        store.close()
+      }
+    } catch (error) {
+      summary.errors.push({ step: 'notify', message: error instanceof Error ? error.message : String(error) })
+    }
+
+    summary.finishedAt = new Date().toISOString()
+    emit(summary, options)
+    return summary.errors.length || summary.tasks.some(task => task.ok === false) ? 1 : 0
+  }
+
   async function status(options) {
     const snapshot = withLedger(store => ({
       path: store.path,
@@ -433,7 +559,7 @@ export function createCommands(context) {
       const previousStage = task?.stage || 'discovered'
       let result
       try {
-        const runtime = await acquire({ log: message => stderr(String(message)) })
+        const runtime = await acquire({ log: message => stderr(String(message)), config })
         result = await runtime.download(
           {
             replay_key: replayKey,
@@ -557,7 +683,7 @@ export function createCommands(context) {
     }
   }
 
-  return { doctor, discover, download, transcribe, notes, publish, notify, status }
+  return { doctor, discover, download, transcribe, notes, publish, notify, cycle, status }
 }
 
 export const USAGE = `用法：course <命令> [选项]
@@ -579,6 +705,8 @@ export const USAGE = `用法：course <命令> [选项]
                                            把笔记发布到站点，内容变化时排入一条微信通知
   notify     [--probe] [--loop] [--max-items <条数>]
                                            把账本里排队的通知发到微信；--probe 只验证通道不发消息
+  cycle      [--max-tasks <条数>] [--course <名称>]
+                                           一轮完整链路：扫描 → 逐条推进各阶段 → 投递通知
 
 账本：download / transcribe 若带 --replay-key 且账本中已有该回放，会先领取任务，
 成功后推进阶段；失败则记录原因并退避 5 分钟。账本没有该回放时按独立运行处理。

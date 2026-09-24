@@ -110,6 +110,24 @@ test('claimTask targets one replay and explains every refusal', () => {
   db.close()
 })
 
+test('the same worker may renew its own lease instead of being locked out', () => {
+  const db = ledger()
+  db.discoverReplays([REPLAY])
+  const t0 = '2026-09-25T00:00:00.000Z'
+
+  const first = db.claimTask({ replayKey: 'replay-abc', workerId: 'w1', now: t0 })
+  assert.equal(first.claimed, true)
+
+  // 编排循环会先领取，再调用内部还会领取一次的阶段命令
+  const again = db.claimTask({ replayKey: 'replay-abc', workerId: 'w1', now: t0 })
+  assert.equal(again.claimed, true, '同一 worker 重复领取应视为续租')
+  assert.equal(again.task.claimed_by, 'w1')
+
+  // 但仍然挡住别人
+  assert.equal(db.claimTask({ replayKey: 'replay-abc', workerId: 'w2', now: t0 }).reason, 'leased')
+  db.close()
+})
+
 test('heartbeat only extends the lease held by the same worker', () => {
   const db = ledger()
   db.discoverReplays([REPLAY])
@@ -159,6 +177,16 @@ test('terminal stages are never claimed again and errors survive', () => {
   const stored = db.getTask('replay-abc')
   assert.equal(stored.last_error, 'AUTH_EXPIRED')
   assert.equal(db.countTasks().find(row => row.stage === 'needs_attention').n, 1)
+  db.close()
+})
+
+test('a published task is no longer claimed by the worker', () => {
+  const db = ledger()
+  db.discoverReplays([REPLAY])
+  const task = db.claimNext({ workerId: 'w1' })
+  db.reportStage({ id: task.id, stage: 'published' })
+  assert.equal(db.claimNext({ workerId: 'w1' }), null, '发布完成后不应再被领取')
+  assert.equal(db.getTask('replay-abc').stage, 'published', '阶段本身保留，只是不再可领取')
   db.close()
 })
 

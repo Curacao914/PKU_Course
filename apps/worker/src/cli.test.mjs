@@ -475,6 +475,97 @@ test('notify sends queued deliveries and reports the counts', async () => {
   assert.equal(ledger.claimDelivery({ workerId: 'w', now: '2026-09-25T01:00:00.000Z' }), null, '发送后不再排队')
 })
 
+test('cycle drives one task through every stage and delivers the notification', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const model = fakeModel()
+  const sent = []
+  const sender = {
+    target: 'wxid_test',
+    probe: async () => ({ ok: true }),
+    send: async message => { sent.push(message); return { externalId: `wx-${sent.length}` } }
+  }
+
+  const { deps, lines, ledger } = harness({
+    callModel: model.callModel,
+    sender,
+    // 转录阶段：真实产出转录稿，路径由命令自己推导
+    runPython: async payload => {
+      const outputDir = payload.args[payload.args.indexOf('--output-dir') + 1]
+      fs.mkdirSync(outputDir, { recursive: true })
+      fs.writeFileSync(path.join(outputDir, 'raw-transcript.md'), '[00:00:01 – 00:00:05] 第一句\n[00:00:06 – 00:00:10] 第二句')
+      fs.writeFileSync(path.join(outputDir, 'run-summary.json'), JSON.stringify({ chunkCount: 1, sentenceCount: 2 }))
+      return { code: 0, stdout: '', stderr: '' }
+    }
+  })
+
+  const env = { ...deps.env, COURSE_WECHAT_TARGET: 'wxid_test', COURSE_WORKER_SCRATCH_DIR: dir }
+  const scratch = dir
+
+  // 媒体与转录产物预备好，让 cycle 从 downloaded 阶段开始推进
+  const mediaPath = path.join(scratch, 'replays', 'replay-1', 'output', 'media.mp4')
+  fs.mkdirSync(path.dirname(mediaPath), { recursive: true })
+  fs.writeFileSync(mediaPath, 'fake media')
+
+  ledger.discoverReplays([{ replay_key: 'replay-1', course_key: 'course-abc', course_name: '刑法分论', title: '第10-12节' }])
+  ledger.reportStage({
+    id: ledger.getTask('replay-1').id,
+    stage: 'downloaded',
+    data: { artifacts: { mediaPath } }
+  })
+
+  const code = await runCli(['cycle', '--max-tasks', '8'], { ...deps, env })
+  const summary = parse(lines.at(-1))
+
+  assert.equal(summary.tasks.length >= 3, true, `应推进多个阶段，实际 ${JSON.stringify(summary.tasks)}`)
+  assert.deepEqual(summary.tasks.map(task => task.action), ['transcribe', 'notes', 'publish'])
+  assert.equal(summary.tasks.every(task => task.ok === true), true)
+  assert.equal(summary.notification.sent, 1)
+  assert.equal(sent.length, 1)
+  assert.match(sent[0], /打开课程笔记|course\.law-tech\.dev/)
+  assert.equal(ledger.getTask('replay-1').stage, 'published')
+  assert.equal(code, 0)
+})
+
+test('cycle reports a missing prerequisite instead of crashing', async () => {
+  // 注入一个可用发送器，避免把「未配置微信」的错误混进这条断言
+  const okSender = { target: 'wxid', probe: async () => ({ ok: true }), send: async () => ({ externalId: 'x' }) }
+  const { deps, lines, ledger } = harness({ sender: okSender })
+  // 阶段是 transcript_ready，但没有 transcriptPath 产物
+  ledger.discoverReplays([{ replay_key: 'replay-1', course_key: 'course-abc' }])
+  ledger.reportStage({ id: ledger.getTask('replay-1').id, stage: 'transcript_ready' })
+
+  const code = await runCli(['cycle', '--max-tasks', '2'], deps)
+  const summary = parse(lines.at(-1))
+  assert.equal(summary.tasks[0].note, '缺少前置产物，跳过')
+  assert.equal(code, 1, '跳过不等于成功')
+  assert.equal(ledger.getTask('replay-1').stage, 'transcript_ready', '不得在缺产物时推进阶段')
+})
+
+test('cycle records a discovery failure and still finishes', async () => {
+  const okSender = { target: 'wxid', probe: async () => ({ ok: true }), send: async () => ({ externalId: 'x' }) }
+  const { deps, lines } = harness({
+    sender: okSender,
+    acquire: async () => ({ discover: async () => { throw new Error('AUTH_EXPIRED：教学网会话失效') } })
+  })
+  const code = await runCli(['cycle'], deps)
+  const summary = parse(lines.at(-1))
+  assert.deepEqual(summary.errors.map(item => item.step), ['discover'], '只记录发现问题，不应连带其它错误')
+  assert.match(summary.errors[0].message, /AUTH_EXPIRED/)
+  assert.equal(code, 1)
+})
+
+test('cycle does not spin on a finished task', async () => {
+  const okSender = { target: 'wxid', probe: async () => ({ ok: true }), send: async () => ({ externalId: 'x' }) }
+  const { deps, lines, ledger } = harness({ sender: okSender })
+  ledger.discoverReplays([{ replay_key: 'replay-1', course_key: 'course-abc' }])
+  ledger.reportStage({ id: ledger.getTask('replay-1').id, stage: 'published' })
+
+  const code = await runCli(['cycle', '--max-tasks', '5'], deps)
+  const summary = parse(lines.at(-1))
+  assert.deepEqual(summary.tasks, [], '已完成的任务不应被反复领取')
+  assert.equal(code, 0)
+})
+
 test('transcribe advances the ledger task to transcript_ready', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
   const media = path.join(dir, 'media.mp4')

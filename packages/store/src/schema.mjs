@@ -21,7 +21,13 @@ export const STAGES = [
   'needs_attention'
 ]
 
-/** 需要 worker 动手的阶段。completed / failed / needs_attention 是终态。 */
+/**
+ * 需要 worker 动手的阶段。
+ *
+ * 注意 `published` 与 `notifying` **不在**这里：发布完成后任务本身就没有后续工序了，
+ * 通知走的是独立的 deliveries 队列（已发送/待重试由它自己记账）。
+ * 把它们算作可领取会让 worker 反复领到同一条已完成的任务而空转。
+ */
 export const ACTIONABLE_STAGES = [
   'discovered',
   'queued',
@@ -29,11 +35,10 @@ export const ACTIONABLE_STAGES = [
   'downloaded',
   'transcribing',
   'transcript_ready',
+  'building_textpack',
   'writing',
   'notes_ready',
-  'publishing',
-  'published',
-  'notifying'
+  'publishing'
 ]
 
 export const TERMINAL_STAGES = ['completed', 'failed', 'needs_attention']

@@ -60,7 +60,7 @@ export function openLedger(databasePath = ':memory:', options = {}) {
     claim: db.prepare(`
       UPDATE tasks
       SET claimed_by = ?, lease_expires_at = ?, heartbeat_at = ?, attempts = attempts + 1, updated_at = ?
-      WHERE id = ? AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
+      WHERE id = ? AND (lease_expires_at IS NULL OR lease_expires_at <= ? OR claimed_by = ?)
     `),
     heartbeat: db.prepare(`
       UPDATE tasks SET lease_expires_at = ?, heartbeat_at = ?, updated_at = ?
@@ -208,13 +208,16 @@ export function openLedger(databasePath = ':memory:', options = {}) {
         if (!ACTIONABLE_STAGES.includes(task.stage)) {
           return { claimed: false, reason: `terminal:${task.stage}`, task }
         }
-        if (task.lease_expires_at && task.lease_expires_at > at) {
+        // 自己已经持有的租约：续租而不是拒绝。
+        // 编排循环会先领取再调用各阶段命令，命令内部还会再领一次；如果这里把
+        // 「自己持有」也当成冲突，链路在第一步就会失败。
+        if (task.lease_expires_at && task.lease_expires_at > at && task.claimed_by !== workerId) {
           return { claimed: false, reason: 'leased', task }
         }
         if (task.next_attempt_at && task.next_attempt_at > at) {
           return { claimed: false, reason: 'backoff', task }
         }
-        const result = statements.claim.run(workerId, leaseUntil, at, at, task.id, at)
+        const result = statements.claim.run(workerId, leaseUntil, at, at, task.id, at, workerId)
         if (result.changes === 0) return { claimed: false, reason: 'leased', task }
         return { claimed: true, reason: 'claimed', task: this.getTask(key) }
       })

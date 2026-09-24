@@ -1,0 +1,18 @@
+[Unit]
+Description=course.law-tech.dev 课程闭环一轮（扫描 → 各阶段推进 → 通知）
+Documentation=https://course.law-tech.dev
+After=network-online.target
+Wants=course-notify.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/course-runtime
+EnvironmentFile=-%h/.course-worker/env
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=OPENCLAW_BIN=%h/.local/bin/openclaw
+Environment=OPENCLAW_HOME=%h/.openclaw-candidate
+Environment=OPENCLAW_STATE_DIR=%h/.openclaw-candidate
+ExecStart=__NODE__ apps/worker/bin/course.mjs cycle --max-tasks 5
+TimeoutStartSec=3600
+StandardOutput=journal
+StandardError=journal

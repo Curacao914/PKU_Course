@@ -1,0 +1,15 @@
+[Unit]
+Description=定时执行课程闭环（每天 08:20 / 14:20 / 20:20）
+Documentation=https://course.law-tech.dev
+
+[Timer]
+# 与旧系统的节奏对齐：旧 GHA 是北京时间 08:00 与 20:00 扫媒体、00:30 写笔记。
+# 新系统的 cycle 一轮做完全部阶段，因此拆成三个固定时间点即可。
+OnCalendar=*-*-* 08,14,20:20:00
+# 机器停机错过的轮次在恢复后补跑一次，避免静默漏掉整天
+Persistent=true
+AccuracySec=1min
+Unit=course-cycle.service
+
+[Install]
+WantedBy=timers.target
