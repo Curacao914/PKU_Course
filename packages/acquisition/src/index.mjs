@@ -11,6 +11,14 @@ export {
 } from './disk.mjs'
 
 export {
+  acquireProfileLock,
+  clearStaleProfileLock,
+  entryExists,
+  isProcessAlive,
+  parseSingletonLock
+} from './profile-lock.mjs'
+
+export {
   REPLAY_IDENTITY_VERSION,
   assertNoSecrets,
   chooseCurrentCourses,

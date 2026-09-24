@@ -15,6 +15,7 @@ import {
   assertNoSecrets
 } from './platform-core.mjs'
 import { chooseLoginControls } from './login-core.mjs'
+import { acquireProfileLock, clearStaleProfileLock } from './profile-lock.mjs'
 import {
   assertStateHasNoSecrets,
   buildSafeState,
@@ -615,13 +616,39 @@ export function createValidatedAcquisitionRuntime(input = {}) {
 
   async function ensureBrowser() {
     if (context) return { context, page: portalPage }
-    context = await chromium.launchPersistentContext(profileDir, {
-      executablePath,
-      headless: input.headless ?? process.env.COURSE_HEADLESS !== '0',
-      acceptDownloads: false,
-      viewport: process.env.COURSE_HEADLESS === '0' ? null : { width: 1440, height: 900 },
-      args: process.env.COURSE_HEADLESS === '0' ? ['--start-maximized'] : []
+
+    // 跨进程互斥：定时任务与管理台手动触发可能同时想用同一个 profile，
+    // 与其让 Chrome 随机拒绝其中一个，不如在这里排队。
+    const lock = await acquireProfileLock(profileDir, {
+      timeoutMs: Math.max(10_000, Number(input.browserLockTimeoutMs || 120_000))
     })
+    if (!lock.acquired) {
+      throw new Error(
+        `浏览器 profile 被其他进程占用，等待 ${lock.waitedMs}ms 后仍未获得` +
+        (lock.owner ? `（持有者 pid=${lock.owner.pid}，自 ${lock.owner.at}）` : '')
+      )
+    }
+
+    try {
+      // 清掉上一次异常退出留下的 Singleton 锁；持有者仍活着时不会动它
+      const stale = clearStaleProfileLock(profileDir)
+      if (stale.cleared && stale.removed?.length) {
+        input.log?.(`清理陈旧的浏览器 profile 锁：${stale.removed.join(', ')}`)
+      }
+      context = await chromium.launchPersistentContext(profileDir, {
+        executablePath,
+        headless: input.headless ?? process.env.COURSE_HEADLESS !== '0',
+        acceptDownloads: false,
+        viewport: process.env.COURSE_HEADLESS === '0' ? null : { width: 1440, height: 900 },
+        args: process.env.COURSE_HEADLESS === '0' ? ['--start-maximized'] : []
+      })
+    } catch (error) {
+      lock.release()
+      throw error
+    }
+
+    // 浏览器关掉就放锁，避免进程正常结束却把锁留到超时
+    context.on('close', () => lock.release())
     portalPage = context.pages()[0] || await context.newPage()
     return { context, page: portalPage }
   }

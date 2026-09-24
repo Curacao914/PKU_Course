@@ -582,6 +582,102 @@ test('download refuses to start when free space is below the floor', async () =>
   assert.equal(lines.length, 0, '不应有任何成功输出')
 })
 
+test('verify reports every unmet prerequisite instead of pretending to run', async () => {
+  // 用一个没有任何凭据的环境：harness 默认会塞满凭据，掩盖"未配置"这条路径
+  const { deps, lines } = harness()
+  const code = await runCli(['verify'], { ...deps, env: {} })
+  const report = parse(lines.at(-1))
+
+  assert.equal(code, 1)
+  assert.equal(report.ready, false)
+  assert.deepEqual(report.criteria.map(item => item.ok), [true, false, false, false], '磁盘正常，三项凭据缺失')
+  assert.match(report.criteria[1].name, /教学网凭据/)
+  assert.match(report.criteria[3].name, /AI 凭据/)
+  assert.ok(report.hint, '应给出下一步提示')
+})
+
+test('verify runs a real cycle and asserts each acceptance criterion', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const model = fakeModel()
+  const sent = []
+  const sender = {
+    target: 'wxid', probe: async () => ({ ok: true }),
+    send: async message => { sent.push(message); return { externalId: 'wx-1' } }
+  }
+  const { deps, lines, ledger } = harness({
+    callModel: model.callModel,
+    sender,
+    runPython: async payload => {
+      const outputDir = payload.args[payload.args.indexOf('--output-dir') + 1]
+      fs.mkdirSync(outputDir, { recursive: true })
+      fs.writeFileSync(path.join(outputDir, 'raw-transcript.md'), '[00:00:01 – 00:00:05] 第一句\n[00:00:06 – 00:00:10] 第二句')
+      fs.writeFileSync(path.join(outputDir, 'run-summary.json'), JSON.stringify({ chunkCount: 1, sentenceCount: 2 }))
+      return { code: 0, stdout: '', stderr: '' }
+    }
+  })
+
+  const env = {
+    ...deps.env,
+    COURSE_WECHAT_TARGET: 'wxid_test',
+    COURSE_WORKER_SCRATCH_DIR: dir,
+    PKU_USERNAME: 'u', PKU_PASSWORD: 'p',
+    DASHSCOPE_API_KEY: 'sk-x', R2_ENDPOINT: 'https://x.r2.cloudflarestorage.com',
+    COURSE_AI_API_KEY: 'sk-ai'
+  }
+
+  // 预备一节课：媒体已下载，等转录
+  const mediaPath = path.join(dir, 'replays', 'replay-1', 'output', 'media.mp4')
+  fs.mkdirSync(path.dirname(mediaPath), { recursive: true })
+  fs.writeFileSync(mediaPath, 'fake media')
+  ledger.discoverReplays([{ replay_key: 'replay-1', course_key: 'course-abc', course_name: '刑法分论', title: '第10-12节' }])
+  ledger.reportStage({ id: ledger.getTask('replay-1').id, stage: 'downloaded', data: { artifacts: { mediaPath } } })
+
+  const code = await runCli(['verify', '--out', path.join(dir, 'site'), '--max-tasks', '8'], { ...deps, env })
+  const report = parse(lines.at(-1))
+
+  assert.equal(report.ready, true)
+  assert.equal(report.passed, true, JSON.stringify({ criteria: report.criteria, cycle: report.cycle.tasks, errors: report.cycle.errors }, null, 1))
+  assert.equal(report.criteria.every(item => item.ok), true)
+  assert.equal(code, 0)
+  assert.equal(sent.length, 1)
+
+  const published = report.criteria.find(item => item.name === '笔记已发布到站点')
+  assert.match(published.evidence, /站点索引 [1-9]/)
+  const delivered = report.criteria.find(item => item.name === '通知已投递到微信')
+  assert.match(delivered.evidence, /course-note:/)
+})
+
+test('a replay-key filter limits the cycle to exactly that lesson', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const okSender = { target: 'wxid', probe: async () => ({ ok: true }), send: async () => ({ externalId: 'x' }) }
+  const { deps, lines, ledger } = harness({ sender: okSender })
+
+  // 账本里有两节课，都等着处理
+  for (const key of ['replay-a', 'replay-b']) {
+    ledger.discoverReplays([{ replay_key: key, course_key: 'course-' + key, course_name: '刑法分论', title: key }])
+  }
+
+  const env = { ...deps.env, COURSE_WORKER_SCRATCH_DIR: dir }
+  await runCli(['cycle', '--replay-key', 'replay-b', '--max-tasks', '5'], { ...deps, env })
+  const summary = parse(lines.at(-1))
+
+  assert.deepEqual([...new Set(summary.tasks.map(task => task.replayKey))], ['replay-b'], '只应处理指定的那一条')
+  assert.equal(ledger.getTask('replay-a').stage, 'discovered', '未被指定的课次不得被推进')
+  assert.equal(ledger.getTask('replay-a').attempts, 0, '更不得消耗它的重试次数')
+})
+
+test('a replay-key filter reports why it could not claim', async () => {
+  const okSender = { target: 'wxid', probe: async () => ({ ok: true }), send: async () => ({ externalId: 'x' }) }
+  const { deps, lines, ledger } = harness({ sender: okSender })
+  ledger.discoverReplays([{ replay_key: 'replay-a', course_key: 'course-a' }])
+  ledger.reportStage({ id: ledger.getTask('replay-a').id, stage: 'completed' })
+
+  await runCli(['cycle', '--replay-key', 'replay-a'], deps)
+  const summary = parse(lines.at(-1))
+  assert.equal(summary.tasks[0].ok, false)
+  assert.match(summary.tasks[0].note, /未领取：terminal:completed/)
+})
+
 test('cycle writes a run summary and prunes old ones', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
   const runsDir = path.join(dir, 'runs')

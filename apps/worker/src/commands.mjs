@@ -57,6 +57,9 @@ export function createCommands(context) {
     })
   }
 
+  // 命令的返回值即退出码（CLI 约定），因此跨命令传递"上一轮摘要"需要单独的槽位
+  const state = { lastCycle: null }
+
   function withLedger(work) {
     const store = openStore(config.ledgerPath)
     try {
@@ -475,10 +478,14 @@ export function createCommands(context) {
       })
     }
 
-    // 1. 扫描并登记（幂等）；磁盘不足时跳过，避免登记完却下不动
+    // 1. 扫描并登记（幂等）；磁盘不足时跳过，避免登记完却下不动。
+    // 只传 course：discover 的 --out 是"目录清单文件"，与 publish 的站点目录同名不同义。
     if (space.ok) {
       try {
-        await discover({ ...quiet, options: { ...options.options } })
+        await discover({
+          ...quiet,
+          options: options.options.course ? { course: options.options.course } : {}
+        })
       } catch (error) {
         summary.errors.push({ step: 'discover', message: error instanceof Error ? error.message : String(error) })
       }
@@ -498,11 +505,26 @@ export function createCommands(context) {
       publishing: 'publish'
     }
 
+    // 指定 replay-key 时只处理这一条：验收与手动重跑都必须是"就这一节课"，
+    // 否则一次调用会顺着账本把多节课全跑一遍——而每节课都要真花钱转写。
+    const onlyReplay = String(options.options['replay-key'] || '').trim()
+
     for (let index = 0; space.ok && index < maxTasks; index += 1) {
       const store = openStore(config.ledgerPath)
       let task = null
       try {
-        task = store.claimNext({ workerId, leaseSeconds: 3600 })
+        if (onlyReplay) {
+          const claimed = store.claimTask({ replayKey: onlyReplay, workerId, leaseSeconds: 3600 })
+          task = claimed.claimed ? claimed.task : null
+          if (!claimed.claimed) {
+            summary.tasks.push({
+              replayKey: onlyReplay, stage: claimed.task?.stage || 'unknown', action: 'skip', ok: false,
+              note: `未领取：${claimed.reason}`
+            })
+          }
+        } else {
+          task = store.claimNext({ workerId, leaseSeconds: 3600 })
+        }
       } finally {
         store.close()
       }
@@ -519,27 +541,37 @@ export function createCommands(context) {
         continue
       }
 
-      const commandOptions = {
-        ...quiet,
-        options: {
-          ...options.options,
-          'replay-key': task.replay_key,
-          'course-key': task.course_key,
-          course: task.course_name,
-          title: task.title,
-          lesson: task.title,
-          'worker-id': workerId
+      const artifacts = task.artifacts || {}
+      const common = {
+        'replay-key': task.replay_key,
+        course: task.course_name,
+        'worker-id': workerId,
+        ...(options.options['prompt-version'] ? { 'prompt-version': options.options['prompt-version'] } : {})
+      }
+
+      // 每个子命令只拿它自己认识的参数。
+      // 早先是把 options.options 整体透传的，结果 --out 冲突：discover 把目录清单
+      // 写成"站点目录"那个路径上的一个文件，publish 再去建同名目录就 EEXIST。
+      // 同名旗标在不同命令里含义不同时，透传必然出这种事。
+      const perCommand = {
+        download: { ...common, 'course-key': task.course_key, title: task.title },
+        transcribe: { ...common, media: artifacts.mediaPath, lesson: task.title },
+        notes: { ...common, transcript: artifacts.transcriptPath, lesson: task.title },
+        publish: {
+          ...common,
+          from: path.dirname(artifacts.notePath || ''),
+          // 站点目录只在显式指定时才传，避免与 discover 的 --out 混淆
+          ...(options.options.out ? { out: options.options.out } : {})
         }
       }
-      // 各阶段需要的前置产物路径从账本里取
-      const artifacts = task.artifacts || {}
-      if (command === 'transcribe') commandOptions.options.media = artifacts.mediaPath
-      if (command === 'notes') commandOptions.options.transcript = artifacts.transcriptPath
-      if (command === 'publish') commandOptions.options.from = path.dirname(artifacts.notePath || '')
+      const commandOptions = {
+        ...quiet,
+        options: perCommand[command] || { ...common }
+      }
 
       const missing = command === 'transcribe' ? !commandOptions.options.media
         : command === 'notes' ? !commandOptions.options.transcript
-          : command === 'publish' ? !commandOptions.options.from
+          : command === 'publish' ? !artifacts.notePath
             : false
       if (missing) {
         // 跳过不是成功：前置产物缺失意味着上一阶段的结果没落下来，需要人工看一眼
@@ -603,8 +635,87 @@ export function createCommands(context) {
       stderr(`运行摘要写入失败（不影响本轮结果）：${error instanceof Error ? error.message : String(error)}`)
     }
 
+    state.lastCycle = summary
     emit(summary, options)
     return summary.exitCode
+  }
+
+  /**
+   * 验收：把「六步验收条件」变成可执行的检查，而不是文档里的一段话。
+   *
+   * 做法是先跑一轮真实 cycle，再对**结果**断言：任务是否真的走到了 published、
+   * 笔记文件是否真的存在、站点是否真的能打开、通知是否真的发出去了。
+   * 每一环都需要真实凭据与真实数据——没有 mock，也不会把"没跑"报成"通过"。
+   */
+  async function verify(options) {
+    const replayKey = options.options['replay-key'] || ''
+    const criteria = []
+    const check = (name, ok, evidence) => criteria.push({ name, ok: Boolean(ok), evidence })
+
+    // 前置条件
+    const space = checkFreeSpace({ path: config.scratchRoot, minFreeBytes: config.minFreeBytes })
+    check('磁盘可用空间充足', space.ok, `${formatBytes(space.freeBytes)} / 下限 ${formatBytes(space.minFreeBytes)}`)
+    check('教学网凭据已配置', Boolean(config.sources.PKU_USERNAME && config.sources.PKU_PASSWORD), 'PKU_USERNAME / PKU_PASSWORD')
+    check('转录凭据已配置', Boolean(config.sources.DASHSCOPE_API_KEY && config.sources.R2_ENDPOINT), 'DASHSCOPE_API_KEY / R2_*')
+    check('AI 凭据已配置', Boolean(config.ai.apiKey), 'COURSE_AI_API_KEY')
+    const ready = criteria.every(item => item.ok)
+    if (!ready) {
+      emit({ ready: false, criteria, hint: '补齐上面未通过的前置条件后重新运行' }, options)
+      return 1
+    }
+
+    // 真实跑一轮（命令返回退出码，摘要从共享槽位取）
+    const cycleCode = await cycle({ ...options, quiet: true, options: { ...options.options, 'replay-key': replayKey } })
+    const cycleResult = state.lastCycle || {}
+    void cycleCode
+
+    // 对结果断言
+    const store = openStore(config.ledgerPath)
+    let tasks = []
+    let deliveries = []
+    try {
+      tasks = store.listTasks({ limit: 50 })
+      deliveries = store.db.prepare('SELECT dedupe_key, status, sent_at FROM deliveries ORDER BY id DESC LIMIT 10').all()
+    } finally {
+      store.close()
+    }
+
+    const published = tasks.filter(task => task.stage === 'published')
+    check('回放被登记进账本', tasks.length > 0, `${tasks.length} 条任务`)
+    check('笔记撰写完成', tasks.some(task => ['notes_ready', 'published'].includes(task.stage)), tasks.map(t => `${t.replay_key}:${t.stage}`).join(', '))
+
+    const siteDir = path.resolve(options.options.out || path.join(config.scratchRoot, 'site'))
+    let siteNotes = []
+    try {
+      siteNotes = readSiteIndex(siteDir).notes || []
+    } catch (error) {
+      siteNotes = []
+    }
+    check('笔记已发布到站点', siteNotes.length > 0 || published.length > 0, `站点索引 ${siteNotes.length} 篇`)
+
+    const noteFileExists = siteNotes.some(note => fs.existsSync(path.join(siteDir, `${note.slug}.html`)))
+    check('站点页面文件存在', noteFileExists, siteNotes[0] ? `${siteNotes[0].slug}.html` : '（无）')
+
+    const sent = deliveries.filter(row => row.status === 'sent')
+    if (config.notify.target) {
+      check('通知已投递到微信', sent.length > 0, sent[0] ? `${sent[0].dedupe_key} → ${sent[0].sent_at}` : '尚无已发送记录')
+    } else {
+      check('通知通道已配置', false, '未设置 COURSE_WECHAT_TARGET')
+    }
+
+    const report = {
+      ready: true,
+      passed: criteria.every(item => item.ok),
+      criteria,
+      cycle: {
+        disk: cycleResult.disk ?? null,
+        tasks: cycleResult.tasks ?? [],
+        notification: cycleResult.notification ?? null,
+        errors: cycleResult.errors ?? []
+      }
+    }
+    emit(report, options)
+    return report.passed ? 0 : 1
   }
 
   async function status(options) {
@@ -752,7 +863,7 @@ export function createCommands(context) {
     }
   }
 
-  return { doctor, discover, download, transcribe, notes, publish, notify, cycle, status }
+  return { doctor, discover, download, transcribe, notes, publish, notify, cycle, verify, status }
 }
 
 export const USAGE = `用法：course <命令> [选项]
@@ -776,6 +887,8 @@ export const USAGE = `用法：course <命令> [选项]
                                            把账本里排队的通知发到微信；--probe 只验证通道不发消息
   cycle      [--max-tasks <条数>] [--course <名称>]
                                            一轮完整链路：扫描 → 逐条推进各阶段 → 投递通知
+  verify     [--course <名称>] [--replay-key <键>] [--out <站点目录>]
+                                           验收：跑一轮真实链路并按验收条件逐项断言
 
 账本：download / transcribe 若带 --replay-key 且账本中已有该回放，会先领取任务，
 成功后推进阶段；失败则记录原因并退避 5 分钟。账本没有该回放时按独立运行处理。
