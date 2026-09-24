@@ -125,7 +125,15 @@ export function createAdminHandler({
   }
 
   function snapshot() {
-    const status = { generatedAt: new Date(now()).toISOString(), ledger: null, site: null, runs: [], worker: {} }
+    const status = {
+      generatedAt: new Date(now()).toISOString(),
+      // 正在运行的状态要暴露出来：否则用户点完按钮看不到反馈，
+      // 又在别处点一次会撞上 409 却不明白为什么
+      running: running ? { action: running.action, startedAt: running.startedAt } : null,
+      ledger: null,
+      site: null,
+      runs: []
+    }
     try {
       const store = openLedger(path.resolve(scratchRoot, 'ledger.sqlite'))
       try {

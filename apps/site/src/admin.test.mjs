@@ -107,6 +107,7 @@ test('status reports the ledger and site without leaking any secret', async () =
   assert.equal(body.ledger.tasks[0].replayKey, 'replay-1')
   assert.equal(body.ledger.deliveries[0].status, 'pending')
   assert.equal(body.site.count, 0)
+  assert.equal(body.running, null, '空闲时应显式报告"没有在运行"')
   assert.equal(res.state.headers['cache-control'], 'no-store')
 })
 
@@ -168,6 +169,11 @@ test('a second run is refused while one is in flight', async () => {
 
   const first = call(handler, { method: 'POST', url: '/api/admin/run', body: JSON.stringify({ action: 'discover' }) })
   await new Promise(resolve => setTimeout(resolve, 10))
+
+  // 运行期间状态里应能看到"正在运行"，用户才知道按钮为什么没反应
+  const during = await call(handler, { url: '/api/admin/status' })
+  assert.equal(during.body.running.action, 'discover')
+
   const second = await call(handler, { method: 'POST', url: '/api/admin/run', body: JSON.stringify({ action: 'discover' }) })
   assert.equal(second.res.state.status, 409)
   assert.equal(second.body.error, 'already_running')

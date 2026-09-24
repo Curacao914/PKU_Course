@@ -8,6 +8,22 @@ import { callCourseModel, createInitialLesson, runLessonNotes } from '@course/no
 import { createWechatSender, runDeliveryCycle } from '@course/notify'
 import { buildNoteRecord, readSiteIndex, writeSite } from '@course/publish'
 
+/**
+ * 只保留最近 N 次运行摘要。
+ *
+ * 定时任务每天跑三轮，不清理的话 runs/ 会无限增长；运行摘要只对"最近发生了什么"
+ * 有用，历史价值有限。
+ */
+function pruneRunHistory(runsDir, keep) {
+  if (!fs.existsSync(runsDir)) return
+  const entries = fs.readdirSync(runsDir)
+    .map(name => ({ name, at: fs.statSync(path.join(runsDir, name)).mtimeMs }))
+    .sort((a, b) => b.at - a.at)
+  for (const entry of entries.slice(keep)) {
+    fs.rmSync(path.join(runsDir, entry.name), { recursive: true, force: true })
+  }
+}
+
 /** 文件名安全化：课程名与课次里常有斜杠与冒号。 */
 function safeFileName(value) {
   return String(value || 'note')
@@ -573,8 +589,22 @@ export function createCommands(context) {
     }
 
     summary.finishedAt = new Date().toISOString()
+    summary.exitCode = summary.errors.length || summary.tasks.some(task => task.ok === false) ? 1 : 0
+
+    // 落盘运行摘要：管理台的历史面板读的就是这里。不写的话那个面板永远是空的。
+    try {
+      const stamp = summary.startedAt.replace(/[:.]/g, '-')
+      const runDir = path.join(config.scratchRoot, 'runs', `cycle-${stamp}`)
+      fs.mkdirSync(runDir, { recursive: true })
+      fs.writeFileSync(path.join(runDir, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`)
+      pruneRunHistory(path.join(config.scratchRoot, 'runs'), 50)
+    } catch (error) {
+      // 摘要写不进去不该让整轮失败——它只是观测，不是产物
+      stderr(`运行摘要写入失败（不影响本轮结果）：${error instanceof Error ? error.message : String(error)}`)
+    }
+
     emit(summary, options)
-    return summary.errors.length || summary.tasks.some(task => task.ok === false) ? 1 : 0
+    return summary.exitCode
   }
 
   async function status(options) {

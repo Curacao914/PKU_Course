@@ -582,6 +582,53 @@ test('download refuses to start when free space is below the floor', async () =>
   assert.equal(lines.length, 0, '不应有任何成功输出')
 })
 
+test('cycle writes a run summary and prunes old ones', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const runsDir = path.join(dir, 'runs')
+  fs.mkdirSync(runsDir, { recursive: true })
+  // 预置 3 个很旧的运行目录
+  for (const name of ['cycle-old-1', 'cycle-old-2', 'cycle-old-3']) {
+    fs.mkdirSync(path.join(runsDir, name), { recursive: true })
+    fs.writeFileSync(path.join(runsDir, name, 'summary.json'), '{}')
+    const past = new Date(Date.now() - 86400000)
+    fs.utimesSync(path.join(runsDir, name), past, past)
+  }
+
+  const okSender = { target: 'wxid', probe: async () => ({ ok: true }), send: async () => ({ externalId: 'x' }) }
+  const { deps, lines } = harness({ sender: okSender })
+  const env = { ...deps.env, COURSE_WORKER_SCRATCH_DIR: dir }
+  await runCli(['cycle', '--max-tasks', '1'], { ...deps, env })
+
+  const summary = parse(lines.at(-1))
+  assert.equal(typeof summary.exitCode, 'number')
+
+  const written = fs.readdirSync(runsDir).filter(name => !name.startsWith('cycle-old-'))
+  assert.equal(written.length, 1, '本轮应写入且只写入一个运行摘要')
+  const saved = JSON.parse(fs.readFileSync(path.join(runsDir, written[0], 'summary.json'), 'utf8'))
+  assert.equal(saved.workerId, summary.workerId)
+  assert.equal(saved.disk.ok, true)
+})
+
+test('run history keeps only the most recent entries', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const runsDir = path.join(dir, 'runs')
+  fs.mkdirSync(runsDir, { recursive: true })
+  for (let index = 0; index < 5; index += 1) {
+    const target = path.join(runsDir, `cycle-${index}`)
+    fs.mkdirSync(target, { recursive: true })
+    fs.writeFileSync(path.join(target, 'summary.json'), '{}')
+    const at = new Date(Date.now() - index * 1000)
+    fs.utimesSync(target, at, at)
+  }
+
+  const okSender = { target: 'wxid', probe: async () => ({ ok: true }), send: async () => ({ externalId: 'x' }) }
+  const { deps } = harness({ sender: okSender })
+  await runCli(['cycle', '--max-tasks', '1'], { ...deps, env: { ...deps.env, COURSE_WORKER_SCRATCH_DIR: dir } })
+
+  // 本次运行又加了一个；上限 50，因此 5 个旧目录应全部保留
+  assert.equal(fs.readdirSync(runsDir).length, 6)
+})
+
 test('cycle skips media work when the disk is full but still delivers notifications', async () => {
   const sent = []
   const sender = {
