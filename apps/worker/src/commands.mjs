@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { createValidatedAcquisitionRuntime } from '@course/acquisition'
+import { checkFreeSpace, createValidatedAcquisitionRuntime, formatBytes } from '@course/acquisition'
 import { callCourseModel, createInitialLesson, runLessonNotes } from '@course/notes'
 import { createWechatSender, runDeliveryCycle } from '@course/notify'
 import { buildNoteRecord, readSiteIndex, writeSite } from '@course/publish'
@@ -54,6 +54,21 @@ export function createCommands(context) {
     return `cli:${os.hostname()}:${process.pid}`
   }
 
+  /**
+   * 下载前的磁盘检查。放在真正开始拉流之前，而不是等写失败——
+   * 一节课媒体 1—2G，中途失败会留下半截分片还要清理。
+   */
+  function requireDiskSpace(stageLabel) {
+    const space = checkFreeSpace({ path: config.scratchRoot, minFreeBytes: config.minFreeBytes })
+    if (!space.ok) {
+      throw new Error(
+        `磁盘可用空间不足，已停止${stageLabel}：当前 ${formatBytes(space.freeBytes)}，` +
+        `低于下限 ${formatBytes(space.minFreeBytes)}（差 ${formatBytes(space.shortfallBytes)}）`
+      )
+    }
+    return space
+  }
+
   /** 失败后延迟重试的间隔：与旧系统一致，避免坏任务被反复消费。 */
   const RETRY_DELAY_MS = 5 * 60 * 1000
 
@@ -94,9 +109,15 @@ export function createCommands(context) {
       binaries[name] = found || 'missing'
     }
     const chrome = config.chromePath || (await which('google-chrome')) || (await which('chromium')) || 'missing'
+    const space = checkFreeSpace({ path: config.scratchRoot, minFreeBytes: config.minFreeBytes })
     const report = {
       config: summary,
       binaries: { ...binaries, chrome },
+      disk: {
+        free: formatBytes(space.freeBytes),
+        minFree: formatBytes(space.minFreeBytes),
+        ok: space.ok
+      },
       ready: {
         pkuCredentials: summary.credentials.PKU_USERNAME === 'set' && summary.credentials.PKU_PASSWORD === 'set',
         asrCredentials:
@@ -107,11 +128,12 @@ export function createCommands(context) {
           Boolean(config.sources.R2_BUCKET),
         ffmpeg: binaries.ffmpeg !== 'missing',
         python: binaries.python !== 'missing',
-        chrome: chrome !== 'missing'
+        chrome: chrome !== 'missing',
+        disk: space.ok
       }
     }
     emit(report, options)
-    return report.ready.ffmpeg && report.ready.python ? 0 : 1
+    return report.ready.ffmpeg && report.ready.python && report.ready.disk ? 0 : 1
   }
 
   async function discover(options) {
@@ -421,13 +443,29 @@ export function createCommands(context) {
     const workerId = options.options['worker-id'] || `cycle:${os.hostname()}`
     const maxTasks = Number(options.options['max-tasks'] || 5)
     const quiet = { ...options, quiet: true }
-    const summary = { workerId, startedAt: new Date().toISOString(), discovered: null, tasks: [], notification: null, errors: [] }
+    const summary = { workerId, startedAt: new Date().toISOString(), discovered: null, disk: null, tasks: [], notification: null, errors: [] }
 
-    // 1. 扫描并登记（幂等）
-    try {
-      await discover({ ...quiet, options: { ...options.options } })
-    } catch (error) {
-      summary.errors.push({ step: 'discover', message: error instanceof Error ? error.message : String(error) })
+    // 先把磁盘看清：空间不足时连扫描都不必做，但仍要把已排队的通知发出去
+    const space = checkFreeSpace({ path: config.scratchRoot, minFreeBytes: config.minFreeBytes })
+    summary.disk = {
+      free: formatBytes(space.freeBytes),
+      minFree: formatBytes(space.minFreeBytes),
+      ok: space.ok
+    }
+    if (!space.ok) {
+      summary.errors.push({
+        step: 'disk',
+        message: `可用空间 ${formatBytes(space.freeBytes)} 低于下限 ${formatBytes(space.minFreeBytes)}，本轮跳过媒体处理`
+      })
+    }
+
+    // 1. 扫描并登记（幂等）；磁盘不足时跳过，避免登记完却下不动
+    if (space.ok) {
+      try {
+        await discover({ ...quiet, options: { ...options.options } })
+      } catch (error) {
+        summary.errors.push({ step: 'discover', message: error instanceof Error ? error.message : String(error) })
+      }
     }
 
     // 2. 逐条推进：每次领取一条，按当前阶段调用对应命令
@@ -444,7 +482,7 @@ export function createCommands(context) {
       publishing: 'publish'
     }
 
-    for (let index = 0; index < maxTasks; index += 1) {
+    for (let index = 0; space.ok && index < maxTasks; index += 1) {
       const store = openStore(config.ledgerPath)
       let task = null
       try {
@@ -553,6 +591,7 @@ export function createCommands(context) {
     const replayKey = requireOption(options.options, 'replay-key', 'download')
     const courseKey = requireOption(options.options, 'course-key', 'download')
     const workerId = options.options['worker-id'] || defaultWorkerId()
+    requireDiskSpace('下载')
     const store = openStore(config.ledgerPath)
     try {
       const task = claimForRun(store, replayKey, workerId)

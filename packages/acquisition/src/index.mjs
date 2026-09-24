@@ -4,6 +4,13 @@ export {
 } from './acquisition-runtime.mjs'
 
 export {
+  DEFAULT_MIN_FREE_BYTES,
+  checkFreeSpace,
+  formatBytes,
+  freeBytes
+} from './disk.mjs'
+
+export {
   REPLAY_IDENTITY_VERSION,
   assertNoSecrets,
   chooseCurrentCourses,

@@ -2,7 +2,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { ASR_WORKER_ENTRY } from '@course/asr'
-import { resolveAcquisitionLimits } from '@course/acquisition'
+import { DEFAULT_MIN_FREE_BYTES, resolveAcquisitionLimits } from '@course/acquisition'
 
 import { DEFAULT_ENV_FILE } from './env-file.mjs'
 
@@ -37,6 +37,9 @@ export function resolveWorkerConfig(env = process.env, options = {}) {
     ffmpeg: env.COURSE_FFMPEG || 'ffmpeg',
     ffprobe: env.COURSE_FFPROBE || 'ffprobe',
     headless: (options.headless ?? env.COURSE_HEADLESS) !== '0',
+    // 开始下载前的磁盘下限：一节课媒体有 1—2G 峰值，且 swap 与数据同盘，
+    // 写满不只是下不了课，而是整机开始出问题。
+    minFreeBytes: Number(env.COURSE_WORKER_MIN_FREE_BYTES || DEFAULT_MIN_FREE_BYTES),
     limits: resolveAcquisitionLimits(env),
     ai: {
       apiKey: env.COURSE_AI_API_KEY || env.SCHEDULE_AI_API_KEY || env.OPENAI_API_KEY || '',
@@ -108,6 +111,7 @@ export function describeConfig(config) {
     ledgerPath: config.ledgerPath,
     profileDir: config.profileDir,
     headless: config.headless,
+    minFreeBytes: config.minFreeBytes,
     python: config.python,
     chromePath: config.chromePath || '(自动探测)',
     limits: config.limits,

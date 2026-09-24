@@ -566,6 +566,47 @@ test('cycle does not spin on a finished task', async () => {
   assert.equal(code, 0)
 })
 
+test('download refuses to start when free space is below the floor', async () => {
+  const { deps, errors, ledger, lines } = harness()
+  ledger.discoverReplays([{ replay_key: 'replay-1', course_key: 'course-abc' }])
+
+  // 把下限设成不可能满足的值，等价于"磁盘快满了"
+  const env = { ...deps.env, COURSE_WORKER_MIN_FREE_BYTES: String(Number.MAX_SAFE_INTEGER) }
+  assert.equal(await runCli(['download', '--course-key', 'course-abc', '--replay-key', 'replay-1'], { ...deps, env }), 1)
+  assert.match(errors.join('\n'), /磁盘可用空间不足，已停止下载/)
+  assert.match(errors.join('\n'), /低于下限/)
+
+  const stored = ledger.getTask('replay-1')
+  assert.equal(stored.stage, 'discovered', '磁盘不足时不得推进阶段')
+  assert.equal(stored.attempts, 0, '更不该消耗重试次数——这是环境问题，不是任务问题')
+  assert.equal(lines.length, 0, '不应有任何成功输出')
+})
+
+test('cycle skips media work when the disk is full but still delivers notifications', async () => {
+  const sent = []
+  const sender = {
+    target: 'wxid', probe: async () => ({ ok: true }),
+    send: async message => { sent.push(message); return { externalId: 'wx-1' } }
+  }
+  const { deps, lines, ledger } = harness({ sender })
+  ledger.discoverReplays([{ replay_key: 'replay-1', course_key: 'course-abc' }])
+  ledger.enqueueDelivery({
+    dedupeKey: 'course-note:x', purpose: 'course-note', bodyText: '正文', objectUrl: '/n.html',
+    scheduledFor: '2026-01-01T00:00:00.000Z'
+  })
+
+  const env = { ...deps.env, COURSE_WECHAT_TARGET: 'wxid', COURSE_WORKER_MIN_FREE_BYTES: String(Number.MAX_SAFE_INTEGER) }
+  const code = await runCli(['cycle', '--max-tasks', '3'], { ...deps, env })
+  const summary = parse(lines.at(-1))
+
+  assert.equal(summary.disk.ok, false)
+  assert.deepEqual(summary.errors.map(item => item.step), ['disk'], '只记录磁盘问题，不应连带扫描失败')
+  assert.deepEqual(summary.tasks, [], '磁盘不足时不应领取任务')
+  assert.equal(summary.notification.sent, 1, '投递不占磁盘，仍应把已排队的通知发出去')
+  assert.equal(sent.length, 1)
+  assert.equal(code, 1)
+})
+
 test('transcribe advances the ledger task to transcript_ready', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
   const media = path.join(dir, 'media.mp4')
