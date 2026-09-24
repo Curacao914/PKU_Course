@@ -517,10 +517,17 @@ export function createCommands(context) {
           const claimed = store.claimTask({ replayKey: onlyReplay, workerId, leaseSeconds: 3600 })
           task = claimed.claimed ? claimed.task : null
           if (!claimed.claimed) {
+            // "已完成"不是失败：指定单节课时，跑完自然就领不到了。
+            // 把这种情况报成失败会让验收永远显示不通过。
+            const finished = ['published', 'completed'].includes(claimed.task?.stage)
             summary.tasks.push({
-              replayKey: onlyReplay, stage: claimed.task?.stage || 'unknown', action: 'skip', ok: false,
-              note: `未领取：${claimed.reason}`
+              replayKey: onlyReplay,
+              stage: claimed.task?.stage || 'unknown',
+              action: finished ? 'done' : 'skip',
+              ok: finished,
+              note: finished ? '该课次已完成' : `未领取：${claimed.reason}`
             })
+            if (finished) break
           }
         } else {
           task = store.claimNext({ workerId, leaseSeconds: 3600 })

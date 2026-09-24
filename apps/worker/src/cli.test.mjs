@@ -666,16 +666,30 @@ test('a replay-key filter limits the cycle to exactly that lesson', async () => 
   assert.equal(ledger.getTask('replay-a').attempts, 0, '更不得消耗它的重试次数')
 })
 
-test('a replay-key filter reports why it could not claim', async () => {
+test('an already-finished lesson counts as done, not as a failure', async () => {
   const okSender = { target: 'wxid', probe: async () => ({ ok: true }), send: async () => ({ externalId: 'x' }) }
   const { deps, lines, ledger } = harness({ sender: okSender })
   ledger.discoverReplays([{ replay_key: 'replay-a', course_key: 'course-a' }])
-  ledger.reportStage({ id: ledger.getTask('replay-a').id, stage: 'completed' })
+  ledger.reportStage({ id: ledger.getTask('replay-a').id, stage: 'published' })
+
+  const code = await runCli(['cycle', '--replay-key', 'replay-a', '--max-tasks', '3'], deps)
+  const summary = parse(lines.at(-1))
+  assert.equal(summary.tasks.length, 1, '完成即结束，不应空转到 max-tasks')
+  assert.equal(summary.tasks[0].action, 'done')
+  assert.equal(summary.tasks[0].ok, true)
+  assert.equal(code, 0, '已完成不是失败——否则验收永远显示不通过')
+})
+
+test('a replay-key filter reports why it could not claim a blocked lesson', async () => {
+  const okSender = { target: 'wxid', probe: async () => ({ ok: true }), send: async () => ({ externalId: 'x' }) }
+  const { deps, lines, ledger } = harness({ sender: okSender })
+  ledger.discoverReplays([{ replay_key: 'replay-a', course_key: 'course-a' }])
+  ledger.claimTask({ replayKey: 'replay-a', workerId: 'someone-else' })
 
   await runCli(['cycle', '--replay-key', 'replay-a'], deps)
   const summary = parse(lines.at(-1))
   assert.equal(summary.tasks[0].ok, false)
-  assert.match(summary.tasks[0].note, /未领取：terminal:completed/)
+  assert.match(summary.tasks[0].note, /未领取：leased/)
 })
 
 test('cycle writes a run summary and prunes old ones', async () => {
