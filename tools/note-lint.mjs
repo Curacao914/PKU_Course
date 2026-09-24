@@ -104,8 +104,10 @@ function analyze(file) {
     .filter(line => /-->|\|/.test(line)).length
   if (mapNodes > 12) add('warn', 'map-too-large', `知识地图画了 ${mapNodes} 条连线/节点，超过 12 就比文字更难读`)
 
-  // 7.2) 重点标记通胀：每节超过 3 处「老师强调」等于没有重点
-  const emphasis = (markdown.match(/老师(指出|强调|认为|提出|提醒)/g) || []).length
+  // 7.2) 重点标记通胀：每节超过 3 处教师归属标记等于没有重点。
+  // 口径用「老师/教师 + 任意动词」而不是固定几个动词——模型换个说法（"老师以…作比"）
+  // 就不该被判成"没有教师立场"。
+  const emphasis = (markdown.match(/(老师|教师)[^。；\n]{0,6}(指出|强调|认为|提出|提醒|说明|表示|以|把|总结)/g) || []).length
   if (sectionStarts.length && emphasis / sectionStarts.length > 3) {
     add('warn', 'emphasis-inflation', `平均每节 ${(emphasis / sectionStarts.length).toFixed(1)} 处教师态度标记，重点通胀`)
   }
@@ -120,7 +122,7 @@ function analyze(file) {
   const lists = lines.filter(text => /^\s*([-*]|\d+[.)])\s+/.test(text)).length
 
   // 8) 结论句 / 教师态度标记（可读性信号：笔记该看得出来"老师强调什么"）
-  const teacherMarkers = (markdown.match(/老师(指出|强调|认为|提出|提醒)/g) || []).length
+  const teacherMarkers = (markdown.match(/(老师|教师)(指出|强调|认为|提出|提醒|说明|表示|以|把|总结)/g) || []).length
 
   const errors = issues.filter(issue => issue.severity === 'error').length
   const warnings = issues.filter(issue => issue.severity === 'warn').length
