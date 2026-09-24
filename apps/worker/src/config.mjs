@@ -4,6 +4,8 @@ import path from 'node:path'
 import { ASR_WORKER_ENTRY } from '@course/asr'
 import { resolveAcquisitionLimits } from '@course/acquisition'
 
+import { DEFAULT_ENV_FILE } from './env-file.mjs'
+
 const SECRET_KEYS = [
   'PKU_USERNAME',
   'PKU_PASSWORD',
@@ -24,6 +26,7 @@ export function resolveWorkerConfig(env = process.env, options = {}) {
   )
 
   return {
+    envFile: options.envFile || { path: DEFAULT_ENV_FILE, loaded: false, keys: [] },
     scratchRoot,
     profileDir,
     mediaRoot: path.join(scratchRoot, 'replays'),
@@ -66,6 +69,11 @@ export function pythonEnvironment(config, env = process.env) {
 export function describeConfig(config) {
   const state = value => (String(value || '').trim() ? 'set' : 'missing')
   return {
+    envFile: {
+      path: config.envFile.path,
+      loaded: Boolean(config.envFile.loaded),
+      keys: config.envFile.keys || []
+    },
     scratchRoot: config.scratchRoot,
     profileDir: config.profileDir,
     headless: config.headless,

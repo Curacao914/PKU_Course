@@ -61,7 +61,7 @@ export async function runCli(argv = [], deps = {}) {
     return 0
   }
 
-  const config = resolveWorkerConfig(env, deps.configOverrides || {})
+  const config = resolveWorkerConfig(env, { envFile: deps.envFile, ...(deps.configOverrides || {}) })
   const commands = createCommands({
     config,
     acquire: deps.acquire ?? defaultAcquire,
