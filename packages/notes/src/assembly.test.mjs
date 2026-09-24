@@ -5,6 +5,7 @@ import {
   assembleFinalNote,
   buildFinalNoteMarkdown,
   chineseIndex,
+  demoteBodyHeadings,
   extractNodeMetadata,
   normalizedSpliceData,
   outlineTopic,
@@ -65,6 +66,15 @@ test('stripMetaBlock removes both metadata styles', () => {
   assert.ok(!stripped.includes('CONCEPT: 共犯'), '元数据必须被剥掉')
   assert.match(stripped, /^正文/)
   assert.match(stripped, /后续内容$/)
+})
+
+test('body headings are demoted below the section level', () => {
+  // 模型偶尔会在节点正文里自带 # / ## 标题；原样拼进去成品笔记就会出现两套层级。
+  const demoted = demoteBodyHeadings('# 变量总论\n\n## 定性变量\n\n正文\n\n### 补充\n\n更多正文')
+  assert.match(demoted, /^#### 变量总论/m, '最浅的标题落到 ####')
+  assert.match(demoted, /^##### 定性变量/m, '相对层级保持不变')
+  assert.match(demoted, /^###### 补充/m)
+  assert.equal(demoteBodyHeadings('没有标题的正文'), '没有标题的正文')
 })
 
 test('extractNodeMetadata merges draft markers and node fields', () => {

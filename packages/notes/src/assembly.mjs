@@ -45,12 +45,38 @@ export function outlineTopic(outlineNode = {}, fallback = '本节内容') {
     .trim() || fallback
 }
 
+/**
+ * 把节点正文里的 Markdown 标题整体降级，保证它永远在章节标题（###）之下。
+ *
+ * 为什么要在程序里兜：提示词已经要求节点正文不写 Markdown 标题、改用中式层级，
+ * 但模型偶尔仍会自带 `# 变量总论`。拼装时若原样插入，成品笔记里就会出现两套层级
+ * 并存（一节一个 ### 标题，正文里却冒出 # 和 ##），读者无法判断谁是章节。
+ * 降级是确定性的：正文里最浅的标题一律落到 ####，相对层级保持不变。
+ */
+export function demoteBodyHeadings(markdown = '', floor = 4) {
+  const lines = String(markdown ?? '').split('\n')
+  const levels = lines
+    .map(line => line.match(/^(#{1,6})\s+\S/))
+    .filter(Boolean)
+    .map(match => match[1].length)
+  if (!levels.length) return markdown
+  const shift = Math.max(0, floor - Math.min(...levels))
+  return lines
+    .map(line => {
+      const match = line.match(/^(#{1,6})(\s+.*)$/)
+      if (!match) return line
+      const level = Math.min(6, match[1].length + shift)
+      return `${'#'.repeat(level)}${match[2]}`
+    })
+    .join('\n')
+}
+
 /** 去掉节点正文里的 META 标记：它们是给跨课整合用的，不该出现在正文中。 */
 export function stripMetaBlock(markdown = '') {
-  return cleanText(markdown)
+  return demoteBodyHeadings(cleanText(markdown)
     .replace(/<!--\s*META[\s\S]*?-->\s*/gi, '')
     .replace(/META_FOR_NODE:\s*\n[\s\S]*?(?=\n\s*\n|$)/gi, '')
-    .trim()
+    .trim())
 }
 
 export function extractNodeMetadata(node = {}) {

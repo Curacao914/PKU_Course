@@ -36,19 +36,42 @@ const rows = targets.map(target => {
   return { target: resolved, report: JSON.parse(text) }
 })
 
-const header = ['运行', '节点', '模型调用', 'prompt tok', 'completion tok', '成品字数', '重写节点', '重写次数', '费用', '状态']
-const table = rows.map(({ target, report }) => [
-  path.basename(path.dirname(path.dirname(target))) || target,
-  String(report.lesson.nodeCount),
-  String(report.model.calls),
-  String(report.model.promptTokens),
-  String(report.model.completionTokens),
-  String(report.lesson.finalNoteChars),
-  String(report.reviews.rewritten),
-  String(report.reviews.totalRevisions),
-  report.model.estimatedCost == null ? '-' : String(report.model.estimatedCost),
-  report.lesson.status
-])
+// 附带体检：把成品笔记交给 note-lint 做程序化检查，质量向量进同一张表。
+const lintScript = path.join(path.dirname(new URL(import.meta.url).pathname), 'note-lint.mjs')
+const lintFor = dir => {
+  const notes = fs.existsSync(dir)
+    ? fs.readdirSync(dir).filter(name => name.endsWith('.md') && name !== 'raw-transcript.md')
+    : []
+  if (!notes.length) return null
+  const notePath = path.join(dir, notes[0])
+  const text = execFileSync(process.execPath, [lintScript, notePath, '--json'], { encoding: 'utf8' })
+  const [report] = JSON.parse(text)
+  const count = kind => report.issues.filter(issue => issue.kind === kind).length
+  return { score: report.score, meta: count('meta-commentary'), stamps: count('timestamps-in-body'), thin: report.shortSections.length, diagrams: report.diagrams }
+}
+
+const header = ['运行', '节点', '模型调用', 'prompt tok', 'completion tok', '成品字数', '重写节点', '重写次数', '费用', '状态', '体检分', '元话语', '时间戳', '短节', '图示']
+const table = rows.map(({ target, report }) => {
+  const dir = path.dirname(target)
+  const lint = lintFor(dir)
+  return [
+    path.basename(dir) || target,
+    String(report.lesson.nodeCount),
+    String(report.model.calls),
+    String(report.model.promptTokens),
+    String(report.model.completionTokens),
+    String(report.lesson.finalNoteChars),
+    String(report.reviews.rewritten),
+    String(report.reviews.totalRevisions),
+    report.model.estimatedCost == null ? '-' : String(report.model.estimatedCost),
+    report.lesson.status,
+    lint ? String(lint.score) : '-',
+    lint ? String(lint.meta) : '-',
+    lint ? String(lint.stamps) : '-',
+    lint ? String(lint.thin) : '-',
+    lint ? String(lint.diagrams) : '-'
+  ]
+})
 
 const widths = header.map((cell, index) => Math.max(cell.length, ...table.map(row => row[index].length)))
 const line = row => row.map((cell, index) => cell.padEnd(widths[index])).join('  ')

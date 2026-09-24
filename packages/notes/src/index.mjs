@@ -36,6 +36,7 @@ export {
 export {
   assembleFinalNote,
   buildFinalNoteMarkdown,
+  demoteBodyHeadings,
   chineseIndex,
   extractNodeMetadata,
   normalizedSpliceData,
