@@ -1,0 +1,223 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+
+import {
+  assembleFinalNote,
+  buildFinalNoteMarkdown,
+  chineseIndex,
+  extractNodeMetadata,
+  normalizedSpliceData,
+  outlineTopic,
+  renderMetaBlock,
+  stripMetaBlock
+} from './assembly.mjs'
+
+const approvedNode = (id, outlineNodeId, draft, over = {}) => ({
+  id,
+  outlineNodeId,
+  title: `节点 ${id}`,
+  status: 'node_approved',
+  draft,
+  versions: [{}],
+  concepts: [],
+  statutes: [],
+  cases: [],
+  ...over
+})
+
+function lessonFixture() {
+  return {
+    key: 'lesson-1',
+    title: '第10-12节 共犯与罪数',
+    blueprint: { mainLine: '从共犯的成立条件讲到罪数判断' },
+    outline: [
+      { id: 'o1', title: '一、共犯的成立条件', concepts: ['共同故意'] },
+      { id: 'o2', title: '二、罪数判断', rationale: '把前面的结论用到罪数问题上' }
+    ],
+    nodes: [
+      approvedNode('n1', 'o1', '共犯的成立需要共同故意与共同行为。'),
+      approvedNode('n2', 'o2', '罪数的判断以行为个数与法益侵害为基础。')
+    ],
+    finalNoteVersions: []
+  }
+}
+
+const goodSpliceData = () => ({
+  courseOverview: {
+    coreQuestions: ['共犯如何成立？', '罪数如何判断？', '两者的关系是什么？'],
+    shouldBeAbleTo: ['解释共犯成立条件', '辨析罪数判断标准', '用本课论证分析案例'],
+    lectureThread: '本课先说明共犯的成立条件，再讨论罪数判断，最后回到主线上把两者联系起来。这句话故意写得比较长以便通过六十字的门槛要求。'
+  },
+  sectionSummaries: {
+    o1: '本节承担本课的第一个论证环节，先确立共犯的成立条件，为后文罪数判断提供前置概念，并在全课主线中起到铺垫作用。',
+    o2: '本节完成本课的第二段论证，把共犯的结论用于罪数判断，并在全课主线中收束前面的讨论。'
+  },
+  sectionQuizzes: { o1: ['共犯成立需要哪些条件？', '共同故意与共同行为是什么关系？'], o2: ['罪数判断的标准是什么？', '与共犯条件有何联系？'] },
+  knowledgeLink: { inheritsFrom: '上一课讲过的构成要件', laysGroundworkFor: [{ concept: '共犯', use: '后续罪名分析' }], nextLessonPreview: '下一课讲未遂' },
+  appendix: { terms: [{ term: '共犯', original: 'joint crime', definition: '二人以上共同故意犯罪' }] }
+})
+
+test('stripMetaBlock removes both metadata styles', () => {
+  const draft = '正文第一段\n\n<!-- META\nCONCEPT: 共犯\n-->\n\n正文第二段'
+  assert.equal(stripMetaBlock(draft), '正文第一段\n\n正文第二段')
+  const nodeStyle = '正文\n\nMETA_FOR_NODE:\nCONCEPT: 共犯\n\n后续内容'
+  const stripped = stripMetaBlock(nodeStyle)
+  assert.ok(!stripped.includes('CONCEPT: 共犯'), '元数据必须被剥掉')
+  assert.match(stripped, /^正文/)
+  assert.match(stripped, /后续内容$/)
+})
+
+test('extractNodeMetadata merges draft markers and node fields', () => {
+  const rows = extractNodeMetadata(approvedNode('n1', 'o1', '- CONCEPT: 共犯\nPITFALL: 别把共犯当共同犯罪人', {
+    concepts: ['共犯', '共犯'],
+    statutes: ['《刑法》第25条'],
+    cases: ['某某案']
+  }))
+  assert.deepEqual(rows, [
+    ['CONCEPT', '共犯'],
+    ['PITFALL', '别把共犯当共同犯罪人'],
+    ['CONCEPT', '共犯'],
+    ['CONCEPT', '共犯'],
+    ['PROVISION', '刑法第25条'],
+    ['CASE', '某某案']
+  ])
+})
+
+test('renderMetaBlock dedupes, orders by type and renders a details block', () => {
+  const block = renderMetaBlock([
+    approvedNode('n1', 'o1', '', { cases: ['乙案'], statutes: ['刑法第25条'], concepts: ['共犯'] }),
+    approvedNode('n2', 'o2', '', { concepts: ['共犯', '罪数'], cases: ['乙案'] })
+  ])
+  const lines = block.split('\n').filter(line => line.startsWith('META:'))
+  assert.deepEqual(lines, ['META: CONCEPT: 共犯', 'META: CONCEPT: 罪数', 'META: PROVISION: 刑法第25条', 'META: CASE: 乙案'])
+  assert.match(block, /<details><summary>📑 笔记元数据/)
+})
+
+test('outlineTopic and chineseIndex shape the section headings', () => {
+  assert.equal(outlineTopic({ title: '一、共犯的成立条件' }), '共犯的成立条件')
+  assert.equal(outlineTopic({ title: '罪数判断 ★' }), '罪数判断')
+  assert.equal(outlineTopic({}, '本节内容'), '本节内容')
+  assert.equal(chineseIndex(0), '一')
+  assert.equal(chineseIndex(9), '十')
+  assert.equal(chineseIndex(10), '11')
+})
+
+test('normalizedSpliceData tops up thin model output without inventing facts', () => {
+  const lesson = lessonFixture()
+  const normalized = normalizedSpliceData(lesson, {
+    courseOverview: { coreQuestions: ['只有一个问题'], lectureThread: '太短' },
+    sectionSummaries: { o1: '太短' },
+    sectionQuizzes: { o1: [] }
+  })
+  assert.ok(normalized.courseOverview.coreQuestions.length >= 3, '核心问题补到至少 3 条')
+  assert.ok(normalized.courseOverview.shouldBeAbleTo.length >= 3)
+  assert.ok(normalized.courseOverview.lectureThread.length >= 60, '课程脉络补到 60 字以上')
+  assert.ok(normalized.sectionSummaries.o1.length >= 45, '章节总结补到 45 字以上')
+  assert.ok(normalized.sectionSummaries.o2.length >= 45, '模型没给的章节也要有总结')
+  assert.equal(normalized.sectionQuizzes.o1.length, 2, '自测补到至少 2 题')
+  assert.equal(normalized.sectionQuizzes.o2.length, 2)
+  assert.ok(normalized.knowledgeLink.laysGroundworkFor.length >= 1, '由大纲概念推断知识连接')
+  // 补齐的是结构，不是课堂事实
+  assert.ok(!normalized.sectionSummaries.o1.includes('判决'), '补齐内容不得引入具体案情')
+})
+
+test('buildFinalNoteMarkdown assembles sections in outline order', () => {
+  const lesson = lessonFixture()
+  const markdown = buildFinalNoteMarkdown({
+    courseSpec: { courseName: '刑法分论', teacher: '车浩' },
+    lesson,
+    spliceData: normalizedSpliceData(lesson, goodSpliceData())
+  })
+
+  assert.match(markdown, /^# 第10-12节 共犯与罪数/)
+  assert.match(markdown, /> 课程：刑法分论 · 车浩/)
+  assert.match(markdown, /## 课程概览/)
+  assert.match(markdown, /### 一、共犯的成立条件/)
+  assert.match(markdown, /### 二、罪数判断/)
+  assert.ok(markdown.includes('共犯的成立需要共同故意与共同行为。'), '节点正文必须逐字进入')
+  assert.ok(markdown.indexOf('共犯的成立需要') < markdown.indexOf('罪数的判断以行为个数'), '章节顺序与大纲一致')
+  assert.match(markdown, /> \*\*自测\*\*/)
+  assert.match(markdown, /## 知识连接/)
+  assert.match(markdown, /## 附录：补充与发散/)
+  // 元数据来自**节点**字段与正文标记，不是大纲条目
+  assert.match(markdown, /📑 笔记元数据/)
+  assert.ok(!/\{\{[^}]+\}\}/.test(markdown), '不得残留占位符')
+})
+
+test('nodes outside the outline still reach the final note', () => {
+  const lesson = lessonFixture()
+  lesson.nodes.push(approvedNode('n9', 'missing-outline-node', '这段正文没有对应的大纲条目。'))
+  const markdown = buildFinalNoteMarkdown({
+    courseSpec: { courseName: 'c' },
+    lesson,
+    spliceData: normalizedSpliceData(lesson, goodSpliceData())
+  })
+  assert.match(markdown, /### 其他/)
+  assert.ok(markdown.includes('这段正文没有对应的大纲条目。'))
+})
+
+test('assembleFinalNote refuses to run before every node is approved', () => {
+  const lesson = lessonFixture()
+  lesson.nodes[1].status = 'node_review'
+  assert.throws(() => assembleFinalNote(lesson, {}), /所有节点都必须已批准/)
+
+  const empty = { ...lessonFixture(), nodes: [] }
+  assert.throws(() => assembleFinalNote(empty, {}), /所有节点都必须已批准/)
+})
+
+test('assembleFinalNote produces a versioned note and checks body integrity', () => {
+  const lesson = lessonFixture()
+  const assembled = assembleFinalNote(lesson, goodSpliceData(), {
+    courseSpec: { courseName: '刑法分论', teacher: '车浩' },
+    at: '2026-09-25T00:00:00.000Z'
+  })
+
+  assert.equal(assembled.status, 'final_review')
+  assert.equal(assembled.finalNote.markdown.includes('共犯的成立需要共同故意与共同行为。'), true)
+  assert.equal(assembled.finalNoteVersions.length, 1)
+  assert.equal(assembled.finalNoteVersions[0].source, 'assembly')
+  assert.equal(assembled.finalNoteVersions[0].at, '2026-09-25T00:00:00.000Z')
+  assert.deepEqual(assembled.finalNote.assembly.nodeVersions, { n1: 1, n2: 1 })
+  assert.equal(assembled.finalNote.stale, false)
+  assert.equal(assembled.qualityReport, null, '新拼装的稿子尚未经过终审')
+})
+
+test('assembly refuses a note that still contains splice placeholders', () => {
+  const lesson = lessonFixture()
+  // 真实场景：模型把接缝占位符写进了节点正文，拼装后必须拦住
+  lesson.nodes[0].draft = '正文里混进了 {{H1_SUMMARY:o1}} 这样的占位符。'
+  assert.throws(
+    () => assembleFinalNote(lesson, goodSpliceData(), { courseSpec: {} }),
+    /仍残留接缝占位符/
+  )
+})
+
+test('metadata rows reach the final note through node fields', () => {
+  const lesson = lessonFixture()
+  lesson.nodes[0].concepts = ['共同故意']
+  lesson.nodes[0].statutes = ['《刑法》第25条']
+  const markdown = buildFinalNoteMarkdown({
+    courseSpec: { courseName: '刑法分论' },
+    lesson,
+    spliceData: normalizedSpliceData(lesson, goodSpliceData())
+  })
+  assert.match(markdown, /META: CONCEPT: 共同故意/)
+  assert.match(markdown, /META: PROVISION: 刑法第25条/)
+})
+
+test('a draft that is nothing but metadata counts as an empty body', () => {
+  // 继承语义：完整性校验只针对"有实际正文"的节点。整段都是元数据的草稿
+  // 剥离后为空，因此不会被判为"正文丢失"。这里如实断言，避免以后被误认为 bug。
+  const lesson = lessonFixture()
+  lesson.nodes[0].draft = '<!-- META\nCONCEPT: x\n-->'
+  const assembled = assembleFinalNote(lesson, goodSpliceData(), { courseSpec: {} })
+  assert.ok(!assembled.finalNote.markdown.includes('<!-- META'), '原始标记不会进入正文')
+  assert.match(assembled.finalNote.markdown, /META: CONCEPT: x/, '但元数据仍被收集到末尾的元数据块')
+})
+
+test('a stale publication is marked on reassembly', () => {
+  const lesson = { ...lessonFixture(), publication: { slug: 'notes/x/lesson-1', status: 'published' } }
+  const assembled = assembleFinalNote(lesson, goodSpliceData(), { courseSpec: {} })
+  assert.equal(assembled.publication.stale, true, '重新拼装后已发布版本应标记为过期')
+  assert.equal(assembled.publication.slug, 'notes/x/lesson-1')
+})

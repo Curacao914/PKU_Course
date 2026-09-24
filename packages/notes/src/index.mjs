@@ -27,6 +27,22 @@ export {
 } from './worker-tasks.mjs'
 
 export {
+  assembleFinalNote,
+  buildFinalNoteMarkdown,
+  chineseIndex,
+  extractNodeMetadata,
+  normalizedSpliceData,
+  outlineTopic,
+  renderAppendix,
+  renderCourseOverview,
+  renderKnowledgeLink,
+  renderMetaBlock,
+  renderQuiz,
+  spliceString,
+  stripMetaBlock
+} from './assembly.mjs'
+
+export {
   executeCourseTask,
   findOutlineCoverageGaps,
   mergeAndCoverOutline,
