@@ -42,6 +42,24 @@ node /home/ubuntu/course-runtime/apps/worker/bin/course.mjs doctor
 > 已实测在这台 1.9G 内存的机器上以持久化上下文方式成功启动（`SMOKE OK`，启动后仍余 1.2G）。
 | Cloudflare Tunnel | 已存在，本地托管；`course.law-tech.dev` 复用同一条隧道 |
 
+## 服务器基线（2026-09-24 实测）
+
+| 项 | 值 |
+|---|---|
+| 磁盘 | 50G 总，**8.3G 已用 / 39G 可用**（项目代码 62M、Chromium 658M、OpenClaw 原有占用在内） |
+| 内存 | 1.9G 总，可用约 1.2G（openclaw 常驻约 277M） |
+| journal | 已设上限：`/etc/systemd/journald.conf.d/99-course-limits.conf` → `SystemMaxUse=200M`、`SystemKeepFree=2G` |
+
+**为什么设 journal 上限**：journald 默认上限是文件系统的 10%（这台机器约 5G），而内存只有 1.9G——日志攒到 5G 没有任何意义，但真出问题时会先把盘吃掉，而 swap 也在同一块盘上。收敛一次释放了 934M。
+
+一次性清理（本次已执行，可随时重跑）：
+
+```bash
+sudo journalctl --vacuum-size=200M   # 释放约 934M
+sudo apt-get clean                    # 释放约 152M
+npm cache clean --force               # 释放约 380M
+```
+
 ## 手动运行各环节
 
 ```bash
