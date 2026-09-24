@@ -52,6 +52,12 @@ article hr { border: 0; border-top: 1px solid var(--line); margin: 34px 0; }
 article code { background: var(--paper-soft); padding: 1px 6px; border-radius: 6px; font-size: .9em; }
 article pre { background: var(--paper-soft); padding: 14px 16px; border-radius: var(--radius); overflow-x: auto; }
 article pre code { background: none; padding: 0; }
+/* 本课简报：笔记页顶部先给"基本印象"，再进正文细节 */
+article .brief { background: var(--paper-soft); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px 22px; margin: 0 0 28px; }
+article .brief h2 { margin: 0 0 10px; font-size: 17px; border: 0; padding: 0; color: var(--accent); letter-spacing: .04em; }
+article .brief p { margin: 0 0 10px; }
+article .brief ul { margin: 0; padding-left: 20px; }
+article .brief li { margin: 4px 0; }
 /* Mermaid 图：图宽时横向滚动而不是撑破版面 */
 .diagram { margin: 20px 0; padding: 8px 4px; overflow-x: auto; background: var(--paper-soft); border-radius: var(--radius); }
 .diagram svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
@@ -88,11 +94,13 @@ export function noteSlug({ courseName, lessonTitle }) {
 
 /** 从笔记目录读取记录（course notes 命令的产物）。 */
 export function buildNoteRecord({
-  courseName, teacher = '', lessonTitle, markdown, replayKey = '', publishedAt = new Date().toISOString(), source = 'course-worker'
+  courseName, teacher = '', lessonTitle, markdown, replayKey = '', publishedAt = new Date().toISOString(), source = 'course-worker',
+  brief = null
 }) {
   const body = String(markdown ?? '')
   if (!body.trim()) throw new Error('笔记正文为空，不能发布')
   const slug = noteSlug({ courseName, lessonTitle })
+  const briefing = String(brief?.briefing || '').trim()
   return {
     slug,
     courseName: String(courseName || '').trim(),
@@ -101,7 +109,12 @@ export function buildNoteRecord({
     replayKey,
     source,
     publishedAt,
-    summary: summarizeMarkdown(body),
+    // 简报：首页与笔记页顶部先用它给读者一个基本印象，再进入正文的细节。
+    // 列表页也用它当摘要——比截断正文前 120 字有用得多。
+    brief: briefing
+      ? { briefing, keyPoints: (brief.keyPoints || []).filter(Boolean).slice(0, 5) }
+      : null,
+    summary: briefing ? summarizeMarkdown(briefing) : summarizeMarkdown(body),
     headings: extractHeadings(body),
     markdown: body
   }
@@ -187,11 +200,24 @@ export function renderNotePage(record, { siteOrigin = '' } = {}) {
       meta ? `<div class="meta">${escapeHtml(meta)}</div>` : '',
       '</header>',
       '<article>',
+      record.brief?.briefing ? renderBriefBlock(record.brief) : '',
       toc,
       renderMarkdown(record.markdown),
       '</article>'
     ].filter(Boolean).join('\n')
   })
+}
+
+/** 简报块：笔记页顶部的一段"先看这里"，含三条要点。 */
+function renderBriefBlock(brief = {}) {
+  const points = (brief.keyPoints || []).filter(Boolean)
+  return [
+    '<section class="brief">',
+    '<h2>本课简报</h2>',
+    `<p>${escapeHtml(brief.briefing || '')}</p>`,
+    points.length ? `<ul>${points.map(point => `<li>${escapeHtml(point)}</li>`).join('')}</ul>` : '',
+    '</section>'
+  ].filter(Boolean).join('\n')
 }
 
 export function renderIndexPage(records, { siteOrigin = '' } = {}) {

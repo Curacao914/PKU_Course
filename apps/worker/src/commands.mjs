@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { checkFreeSpace, createValidatedAcquisitionRuntime, formatBytes } from '@course/acquisition'
-import { callCourseModel, createInitialLesson, runLessonNotes } from '@course/notes'
+import { callCourseModel, createInitialLesson, generateBrief, renderBriefMessage, runLessonNotes } from '@course/notes'
 import { createWechatSender, runDeliveryCycle } from '@course/notify'
 import { buildNoteRecord, readSiteIndex, writeSite } from '@course/publish'
 
@@ -315,7 +315,32 @@ export function createCommands(context) {
       const produced = result.lesson.status === 'completed' && Boolean(result.lesson.finalNote?.markdown)
       const notePath = path.join(outputDir, `${safeFileName(lessonTitle)}.md`)
       const summaryPath = path.join(outputDir, 'notes-run-summary.json')
+      const briefPath = path.join(outputDir, 'brief.json')
       if (produced) fs.writeFileSync(notePath, `${result.lesson.finalNote.markdown}\n`)
+
+      // 简报：推送消息里要放的"这节课大概在讲什么"。它只基于已成稿的笔记，
+      // 因此与笔记不会互相矛盾；生成失败不影响笔记——简报是锦上添花，不是交付物。
+      let brief = null
+      let briefError = null
+      if (produced) {
+        try {
+          brief = await generateBrief({ lesson: result.lesson, courseSpec, callModel, modelConfig })
+          fs.writeFileSync(briefPath, `${JSON.stringify({
+            schemaVersion: 1,
+            generatedAt: new Date().toISOString(),
+            course,
+            lesson: lessonTitle,
+            briefing: brief.briefing,
+            keyPoints: brief.keyPoints,
+            detail: brief.detail,
+            trace: brief.trace
+          }, null, 2)}\n`)
+          stderr(`简报已生成（${brief.words} 字，${brief.keyPoints.length} 条要点）`)
+        } catch (error) {
+          briefError = error instanceof Error ? error.message : String(error)
+          stderr(`简报生成失败：${briefError}（笔记本身不受影响）`)
+        }
+      }
 
       const summary = {
         course,
@@ -328,7 +353,9 @@ export function createCommands(context) {
         steps: result.steps,
         autoApproveOutline,
         resumed: resume,
-        maxSteps: options.options['max-steps'] ? Number(options.options['max-steps']) : null
+        maxSteps: options.options['max-steps'] ? Number(options.options['max-steps']) : null,
+        brief: brief ? { path: briefPath, words: brief.words, keyPoints: brief.keyPoints.length } : null,
+        briefError
       }
       fs.writeFileSync(summaryPath, `${JSON.stringify(summary, null, 2)}\n`)
 
@@ -392,6 +419,9 @@ export function createCommands(context) {
     const notePath = path.join(from, `${safeFileName(lessonTitle)}.md`)
     if (!fs.existsSync(notePath)) throw new Error(`找不到笔记正文：${notePath}`)
     const markdown = fs.readFileSync(notePath, 'utf8')
+    // 简报（notes 阶段的产物）：放消息正文与笔记页顶部。
+    const briefPath = path.join(from, 'brief.json')
+    const brief = fs.existsSync(briefPath) ? JSON.parse(fs.readFileSync(briefPath, 'utf8')) : null
 
     const siteRoot = path.resolve(options.options.out || path.join(config.scratchRoot, 'site'))
     const libraryPath = path.join(siteRoot, 'library.json')
@@ -402,7 +432,8 @@ export function createCommands(context) {
       lessonTitle,
       markdown,
       replayKey: runSummary.replayKey || options.options['replay-key'] || '',
-      publishedAt: options.options['published-at'] || new Date().toISOString()
+      publishedAt: options.options['published-at'] || new Date().toISOString(),
+      brief
     })
     const checksum = createHash('sha256').update(record.markdown).digest('hex')
     const previous = library.find(item => item.slug === record.slug)
@@ -427,9 +458,15 @@ export function createCommands(context) {
       const task = replayKey ? store.getTask(replayKey) : null
       if (changed) {
         delivery = store.enqueueDelivery({
-          dedupeKey: `course-note:${record.slug}`,
+          // 幂等键带上内容指纹：同一课次内容变了要重新推一次，
+          // 否则"改好之后再发一遍"会被去重规则静默吃掉（旧实现就是只按 slug 去重）。
+          dedupeKey: `course-note:${record.slug}:${checksum.slice(0, 12)}`,
           purpose: 'course-note',
-          bodyText: `${record.courseName} · ${record.lessonTitle}\n${record.summary}`,
+          // 正文用简报（一段说明 + 三条要点），不用笔记截断：截断出来的是半句话，
+          // 读者无法判断这节课讲了什么。没有简报时退回原来的摘要。
+          bodyText: brief?.briefing
+            ? renderBriefMessage({ courseName: record.courseName, lessonTitle: record.lessonTitle, brief })
+            : `${record.courseName} · ${record.lessonTitle}\n${record.summary}`,
           objectUrl: `${options.options.origin || 'https://course.law-tech.dev'}/${record.slug}.html`
         })
       }

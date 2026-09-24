@@ -27,6 +27,14 @@ export {
 } from './worker-tasks.mjs'
 
 export {
+  BRIEF_SCHEMA,
+  buildBriefSource,
+  generateBrief,
+  renderBriefMessage,
+  validateBrief
+} from './brief.mjs'
+
+export {
   DEFAULT_NOTES_MAX_STEPS,
   applyTaskAction,
   createInitialLesson,

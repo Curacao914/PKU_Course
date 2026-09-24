@@ -101,6 +101,13 @@ function fakeModel() {
         summary: '可靠', issues: []
       }, trace: { role } }
     }
+    if (role === 'brief') {
+      return { parsed: {
+        briefing: '本节从共同故意的认定讲到共同行为的边界，老师用两个例子说明片面共犯为何不成立共同犯罪，并强调判断顺序是先看共同故意再看行为分担。',
+        keyPoints: ['共同故意是成立前提', '片面共犯不成立共犯', '判断顺序不可颠倒'],
+        detail: '## 本课主线\n\n从共犯的成立条件展开。'
+      }, trace: { role } }
+    }
     throw new Error(`未预期的角色：${role}`)
   }
   return { callModel, calls }
@@ -337,7 +344,12 @@ test('notes turns a transcript file into a completed note and a ledger stage', a
 
   const summary = JSON.parse(fs.readFileSync(payload.summaryPath, 'utf8'))
   assert.equal(summary.stopReason, 'completed')
-  assert.deepEqual(model.calls, ['outline', 'writer', 'reviewer', 'splicer', 'finalReview'])
+  // brief 是笔记完成后额外的一次调用：推送消息要用它，不属于流水线状态机的一部分。
+  assert.deepEqual(model.calls, ['outline', 'writer', 'reviewer', 'splicer', 'finalReview', 'brief'])
+
+  const brief = JSON.parse(fs.readFileSync(summary.brief.path, 'utf8'))
+  assert.ok(brief.briefing.length >= 60, '简报要有实质内容')
+  assert.ok(brief.keyPoints.length >= 1, '简报要给出要点')
 })
 
 test('notes stops at the outline gate in manual mode and records why', async () => {
@@ -413,6 +425,41 @@ test('publish builds the site, dedupes the notification and advances the stage',
   assert.equal(queued.purpose, 'course-note')
   assert.match(queued.object_url, /^https:\/\/course.law-tech.dev\/notes\//)
   assert.match(queued.body_text, /刑法分论 · 第10-12节/)
+})
+
+test('publish pushes the briefing, not a truncated note', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const notesDir = path.join(dir, 'notes')
+  fs.mkdirSync(notesDir, { recursive: true })
+  fs.writeFileSync(path.join(notesDir, 'notes-run-summary.json'), JSON.stringify({
+    course: '法律实证分析', lesson: '2026-09-23第1-2节', status: 'completed', stopReason: 'completed'
+  }))
+  fs.writeFileSync(path.join(notesDir, '2026-09-23第1-2节.md'), '# 2026-09-23第1-2节\n\n## 课程概览\n\n正文。')
+  fs.writeFileSync(path.join(notesDir, 'brief.json'), JSON.stringify({
+    schemaVersion: 1,
+    briefing: '本节从数据评价的宏观维度讲到变量的测量水平，老师强调先确定分析单元再谈变量。',
+    keyPoints: ['分析单元决定数据结构', '定性变量也能数字化', '测量水平决定可用统计量']
+  }))
+
+  const siteDir = path.join(dir, 'site')
+  const { deps, lines, ledger } = harness()
+  ledger.discoverReplays([{ replay_key: 'replay-1', course_key: 'course-abc' }])
+  ledger.reportStage({ id: ledger.getTask('replay-1').id, stage: 'notes_ready' })
+
+  const code = await runCli([
+    'publish', '--from', notesDir, '--out', siteDir,
+    '--replay-key', 'replay-1', '--origin', 'https://course.law-tech.dev'
+  ], deps)
+  assert.equal(code, 0)
+
+  const queued = ledger.claimDelivery({ workerId: 'relay-1' })
+  assert.match(queued.body_text, /本节从数据评价的宏观维度讲到变量的测量水平/, '消息正文应当是简报')
+  assert.match(queued.body_text, /· 分析单元决定数据结构/, '要点要逐条列出')
+  assert.ok(!/正文。/.test(queued.body_text), '不该把笔记正文截断塞进消息')
+  assert.match(queued.dedupe_key, /[0-9a-f]{12}$/, '幂等键带内容指纹，内容变了才会重新推')
+
+  const page = fs.readFileSync(path.join(siteDir, 'notes/法律实证分析/2026-09-23第1-2节.html'), 'utf8')
+  assert.match(page, /本课简报/, '笔记页顶部要有简报，读者先建立基本印象')
 })
 
 test('publish refuses a directory without a notes run summary', async () => {
