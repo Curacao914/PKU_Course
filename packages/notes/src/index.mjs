@@ -27,6 +27,19 @@ export {
 } from './worker-tasks.mjs'
 
 export {
+  executeCourseTask,
+  findOutlineCoverageGaps,
+  mergeAndCoverOutline,
+  numberTranscript,
+  splicePlaceholderContext,
+  transcriptLines,
+  validateMarkdown,
+  validateOutline,
+  validateReview,
+  validateSpliceData
+} from './task-runner.mjs'
+
+export {
   DEFAULT_COURSE_SPEC,
   REVIEW_SCORE_KEYS,
   applyNodeReview,
