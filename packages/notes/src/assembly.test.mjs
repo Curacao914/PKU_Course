@@ -191,6 +191,34 @@ test('meta commentary in a finished note is counted rather than silently shipped
   assert.deepEqual(findMetaCommentary('正常的课堂内容，讨论共犯的成立条件。'), [])
 })
 
+test('logistics and digression sections are routed to the appendix', () => {
+  // 旧手工流程的明确规则：课堂管理、通知、闲聊一律进附录。它们打断主线，但也不该丢。
+  const lesson = {
+    title: '第10-12节',
+    transcript: '[00:00:10 – 00:00:20] 第一句',
+    blueprint: { mainLine: '主线' },
+    outline: [
+      { id: 'o1', title: '一、共犯', lineRange: [1, 1], kind: 'content' },
+      { id: 'o2', title: '课间通知与助教安排', lineRange: [2, 2], kind: 'logistics' }
+    ],
+    nodes: [
+      approvedNode('n1', 'o1', '共犯的成立需要共同故意。', { kind: 'content' }),
+      approvedNode('n2', 'o2', '老师介绍了两位助教的分工。', { kind: 'logistics' })
+    ]
+  }
+  const markdown = buildFinalNoteMarkdown({
+    courseSpec: { courseName: '刑法分论' },
+    lesson,
+    spliceData: normalizedSpliceData(lesson, {})
+  })
+
+  const appendixAt = markdown.indexOf('## 附录：课堂事务与发散')
+  assert.ok(appendixAt > 0, '事务小节必须进附录')
+  assert.ok(markdown.indexOf('老师介绍了两位助教的分工。') > appendixAt, '事务正文只出现在附录里')
+  assert.ok(markdown.indexOf('共犯的成立需要共同故意。') < appendixAt, '正课正文仍在正文区')
+  assert.ok(markdown.indexOf('### 二、课间通知') === -1, '事务小节不占正文的中式序号')
+})
+
 test('nodes outside the outline still reach the final note', () => {
   const lesson = lessonFixture()
   lesson.nodes.push(approvedNode('n9', 'missing-outline-node', '这段正文没有对应的大纲条目。'))

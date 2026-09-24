@@ -430,6 +430,7 @@ export async function executeCourseTask(task, options = {}) {
         schema: {
           mainLine: 'string',
           outline: [{
+            kind: 'content|logistics|digression',
             title: 'string',
             lineRange: [1, Math.min(200, lineCount)],
             slideRange: [1, 1],

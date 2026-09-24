@@ -472,6 +472,8 @@ export function findMetaCommentary(markdown = '') {
 /** 自测总览：把各节的自测题汇总到复习层，复习时不用在正文里翻找。 */
 export function renderQuizOverview(sectionQuizzes = {}, lesson = {}) {
   const blocks = (lesson.outline || [])
+    // 只有正课小节进自测总览：课间事务没有需要自测的内容
+    .filter(node => sectionKind(lesson, node) === 'content')
     .map(node => ({ title: outlineTopic(node), items: (sectionQuizzes[node.id] || []).filter(Boolean) }))
     .filter(block => block.items.length)
   if (!blocks.length) return ''
@@ -483,6 +485,20 @@ export function renderQuizOverview(sectionQuizzes = {}, lesson = {}) {
   })
   return lines.join('\n').trim()
 }
+
+/**
+ * 小节类型：正课内容 / 课间事务 / 课堂发散。
+ *
+ * 依据来自旧手工流程的明确要求：「时事评论、个人经历、课堂管理、闲聊一律进附录」。
+ * 类型由大纲阶段判定并跟着节点走；拼装层只负责按类型分流，不改内容。
+ */
+export function sectionKind(lesson = {}, outlineNode = {}) {
+  const child = (lesson.nodes || []).find(node => node.outlineNodeId === outlineNode.id)
+  const kind = child?.kind || outlineNode.kind || 'content'
+  return ['content', 'logistics', 'digression'].includes(kind) ? kind : 'content'
+}
+
+const KIND_LABEL = { logistics: '课间事务与通知', digression: '课堂发散' }
 
 export function buildFinalNoteMarkdown({ courseSpec = {}, lesson = {}, spliceData = {} } = {}) {
   const byOutline = new Map((lesson.outline || []).map(item => [item.id, []]))
@@ -518,7 +534,10 @@ export function buildFinalNoteMarkdown({ courseSpec = {}, lesson = {}, spliceDat
     '***'
   ]
 
-  ;(lesson.outline || []).forEach((outlineNode, index) => {
+  const contentOutline = (lesson.outline || []).filter(node => sectionKind(lesson, node) === 'content')
+  const asideOutline = (lesson.outline || []).filter(node => sectionKind(lesson, node) !== 'content')
+
+  contentOutline.forEach((outlineNode, index) => {
     const title = outlineTopic(outlineNode)
     parts.push('', `### ${chineseIndex(index)}、${title}`, '')
     const summary = spliceString(summaries[outlineNode.id], outlineNode.rationale || '')
@@ -543,6 +562,18 @@ export function buildFinalNoteMarkdown({ courseSpec = {}, lesson = {}, spliceDat
   const reviewBlocks = [indexTables, pitfalls, quizOverview].filter(Boolean)
   if (reviewBlocks.length) {
     parts.push('', '## 复习层', '', ...reviewBlocks.flatMap(block => [block, '']), '***')
+  }
+
+  // 课间事务与课堂发散不进正文：它们打断主线，但也不该丢——统一放到附录。
+  if (asideOutline.length) {
+    parts.push('', '## 附录：课堂事务与发散', '')
+    asideOutline.forEach(outlineNode => {
+      const kindLabel = KIND_LABEL[sectionKind(lesson, outlineNode)] || '课堂补充'
+      parts.push(`### ${outlineTopic(outlineNode)}（${kindLabel}）`, '')
+      const summary = spliceString(summaries[outlineNode.id], outlineNode.rationale || '')
+      if (summary) parts.push(summary, '')
+      ;(byOutline.get(outlineNode.id) || []).forEach(node => parts.push(stripMetaBlock(node.draft), ''))
+    })
   }
 
   const appendix = renderAppendix(spliceData.appendix || {})

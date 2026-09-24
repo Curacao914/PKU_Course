@@ -17,12 +17,32 @@ function nodeWithNeighborContext(lesson, node) {
   const previous = index > 0 ? nodes[index - 1] : null
   const next = index >= 0 && index < nodes.length - 1 ? nodes[index + 1] : null
   const previousDraft = String(previous?.draft || '').trim()
+
+  // 全课结构表：让撰写者知道"我正在写整条线的哪一环"。
+  // 旧实现只给"上一节点末尾 1600 字"，撰写者看不到全课分工，写出来自然段段割裂。
+  // 结构表只有标题与分工，没有别节正文，既省 token 又不会诱导重复。
+  const outline = Array.isArray(lesson.outline) ? lesson.outline : []
+  const structure = outline.map((item, position) => {
+    const child = nodes.find(candidate => candidate.outlineNodeId === item.id)
+    return {
+      order: position + 1,
+      outlineNodeId: item.id,
+      title: item.title,
+      kind: item.kind || 'content',
+      lineRange: item.lineRange,
+      goal: child?.writerBrief?.currentNodeGoal || item.rationale || '',
+      isCurrent: item.id === node.outlineNodeId
+    }
+  })
+
   return {
     ...node,
     writerBrief: {
       ...(node.writerBrief || {}),
-      previousNodeSummary: previousDraft ? previousDraft.slice(-1600) : previous?.title || '',
-      nextNodeTarget: next?.writerBrief?.currentNodeGoal || next?.title || ''
+      previousNodeSummary: previousDraft ? previousDraft.slice(-800) : previous?.title || '',
+      nextNodeTarget: next?.writerBrief?.currentNodeGoal || next?.title || '',
+      lessonStructure: structure,
+      lessonStructureRule: 'lessonStructure 是本课全部小节及其分工。写正文时不要重复别节内容；开头用一两句说明本节与上一节的关系（写关系，例如"因此/与之相对/在此基础上"，不要写"接下来我们讲"这类顺序词）。'
     }
   }
 }

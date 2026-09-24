@@ -168,6 +168,8 @@ export function createNodeFromOutline({ outlineNode, partIndex = 0, partCount = 
     id: `${outlineNode.id}-node-${partIndex + 1}`,
     outlineNodeId: outlineNode.id,
     title: `${outlineNode.title}${suffix}`,
+    // 正课 / 行政事务 / 课堂发散：拼装时据此决定进正文还是进附录
+    kind: ['content', 'logistics', 'digression'].includes(outlineNode.kind) ? outlineNode.kind : 'content',
     status: 'node_pending',
     lineRange: [partStart, safeEnd],
     slideRange: outlineNode.slideRange,
