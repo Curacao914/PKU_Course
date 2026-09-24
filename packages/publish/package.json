@@ -1,0 +1,8 @@
+{
+  "name": "@course/publish",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "站点内容生成：Markdown + 索引",
+  "main": "src/index.js"
+}

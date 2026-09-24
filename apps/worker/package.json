@@ -1,0 +1,8 @@
+{
+  "name": "@course/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "CLI 与定时循环：discover/media/notes/publish/notify",
+  "main": "src/index.js"
+}

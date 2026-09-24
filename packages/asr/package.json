@@ -1,0 +1,8 @@
+{
+  "name": "@course/asr",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "云端转录 provider：Paraformer-v2 + R2 中转，含预算保护",
+  "main": "src/index.js"
+}

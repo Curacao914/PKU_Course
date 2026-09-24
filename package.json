@@ -1,0 +1,20 @@
+{
+  "name": "course-law-tech-dev",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "北大教学网课程闭环：下载 → 转录 → AI 笔记 → 发布 → 微信推送",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test \"packages/*/src/*.test.mjs\" \"apps/*/src/*.test.mjs\"",
+    "test:acquisition": "node --test \"packages/acquisition/src/*.test.mjs\"",
+    "test:core": "node --test \"packages/core/src/*.test.mjs\"",
+    "test:asr": "node --test \"packages/asr/src/*.test.mjs\""
+  }
+}

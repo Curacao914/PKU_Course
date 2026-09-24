@@ -1,0 +1,8 @@
+{
+  "name": "@course/notify",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "微信推送：relay 内核 + 本机队列消费",
+  "main": "src/index.js"
+}

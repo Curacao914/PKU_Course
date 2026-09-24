@@ -1,0 +1,8 @@
+{
+  "name": "@course/notes",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AI 撰写：大纲 → 分节 → 审查 → 修订 → 拼装 → 终审",
+  "main": "src/index.js"
+}
