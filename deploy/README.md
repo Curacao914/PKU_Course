@@ -82,8 +82,38 @@ node $COURSE status                                       # 各阶段任务数�
 
 手动跑单节课的标准顺序：`discover` → `status` 拿到 `replayKey` → `download --replay-key` → `transcribe --replay-key`。
 
+## 站点（已上线）
+
+```
+https://course.law-tech.dev  →  Cloudflare Tunnel  →  localhost:3100  →  course-site.service
+```
+
+| 项 | 值 |
+|---|---|
+| 服务 | `course-site.service`（user systemd，已 enable） |
+| 监听 | `127.0.0.1:3100`，**不对外开端口**，只经隧道暴露 |
+| 站点目录 | `~/.course-worker/site`（`index.html`、`notes.json`、`notes/<课程>/<课次>.html`） |
+| 发布库 | `~/.course-worker/site/library.json`——发布记录，重新生成站点不需要重跑模型 |
+| 隧道配置 | `~/.cloudflared/config.yml`（改动前备份为 `config.yml.bak-<时间戳>`） |
+| DNS | CNAME `course.law-tech.dev` → `<隧道ID>.cfargotunnel.com`（由 `cloudflared tunnel route dns` 建立） |
+
+**验证过的行为**（2026-09-24）：
+
+```
+GET  /healthz          → {"ok": true, "notes": 0}
+GET  /                 → 200 text/html
+GET  /api/notes        → 200 application/json
+GET  /api/admin/ping   → 503  （未配置令牌时 fail closed，而非放行）
+GET  /does-not-exist   → 404
+路径穿越尝试            → 400（Cloudflare 层即拦截）
+```
+
+**改隧道时的注意**：重启 `law-tech-cloudflared` 会短暂中断**所有**隧道域名，
+包括 `cli.law-tech.dev`。改完务必复查 openclaw-gateway / relay / readyz 三项。
+本次改动后三项均正常。
+
 ## 待建（后续步骤）
 
-- `course-site.service`：站点与私有管理台，端口 3100，由隧道 `course.law-tech.dev` 指向。
 - `course-worker.timer`：定时执行发现 → 下载 → 转录 → 笔记 → 发布 → 推送。
+- `COURSE_ADMIN_TOKEN`：管理接口目前未配令牌，因此一律拒绝访问。接入管理台时一并配置。
 - 磁盘下限检查：空闲低于设定值时拒绝开始下载（旧系统用 `COURSE_WORKER_MIN_FREE_BYTES`，默认 5GiB）。
