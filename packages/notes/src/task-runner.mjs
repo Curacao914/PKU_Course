@@ -368,7 +368,15 @@ export async function executeCourseTask(task, options = {}) {
           title: task.lesson.title,
           transcriptLineCount: lineCount,
           lineNumberFormat: '[Lx]',
-          coverageRule: `第一节点从第 1 行开始，最后节点覆盖第 ${lineCount} 行；相邻节点之间不得留下行号缺口。`
+          coverageRule: `第一节点从第 1 行开始，最后节点覆盖第 ${lineCount} 行；相邻节点之间不得留下行号缺口。`,
+          // 节点数是切片粒度的旋钮：不给就用模型自己的判断（细切），
+          // 给了就是对比实验用的粗切/不切（1 个节点 = 整节课一次写完）。
+          ...(Number(task.courseSpec?.targetOutlineNodes) > 0
+            ? {
+              outlineNodeTarget: Number(task.courseSpec.targetOutlineNodes),
+              outlineNodeTargetRule: `请把本课划分为恰好 ${Number(task.courseSpec.targetOutlineNodes)} 个可写节点（不要多也不要少），每个节点覆盖的行区间仍必须连续、无缺口。每个节点的覆盖范围会更大，正文要在一个节点内完整展开该区间的全部实质内容。`
+            }
+            : {})
         },
         sourceText: numberTranscript(task.lesson.transcript),
         pptText: JSON.stringify([...(task.lesson.pptText || []), ...(task.lesson.supplements || [])]),

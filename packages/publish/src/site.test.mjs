@@ -77,6 +77,17 @@ test('the note page renders content, toc and metadata without raw html', () => {
   assert.equal((html.match(/<h1>/g) || []).length >= 1, true)
 })
 
+test('the mermaid loader only ships on pages that actually contain a diagram', () => {
+  const plain = renderNotePage(record({ markdown: NOTE }))
+  assert.ok(!plain.includes('/assets/mermaid.min.js'), '没有图就不该让读者下载 3.5MB 的绘图库')
+
+  const withDiagram = renderNotePage(record({
+    markdown: `${NOTE}\n\n\`\`\`mermaid\nflowchart TD\n  A[抽样] --> B[变量]\n\`\`\`\n`
+  }))
+  assert.ok(withDiagram.includes('/assets/mermaid.min.js'), '有图才加载绘图库，且走自托管路径')
+  assert.ok(withDiagram.includes('language-mermaid'), '渲染器仍输出原始代码块，供脚本接管')
+})
+
 test('the index groups by course and lists newest first', () => {
   const html = renderIndexPage([
     record({ lessonTitle: '第1-2节', publishedAt: '2026-09-01T00:00:00.000Z' }),

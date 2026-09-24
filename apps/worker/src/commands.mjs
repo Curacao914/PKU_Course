@@ -267,7 +267,18 @@ export function createCommands(context) {
       // 切片粒度：一个节点最多覆盖多少字/多少行转录。默认 12000 字 / 200 行（细切），
       // 调大就是粗切，用于"切得细到底有没有必要"的对比实验。
       ...(options.options['node-split-chars'] ? { nodeSplitThreshold: Number(options.options['node-split-chars']) } : {}),
-      ...(options.options['node-split-lines'] ? { nodeSplitLineThreshold: Number(options.options['node-split-lines']) } : {})
+      ...(options.options['node-split-lines'] ? { nodeSplitLineThreshold: Number(options.options['node-split-lines']) } : {}),
+      // 目标节点数：1 = 整节课一个节点一次写完，2/3 = 粗切。
+      // 指定目标节点数时，默认关闭"按体量再切分"——否则大纲给一个节点、程序又把它
+      // 按 12000 字阈值切成十几个，等于没粗切。要保留再切分就显式给 --node-split-*。
+      ...(options.options['outline-nodes']
+        ? {
+          targetOutlineNodes: Number(options.options['outline-nodes']),
+          ...(options.options['node-split-chars'] || options.options['node-split-lines']
+            ? {}
+            : { nodeSplitThreshold: Number.MAX_SAFE_INTEGER, nodeSplitLineThreshold: Number.MAX_SAFE_INTEGER })
+        }
+        : {})
     }
 
     const store = openStore(config.ledgerPath)
@@ -975,7 +986,7 @@ export const USAGE = `用法：course <命令> [选项]
   notes      --transcript <文件> --course <名称> --lesson <课次> [--replay-key <键>] [--output-dir <目录>]
              [--auto-approve-outline 0|1] [--max-steps <步数>] [--resume]
              [--concurrency <条数>] [--review-concurrency <条数>]
-             [--node-split-chars <字数>] [--node-split-lines <行数>]
+             [--node-split-chars <字数>] [--node-split-lines <行数>] [--outline-nodes <个数>]
                                            从转录稿生成单课笔记（大纲 → 节点 → 写作 → 审查 → 拼装 → 终审）
                                            每步把课次状态写入 <输出目录>/lesson-state.json；--resume 从该状态续跑
                                            默认不设步数上限；并发默认写 1 + 审 2（合计 3 条）

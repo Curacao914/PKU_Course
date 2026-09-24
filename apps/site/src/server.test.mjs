@@ -26,6 +26,28 @@ function siteDir() {
   return dir
 }
 
+test('third-party assets are served from outside the site directory', async () => {
+  const root = siteDir()
+  const assets = fs.mkdtempSync(path.join(os.tmpdir(), 'course-assets-'))
+  fs.writeFileSync(path.join(assets, 'mermaid.min.js'), 'window.mermaid={}\n')
+  const site = await startSiteServer({ root, port: 0, assetsDir: assets })
+  try {
+    const ok = await fetch(`${site.url}/assets/mermaid.min.js`)
+    assert.equal(ok.status, 200)
+    assert.match(ok.headers.get('content-type'), /javascript/)
+    assert.equal(await ok.text(), 'window.mermaid={}\n')
+
+    assert.equal((await fetch(`${site.url}/assets/nope.js`)).status, 404)
+    // 穿越防护由 resolveInsideRoot 负责；HTTP 层测不到，因为 WHATWG URL 在任何
+    // 请求进来之前就把 %2e%2e 规范化掉了（等于多了一层防线）。
+    assert.equal(resolveInsideRoot(assets, '/../notes.json'), null, '不得穿越出资源目录')
+  } finally {
+    await site.close()
+    fs.rmSync(root, { recursive: true, force: true })
+    fs.rmSync(assets, { recursive: true, force: true })
+  }
+})
+
 test('resolveInsideRoot refuses paths that escape the site root', () => {
   const root = '/srv/course/site'
   assert.equal(resolveInsideRoot(root, '/notes/a.html'), '/srv/course/site/notes/a.html')

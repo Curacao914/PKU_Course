@@ -52,6 +52,9 @@ article hr { border: 0; border-top: 1px solid var(--line); margin: 34px 0; }
 article code { background: var(--paper-soft); padding: 1px 6px; border-radius: 6px; font-size: .9em; }
 article pre { background: var(--paper-soft); padding: 14px 16px; border-radius: var(--radius); overflow-x: auto; }
 article pre code { background: none; padding: 0; }
+/* Mermaid 图：图宽时横向滚动而不是撑破版面 */
+.diagram { margin: 20px 0; padding: 8px 4px; overflow-x: auto; background: var(--paper-soft); border-radius: var(--radius); }
+.diagram svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
 article table { width: 100%; border-collapse: collapse; margin: 18px 0; font-size: 15px; }
 article th, article td { border: 1px solid var(--line); padding: 8px 10px; text-align: left; }
 article th { background: var(--paper-soft); font-weight: 600; }
@@ -104,7 +107,41 @@ export function buildNoteRecord({
   }
 }
 
-function pageShell({ title, description, body, canonical = '' }) {
+/**
+ * 笔记里有 Mermaid 代码块时才加载绘图库。
+ *
+ * 库是自托管的（站点服务器的 /assets/mermaid.min.js），不走 CDN：读者在国内，
+ * 而且笔记页不该依赖第三方可用性。渲染失败时保留原始代码块，图看不成至少能读源码。
+ */
+const MERMAID_LOADER = `<script type="module">
+const blocks = [...document.querySelectorAll('pre > code.language-mermaid, pre > code.lang-mermaid')]
+if (blocks.length) {
+  const load = () => new Promise((resolve, reject) => {
+    const script = document.createElement('script')
+    script.src = '/assets/mermaid.min.js'
+    script.onload = resolve
+    script.onerror = reject
+    document.head.appendChild(script)
+  })
+  load().then(() => {
+    const mermaid = window.mermaid
+    if (!mermaid) return
+    mermaid.initialize({ startOnLoad: false, theme: 'neutral', securityLevel: 'strict' })
+    blocks.forEach((code, index) => {
+      const source = code.textContent || ''
+      const holder = document.createElement('div')
+      holder.className = 'diagram'
+      holder.id = \`mermaid-\${index}\`
+      code.parentElement.replaceWith(holder)
+      mermaid.render(\`mermaid-svg-\${index}\`, source)
+        .then(result => { holder.innerHTML = result.svg })
+        .catch(() => { holder.innerHTML = \`<pre><code>\${source.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]))}</code></pre>\` })
+    })
+  }).catch(() => {})
+}
+</script>`
+
+function pageShell({ title, description, body, canonical = '', scripts = '' }) {
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -120,9 +157,15 @@ ${canonical ? `<link rel="canonical" href="${escapeHtml(canonical)}">` : ''}
 ${body}
 <footer class="site">${escapeHtml(SITE_NAME)} · course.law-tech.dev</footer>
 </div>
+${scripts}
 </body>
 </html>
 `
+}
+
+/** 笔记正文里是否真的有 Mermaid 图（没有就不加载 3.5MB 的绘图库）。 */
+function hasMermaid(markdown = '') {
+  return /```mermaid/.test(String(markdown))
 }
 
 export function renderNotePage(record, { siteOrigin = '' } = {}) {
@@ -136,6 +179,7 @@ export function renderNotePage(record, { siteOrigin = '' } = {}) {
     title: `${record.lessonTitle} · ${SITE_NAME}`,
     description: record.summary,
     canonical: siteOrigin ? `${siteOrigin}/${record.slug}` : '',
+    scripts: hasMermaid(record.markdown) ? MERMAID_LOADER : '',
     body: [
       '<header class="site">',
       `<div class="brand">${escapeHtml(SITE_NAME)}</div>`,

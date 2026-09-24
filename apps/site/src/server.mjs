@@ -67,9 +67,11 @@ export function createRequestHandler({
   scratchRoot = '',
   workerPath = '',
   workerEnv = {},
+  assetsDir = '',
   runCommand
 } = {}) {
   const normalizedRoot = path.resolve(root)
+  const normalizedAssets = assetsDir ? path.resolve(assetsDir) : ''
   const admin = createAdminHandler({
     root: normalizedRoot,
     scratchRoot: scratchRoot || normalizedRoot,
@@ -127,6 +129,22 @@ export function createRequestHandler({
       return
     }
 
+    // 第三方静态资源（Mermaid 等）。放在站点目录之外：站点是全量重写的，
+    // 把这些库混在里面迟早被一次发布覆盖掉；而且它们不需要每次重新生成。
+    if (normalizedAssets && pathname.startsWith('/assets/')) {
+      const asset = resolveInsideRoot(normalizedAssets, pathname.slice('/assets/'.length))
+      if (!asset || !fs.existsSync(asset) || !fs.statSync(asset).isFile()) {
+        send(res, 404, 'not found')
+        return
+      }
+      const type = CONTENT_TYPES[path.extname(asset).toLowerCase()] || 'application/octet-stream'
+      send(res, 200, req.method === 'HEAD' ? '' : fs.readFileSync(asset), {
+        'content-type': type,
+        'cache-control': 'public, max-age=86400'
+      })
+      return
+    }
+
     let candidate = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '')
     if (candidate.endsWith('/')) candidate += 'index.html'
     const target = resolveInsideRoot(normalizedRoot, candidate)
@@ -160,9 +178,9 @@ export function createSiteServer(options = {}) {
 /** 启动服务器；port 传 0 时由系统分配（测试用）。 */
 export function startSiteServer({
   root, port = 3100, host = '127.0.0.1', adminToken = '',
-  scratchRoot = '', workerPath = '', workerEnv = {}, runCommand
+  scratchRoot = '', workerPath = '', workerEnv = {}, assetsDir = '', runCommand
 } = {}) {
-  const server = createSiteServer({ root, adminToken, scratchRoot, workerPath, workerEnv, runCommand })
+  const server = createSiteServer({ root, adminToken, scratchRoot, workerPath, workerEnv, assetsDir, runCommand })
   return new Promise((resolve, reject) => {
     server.once('error', reject)
     server.listen(port, host, () => {
