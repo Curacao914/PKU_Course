@@ -33,11 +33,19 @@ export const ROLE_SYSTEM = {
   outline: `你是课程大纲规划者 [outline]。阅读全文后提炼本课主线，并把材料划分为连续、无遗漏、尽量不重叠的可写节点。TranscriptSource 中的 [Lx] 是唯一有效的转录行号；lineRange 必须引用这些绝对行号，不得自行估算或使用原始 SRT 序号。第一节点必须从 L1 开始，最后节点必须覆盖 LessonBlueprint.transcriptLineCount，相邻节点之间不得留下缺口。每个节点还应给出对应课件页码，并识别概念、法条、案例、教师强调信号与节点写作目标。不要撰写正文。`,
   outlineRepair: `你是课程大纲覆盖修复者 [outlineRepair]。只处理 LessonBlueprint.coverageGaps 指定的缺口，并使用 TranscriptSource 中的绝对 [Lx] 行号生成补充节点。每个缺口必须从其起始行连续覆盖到结束行，不得改写已有大纲，不得扩展到缺口之外，不得撰写正文。`,
   writer: `你是课程节点撰写者 [writer]。只撰写当前 WriterBrief 指定的一个节点，保持与完整 LessonBlueprint 的主线和相邻节点分工一致。内容应充分展开课堂论证，不得压缩成提纲式摘要，也不得重复其他节点。案例至少交代背景或案名、事实、争点、结论与规则适用、教师评价、论证意义；材料缺少其中某项时应如实标注。输出 Markdown 正文，但必须放在 JSON 的 markdown 字段中。`,
-  reviewer: `你是独立课程审查者 [reviewer]。审查目标是拦截会实质影响学习与准确性的错误，而不是追求逐字复刻课堂原话。重点检查：编造或无来源扩写、教师观点或法律结论的实质曲解、核心论证或重要材料遗漏、案例与法条的关键错误、明显异常压缩及跨节点严重重复。人名出现顺序、无损于含义的背景省略、措辞与原话不完全一致、可以更顺滑的表达，均只能列为 suggestion，不能据此要求重写。coverage、grounding、logic、detail、sourceCoverage 必须使用 0—100 的整数评分，禁止使用 0—10 分制；summary、issues.message 等说明文字使用中文（专名和必要原文除外）。issues 的 severity 只使用 blocking / important / suggestion；只有 blocking 问题才能 decision=revise。仅在来源冲突或无法可靠判断教师立场时，设置 requiresHuman=true 并 decision=human_review。每项问题应具体、可执行，并尽量给出 nodeId 与 sourceRange；同时标记 impact=local 或 downstream。`,
+  reviewer: `你是独立课程审查者 [reviewer]。你只做一件事：检查当前节点正文是否达到课程笔记的要求，给出 approve 或 revise。
+只拦这几类实质问题：编造或来源中不存在的内容、教师立场或法律结论被实质曲解、本节点核心论证或重要材料缺失、案例与法条的关键事实错误、明显异常的压缩、与其他节点的严重重复。
+措辞、人名出现顺序、例子顺序、无损含义的背景省略、可以更顺滑的表达都不算问题，不要据此要求重写，也不要写进 issues。
+issues 每条要具体、可执行，message 用中文；severity 只用 blocking（必须改）或 important（值得改）；能定位时补 nodeId 与 sourceRange。
+decision 只有 approve 与 revise 两个取值：至少存在一条 blocking 问题时用 revise，否则用 approve。
+不要输出任何评分字段，不要要求人工介入。`,
   revision: `你是课程节点修订者 [revision]。只修订当前节点，逐项回应 blocking Reviewer issues 和用户补充要求；suggestion 仅在自然且不增加无来源内容时酌情吸收。保留已经正确且有来源的内容，不得重写整课，不得跨节点补写。输出完整的新版本 Markdown，放在 JSON 的 markdown 字段中。`,
   finalRevision: `你是课程最终笔记修订者 [finalRevision]。用户已经通读机械拼装后的完整笔记，并给出明确修改要求。只根据该要求对现有 Markdown 做必要且尽量局部的修改；未被要求调整的内容、标题层级、节点正文、来源标记和元数据应保持不变。不得凭空新增课堂事实、法条、案例或教师观点。输出完整的新版本 Markdown，放在 JSON 的 markdown 字段中。`,
   splicer: `你是单课笔记的接缝段生成器 [splicer]。节点正文已经逐一审查通过，绝对不得改写、压缩或重述节点正文。你只根据已批准大纲、节点索引与占位符上下文，生成结构化接缝数据：课程概览、各大纲章节的总结段和自测题、知识连接、可选附录。核心问题应是 Why / How / 区别类问题，共 3—5 个；学习目标必须以可验证动词开头，共 3—5 个；课程脉络不少于 60 字。每个章节总结写 2—3 句且不少于 45 字，说明该章节在全课论证中的功能；每章自测 2—4 题，以理解、辨析和应用为主。知识连接必须说明对后续学习的铺垫。附录只收纳课堂发散、术语或补充话题，不得凭空创造。只输出 RequiredOutputSchema 指定的 JSON。`,
-  finalReview: `你是单课最终审查者 [finalReview]。检查机械拼装后的笔记是否完整包含已批准节点，并确认课程概览、章节总结、自测、知识连接、附录和元数据结构正常；同时检查跨节点的实质矛盾、严重重复、核心术语或教师观点不一致。程序已经机械确认全部已批准节点正文均进入最终稿，不要重新逐句核验原始转录，也不要因措辞、例子顺序或次要背景省略退回。coverage、grounding、logic、detail、sourceCoverage 必须使用 0—100 的整数评分；summary、issues.message 使用中文（专名和必要原文除外）。只有实质问题使用 blocking 并返回 revise；来源冲突或无法判断时使用 requiresHuman=true 并返回 human_review。发现问题必须尽量定位到具体 nodeId。`
+  finalReview: `你是单课最终审查者 [finalReview]。程序已经机械确认全部已批准节点正文都完整进入了最终稿，因此不要重新逐句核验原始转录，也不要因措辞、例子顺序或次要背景省略退回。
+只检查四件事：跨节点的实质矛盾、严重重复、核心术语或教师观点前后不一致、最终稿整体结构是否完整可读。
+issues 每条 message 用中文，能定位到节点时给出该节点的 nodeId；severity 只用 blocking 或 important。
+decision 只有 approve 与 revise 两个取值：至少存在一条 blocking 问题时用 revise，否则用 approve。不要输出评分字段，不要要求人工介入。`
 }
 
 function jsonBlock(label, value) {

@@ -27,6 +27,7 @@ export {
 } from './worker-tasks.mjs'
 
 export {
+  DEFAULT_NOTES_MAX_STEPS,
   applyTaskAction,
   createInitialLesson,
   runLessonNotes
@@ -63,7 +64,6 @@ export {
 
 export {
   DEFAULT_COURSE_SPEC,
-  REVIEW_SCORE_KEYS,
   applyFinalReview,
   applyNodeReview,
   approveNode,
@@ -74,12 +74,10 @@ export {
   issueNodeIds,
   normalizeIssue,
   normalizeReviewReport,
-  normalizeReviewScores,
   normalizedReviewDecision,
   planNodes,
   recordNodeTaskFailure,
   requestNodeRevision,
   saveFinalNoteRevision,
-  saveNodeDraft,
-  scoresMeetThreshold
+  saveNodeDraft
 } from './node-lifecycle.mjs'

@@ -15,17 +15,14 @@ import { cleanText } from '@course/core'
  *   - 只有 blocking 或需人工且 impact=downstream 的问题才阻塞后文节点。
  */
 
-export const REVIEW_SCORE_KEYS = ['coverage', 'grounding', 'logic', 'detail', 'sourceCoverage']
-
 export const DEFAULT_COURSE_SPEC = Object.freeze({
   nodeSplitThreshold: 12_000,
   nodeSplitLineThreshold: 200,
-  qualityThreshold: 75,
   maxAutoRevisions: 2,
   maxFinalAutoRevisions: 1,
   maxTechnicalRetries: 2,
   reviewConcurrency: 2,
-  promptVersion: 'course-controlled-v4-pipeline'
+  promptVersion: 'course-v5-simple-review'
 })
 
 const VERSION_CAP = 20
@@ -44,27 +41,6 @@ function versioned(value, previous = [], metadata = {}, at) {
   }]
 }
 
-/**
- * 审查分数的量纲归一化：五项都在 0—10 之间时视为十分制并放大到百分制。
- * 模型经常给十分制，旧实现在执行器里做这件事；这里收进生命周期内，
- * 保证判定逻辑不会因为量纲而误判。
- */
-export function normalizeReviewScores(value = {}) {
-  const scores = REVIEW_SCORE_KEYS.map(key => Number(value[key]))
-  const tenPoint = scores.every(score => Number.isFinite(score) && score >= 0 && score <= 10)
-  REVIEW_SCORE_KEYS.forEach((key, index) => {
-    const score = scores[index]
-    if (!Number.isFinite(score) || score < 0 || score > 100) throw new Error(`审查分数 ${key} 无效`)
-    value[key] = Math.round(tenPoint ? score * 10 : score)
-  })
-  return value
-}
-
-export function scoresMeetThreshold(report = {}, threshold = DEFAULT_COURSE_SPEC.qualityThreshold) {
-  const floor = Math.max(45, Number(threshold || DEFAULT_COURSE_SPEC.qualityThreshold) - 20)
-  return REVIEW_SCORE_KEYS.every(key => Number(report[key] || 0) >= floor)
-}
-
 export function normalizeIssue(issue, index = 0) {
   if (typeof issue === 'string') {
     return {
@@ -80,13 +56,12 @@ export function normalizeIssue(issue, index = 0) {
   const severity = ['blocking', 'high'].includes(rawSeverity) ? 'blocking'
     : ['suggestion', 'low'].includes(rawSeverity) ? 'suggestion' : 'important'
   return {
-    ...issue,
     id: issue?.id || `issue-${index + 1}`,
     type: cleanText(issue?.type || 'review_note'),
     severity,
     message: cleanText(issue?.message || issue?.detail || issue?.type || ''),
-    impact: issue?.impact === 'downstream' ? 'downstream' : 'local',
-    requiresHuman: Boolean(issue?.requiresHuman)
+    nodeId: cleanText(issue?.nodeId || ''),
+    sourceRange: cleanText(issue?.sourceRange || '')
   }
 }
 
@@ -98,14 +73,6 @@ export function normalizeReviewReport(report = {}, draftVersion = 0, at) {
     .map(normalizeIssue)
     .filter(issue => issue.message)
   return {
-    ...report,
-    ...normalizeReviewScores({
-      coverage: Number(report.coverage ?? 0),
-      grounding: Number(report.grounding ?? 0),
-      logic: Number(report.logic ?? 0),
-      detail: Number(report.detail ?? 0),
-      sourceCoverage: Number(report.sourceCoverage ?? 0)
-    }),
     summary: cleanText(report.summary || ''),
     issues,
     requestedDecision,
@@ -119,19 +86,21 @@ export function normalizeReviewReport(report = {}, draftVersion = 0, at) {
 }
 
 const blockingIssues = report => (report.issues || []).filter(issue => issue.severity === 'blocking')
-const humanIssues = report => (report.issues || []).filter(issue => issue.requiresHuman)
-const issuesAffectDownstream = report =>
-  (report.issues || []).some(issue => (issue.severity === 'blocking' || issue.requiresHuman) && issue.impact === 'downstream')
 
-export function normalizedReviewDecision(report = {}, threshold = DEFAULT_COURSE_SPEC.qualityThreshold) {
-  const contentNeedsWork =
-    report.requestedDecision === 'human_review' ||
-    report.decision === 'human_review' ||
-    humanIssues(report).length > 0 ||
-    blockingIssues(report).length > 0
-  if (contentNeedsWork) return 'revise'
-  if (!scoresMeetThreshold(report, threshold)) return 'revise'
-  return 'approve'
+/**
+ * 审查判定只看一件事：有没有 blocking 问题。
+ *
+ * 旧实现用五项评分 + 阈值 + 分数下限来决定放行，那套机制的问题是：分数是模型的
+ * 自报感受，既不稳定也不可解释，还得靠量纲归一化兜底；而真正的判据（"有没有必须
+ * 改的问题"）本来就在 issues 里。现在模型只回答 approve/revise，但**判定权在问题
+ * 清单上**：没有 blocking 就是通过。
+ *
+ * human_review 不再作为人工门禁（链路是全自动的），按"这里需要重写"处理。
+ * 不使用 decision 字段做判据还有一个好处：模型答 revise 却列不出 blocking 问题时，
+ * 不会触发一轮无意义的重写。
+ */
+export function normalizedReviewDecision(report = {}) {
+  return blockingIssues(report).length ? 'revise' : 'approve'
 }
 
 // ---------------------------------------------------------------- 大纲与切分
@@ -281,21 +250,9 @@ function updateNode(lesson, nodeId, updater) {
   return { ...lesson, nodes, status: deriveLessonStatus(nodes), updatedAt: nowIso() }
 }
 
-/** 上游节点通过后，解除它对后文的阻塞。 */
-function releaseDownstreamBlocks(nodes, sourceNodeId, at) {
-  return nodes.map(node => {
-    const blockers = (node.blockedByNodeIds || []).filter(id => id !== sourceNodeId)
-    if (blockers.length === (node.blockedByNodeIds || []).length) return node
-    return {
-      ...node,
-      blockedByNodeIds: blockers,
-      status: blockers.length || !node.draft ? node.status : 'node_review',
-      reviewRequired: blockers.length ? node.reviewRequired : true,
-      reviewDecision: blockers.length ? node.reviewDecision : null,
-      updatedAt: nowIso(at)
-    }
-  })
-}
+// 说明：旧实现里有"上游节点的问题阻塞下游节点、上游通过后下游自动重查"的机制。
+// 它属于反复确认那一类：一次审查的问题会引发后续节点重审，链路随之变长且难以收敛。
+// 跨节点的一致性改由终审一次性检查，节点审查只对本节点负责。
 
 /**
  * 保存草稿。草稿有实际变化才追加版本；修订来源会累加修订次数并清空该通道的失败计数。
@@ -312,7 +269,11 @@ export function saveNodeDraft(lesson, nodeId, markdown, { source = 'writer', tra
       versions: changed ? versioned(draft, node.versions, { source, trace }, at) : node.versions,
       reviewRequired: changed || !node.reviewerReports?.length,
       reviewDecision: changed ? null : node.reviewDecision,
-      revisionCount: source === 'revision' && changed
+      // 修订次数按"已完成的修订尝试"计数，而不是按"内容是否变化"计数。
+      // 模型有时会原样返回上一版；若原样返回不计入上限，审查→修订就会在两步之间
+      // 无限循环，直到撞上流水线步数上限后整篇重跑（真正的成本灾难）。
+      // 上限才是终止条件，内容是否变化只影响版本历史（versions 仍然只在变化时追加）。
+      revisionCount: source === 'revision'
         ? Number(node.revisionCount || 0) + 1
         : Number(node.revisionCount || 0),
       taskFailures: source === 'revision'
@@ -337,20 +298,19 @@ export function saveNodeDraft(lesson, nodeId, markdown, { source = 'writer', tra
  */
 export function applyNodeReview(lesson, nodeId, report = {}, { courseSpec = {}, trace = null, at } = {}) {
   const spec = { ...DEFAULT_COURSE_SPEC, ...courseSpec }
-  const threshold = Number(spec.qualityThreshold)
-  let applied = null
 
-  const targetIndex = (lesson.nodes || []).findIndex(node => node.id === nodeId)
-  let next = updateNode(lesson, nodeId, node => {
+  return updateNode(lesson, nodeId, node => {
     if (!node.draft) throw new Error('节点必须先有草稿才能审查')
     const normalized = normalizeReviewReport({ ...report, trace }, node.versions?.length || 0, at)
     if (Number(normalized.reviewedDraftVersion) !== Number(node.versions?.length || 0)) {
       return { ...node, reviewRequired: true, taskError: null, updatedAt: nowIso(at) }
     }
-    let decision = normalizedReviewDecision(normalized, threshold)
-    const autoRevisionExhausted = decision === 'revise' &&
+
+    // 重写上限用尽就等于通过（带警告）：一个反复改不好的段落不该让整课的笔记永远产不出来。
+    const wanted = normalizedReviewDecision(normalized)
+    const autoRevisionExhausted = wanted === 'revise' &&
       Number(node.revisionCount || 0) >= Number(spec.maxAutoRevisions)
-    if (autoRevisionExhausted) decision = 'approve'
+    const decision = autoRevisionExhausted ? 'approve' : wanted
 
     const finalReport = {
       ...normalized,
@@ -359,7 +319,6 @@ export function applyNodeReview(lesson, nodeId, report = {}, { courseSpec = {}, 
       autoRevisionExhausted,
       autoAcceptedWithWarnings: autoRevisionExhausted
     }
-    applied = { decision, autoRevisionExhausted, downstreamImpact: decision === 'revise' && issuesAffectDownstream(finalReport) }
 
     const base = {
       ...node,
@@ -368,17 +327,15 @@ export function applyNodeReview(lesson, nodeId, report = {}, { courseSpec = {}, 
       reviewDecision: decision,
       taskError: null,
       taskFailures: { ...(node.taskFailures || {}), reviewer: 0 },
-      blocksDownstream: applied.downstreamImpact,
       autoAcceptedWithWarnings: Boolean(node.autoAcceptedWithWarnings || autoRevisionExhausted),
       updatedAt: nowIso(at)
     }
     if (decision === 'approve') {
-      return { ...base, status: 'node_approved', approvedAt: nowIso(at), humanReviewRequired: false, blocksDownstream: false }
+      return { ...base, status: 'node_approved', approvedAt: nowIso(at) }
     }
     return {
       ...base,
       status: 'node_revision_required',
-      humanReviewRequired: false,
       revisionRequests: versioned({
         message: finalReport.issues.map(issue => issue.message).filter(Boolean).join('；') ||
           finalReport.summary || '审查发现需要修正的内容问题。',
@@ -387,29 +344,6 @@ export function applyNodeReview(lesson, nodeId, report = {}, { courseSpec = {}, 
       }, node.revisionRequests, { source: 'reviewer' }, at)
     }
   })
-
-  if (applied?.decision === 'approve') {
-    const nodes = releaseDownstreamBlocks(next.nodes, nodeId, at)
-    next = { ...next, nodes, status: deriveLessonStatus(nodes) }
-  } else if (applied?.downstreamImpact && targetIndex >= 0) {
-    const message = '上游节点存在可能影响后文的实质问题；上游通过后，本节点会自动重新检查一致性。'
-    const nodes = next.nodes.map((node, index) => {
-      if (index <= targetIndex) return node
-      if (!node.draft || ['node_revision_required', 'node_human_review', 'node_failed'].includes(node.status)) return node
-      return {
-        ...node,
-        status: 'node_review',
-        reviewRequired: true,
-        reviewDecision: null,
-        approvedAt: null,
-        blockedByNodeIds: [...new Set([...(node.blockedByNodeIds || []), nodeId])],
-        consistencyRequests: [...(node.consistencyRequests || []).slice(-9), { sourceNodeId: nodeId, message, at: nowIso(at) }],
-        updatedAt: nowIso(at)
-      }
-    })
-    next = { ...next, nodes, status: deriveLessonStatus(nodes) }
-  }
-  return next
 }
 
 export function requestNodeRevision(lesson, nodeId, request = '', { at } = {}) {
@@ -440,35 +374,30 @@ export function approveNodeHuman(lesson, nodeId, reason = '', { at } = {}) {
     approvalReason: note,
     updatedAt: nowIso(at)
   }))
-  const nodes = releaseDownstreamBlocks(next.nodes, nodeId, at)
-  return { ...next, nodes, status: deriveLessonStatus(nodes) }
+  return next
 }
 
 /**
  * 审查通过后放行节点。程序化的放行入口，因此严格要求"当前草稿已有通过的审查报告"。
  */
-export function approveNode(lesson, nodeId, { courseSpec = {}, at } = {}) {
-  const spec = { ...DEFAULT_COURSE_SPEC, ...courseSpec }
+export function approveNode(lesson, nodeId, { at } = {}) {
   const node = (lesson.nodes || []).find(item => item.id === nodeId)
   if (!node) throw new Error(`节点不存在：${nodeId}`)
   if (!node.draft) throw new Error('节点必须先有草稿才能放行')
   const report = (node.reviewerReports || []).at(-1)?.value
   if (!report) throw new Error('节点必须先通过审查才能放行')
-  if (normalizedReviewDecision(report, Number(spec.qualityThreshold)) !== 'approve') {
+  if (normalizedReviewDecision(report) !== 'approve') {
     throw new Error('审查未通过，不能放行节点')
   }
   if (Number(report.reviewedDraftVersion || 0) !== Number(node.versions?.length || 0)) {
     throw new Error('当前草稿版本尚未审查，不能放行')
   }
-  const next = updateNode(lesson, nodeId, current => ({
+  return updateNode(lesson, nodeId, current => ({
     ...current,
     status: 'node_approved',
     approvedAt: nowIso(at),
-    blocksDownstream: false,
     updatedAt: nowIso(at)
   }))
-  const nodes = releaseDownstreamBlocks(next.nodes, nodeId, at)
-  return { ...next, nodes, status: deriveLessonStatus(nodes) }
 }
 
 const issueMessage = issue => typeof issue === 'string'
@@ -498,7 +427,7 @@ export function applyFinalReview(lesson, report = {}, { courseSpec = {}, at } = 
   if (!lesson.finalNote?.markdown) throw new Error('必须先拼装出完整笔记才能终审')
 
   const normalized = normalizeReviewReport(report, lesson.finalNoteVersions?.length || 0, at)
-  const decision = normalizedReviewDecision(normalized, Number(spec.qualityThreshold))
+  const decision = normalizedReviewDecision(normalized)
   const qualityReport = { ...normalized, decision, assembledNodeCount: lesson.nodes?.length || 0 }
   const stamp = nowIso(at)
 

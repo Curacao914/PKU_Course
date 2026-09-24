@@ -8,7 +8,7 @@ import {
   saveNodeDraft
 } from './node-lifecycle.mjs'
 import { executeCourseTask } from './task-runner.mjs'
-import { getNextCourseWorkerTask } from './worker-tasks.mjs'
+import { getNextCourseWorkerTasks } from './worker-tasks.mjs'
 
 /**
  * 单课笔记流水线的编排循环：领任务 → 调模型 → 应用动作 → 再领任务。
@@ -23,6 +23,20 @@ import { getNextCourseWorkerTask } from './worker-tasks.mjs'
  */
 
 const TERMINAL_STATUSES = ['completed', 'failed', 'needs_attention']
+
+/**
+ * 步数上限默认不设。
+ *
+ * 旧实现把 maxSteps 当成质量保险丝，实际效果是：几节课里只要有几个节点需要重写，
+ * 就会撞上限——而撞上限的代价不是"少写一点"，是整篇笔记不产出、账本退回上一阶段、
+ * 下一轮从头再跑一遍，钱和时间双倍付。真正的终止条件是状态机本身（每个节点最多重写
+ * 两次、终审的修订预算、空闲即停），步数上限只该用在调试期。因此默认不设，
+ * 需要时用 --max-steps 显式给一个值。
+ */
+export const DEFAULT_NOTES_MAX_STEPS = Number.POSITIVE_INFINITY
+
+/** 连续多少个批次全部失败就停：这是真死循环（网络/凭据全挂）的兜底，不是质量闸门。 */
+const MAX_CONSECUTIVE_FAILED_BATCHES = 3
 
 export function createInitialLesson({
   key, order = 1, title, transcript, sourceMap = [], pptText = [], supplements = [], blueprint = {}
@@ -133,31 +147,86 @@ export async function runLessonNotes({
   modelConfig,
   callModel,
   autoApproveOutline = true,
-  maxSteps = 40,
+  maxSteps = DEFAULT_NOTES_MAX_STEPS,
+  reviewConcurrency = 2,
+  totalConcurrency = 3,
   at,
-  onEvent = () => {}
+  onEvent = () => {},
+  // 每应用完一步就回调一次，供调用方把课次状态落盘：模型调用很贵，
+  // 只有把中间状态留下来，崩了才能续跑，事后也才有评审报告可查。
+  onState = () => {}
 } = {}) {
   if (!lesson?.transcript) throw new Error('缺少转录稿，无法生成笔记')
+  const maxTaskFailures = Math.max(1, Number(courseSpec.maxTechnicalRetries || 2))
   let current = lesson
   const steps = []
+  const failures = new Map()
+  let used = 0
+  let consecutiveFailedBatches = 0
 
-  for (let index = 0; index < maxSteps; index += 1) {
+  while (used < maxSteps) {
     if (TERMINAL_STATUSES.includes(current.status)) {
       return { lesson: current, steps, stopReason: current.status, idleDetail: null }
     }
 
     const workflow = { status: current.status, courseSpec, lessons: [current] }
-    const task = getNextCourseWorkerTask(workflow)
-    if (!task || task.type === 'idle') {
-      return { lesson: current, steps, stopReason: 'idle', idleDetail: task || null }
+    // 一批最多三个任务：写一个节点 + 改一个节点 + 审两个节点（彼此独立，可并发）。
+    const batch = getNextCourseWorkerTasks(workflow, { reviewConcurrency, totalConcurrency }) || []
+    const tasks = batch.filter(task => task && task.type !== 'idle')
+    if (!tasks.length) {
+      return { lesson: current, steps, stopReason: 'idle', idleDetail: batch[0] || null }
     }
 
-    const action = await executeCourseTask(task, { modelConfig, callModel })
-    const applied = applyTaskAction(current, action, { courseSpec, autoApproveOutline, at })
-    current = applied.lesson
-    const step = { index, taskType: task.type, action: action?.type || null, note: applied.note, taskKey: task.taskKey || null }
-    steps.push(step)
-    onEvent(step)
+    const results = await Promise.all(tasks.map(async task => {
+      try {
+        return { task, action: await executeCourseTask(task, { modelConfig, callModel }) }
+      } catch (error) {
+        return { task, error: error instanceof Error ? error.message : String(error) }
+      }
+    }))
+
+    // 应用顺序固定：先落内容的，后做判定的（同批里审查的节点与写作/修订的节点互不重叠，
+    // 顺序只影响可读性；万一重叠，applyTaskAction 里的过期草稿保护会拒绝写入）。
+    const rank = { 'write-node': 0, 'revise-node': 1, 'review-node': 2, assemble: 3, 'final-review': 4 }
+    results.sort((left, right) => (rank[left.task.type] ?? 9) - (rank[right.task.type] ?? 9))
+
+    let batchFailed = 0
+    for (const { task, action, error } of results) {
+      used += 1
+      if (error) {
+        batchFailed += 1
+        const count = Number(failures.get(task.taskKey) || 0) + 1
+        failures.set(task.taskKey, count)
+        const step = { index: steps.length, taskType: task.type, action: null, note: 'failed', taskKey: task.taskKey || null, error }
+        steps.push(step)
+        onEvent(step)
+        // 同一个任务连续失败到上限就整轮停下：这通常意味着凭据、配额或网络出了系统性问题，
+        // 继续重试只会重复烧钱。状态已经落盘，修好之后可以 --resume 续跑。
+        if (count > maxTaskFailures) {
+          return { lesson: current, steps, stopReason: 'task-failures', idleDetail: { taskKey: task.taskKey, error, taskType: task.type } }
+        }
+        continue
+      }
+      failures.delete(task.taskKey)
+      const applied = applyTaskAction(current, action, { courseSpec, autoApproveOutline, at })
+      current = applied.lesson
+      const step = { index: steps.length, taskType: task.type, action: action?.type || null, note: applied.note, taskKey: task.taskKey || null }
+      steps.push(step)
+      onEvent(step)
+      onState(current, step)
+    }
+
+    // 偶发单点失败不该拖垮整轮，但"连续整批全挂"是实现层面的系统性故障
+    // （凭据、配额、网络），此时停下并如实报错，比继续重复烧钱更负责。
+    consecutiveFailedBatches = batchFailed === results.length && results.length > 0 ? consecutiveFailedBatches + 1 : 0
+    if (consecutiveFailedBatches >= MAX_CONSECUTIVE_FAILED_BATCHES) {
+      return {
+        lesson: current,
+        steps,
+        stopReason: 'task-failures',
+        idleDetail: { error: results[0]?.error || '连续多批任务全部失败', taskType: results[0]?.task?.type || null }
+      }
+    }
   }
 
   return { lesson: current, steps, stopReason: 'max-steps', idleDetail: null }

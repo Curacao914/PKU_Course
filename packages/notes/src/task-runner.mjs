@@ -1,7 +1,7 @@
 import { cleanText } from '@course/core'
 
 import { buildPrompt, callCourseModel } from './ai-adapter.mjs'
-import { normalizeReviewScores } from './node-lifecycle.mjs'
+// 审查只回答"要不要重写这一段"，不再有五项评分，因此这里也不需要量纲归一化。
 
 /**
  * 角色执行器：把"该做什么"翻译成一次模型调用，并返回可落库的动作。
@@ -48,10 +48,12 @@ export function validateMarkdown(value) {
 }
 
 export function validateReview(value) {
+  // human_review 仍被接受：模型有沿用这个词的习惯，而链路是全自动的，
+  // 判定看的是 issues 里有没有 blocking，不看它自报的 decision。
+  // 直接报错会让一次本来有内容的审查白白作废并重试一次。
   if (!value || !['approve', 'revise', 'human_review'].includes(value.decision)) {
     throw new Error('审查结果无效')
   }
-  normalizeReviewScores(value)
   value.summary = cleanText(value.summary || '')
   value.issues = (Array.isArray(value.issues) ? value.issues : []).map((issue, index) => ({
     id: issue?.id || `issue-${index + 1}`,
@@ -59,9 +61,7 @@ export function validateReview(value) {
     severity: ['blocking', 'important', 'suggestion'].includes(issue?.severity) ? issue.severity : 'important',
     message: cleanText(issue?.message || issue?.detail || ''),
     nodeId: cleanText(issue?.nodeId || ''),
-    sourceRange: cleanText(issue?.sourceRange || ''),
-    impact: issue?.impact === 'downstream' ? 'downstream' : 'local',
-    requiresHuman: Boolean(issue?.requiresHuman)
+    sourceRange: cleanText(issue?.sourceRange || '')
   })).filter(issue => issue.message)
   return value
 }
@@ -461,18 +461,15 @@ export async function executeCourseTask(task, options = {}) {
         sourceText: task.node.sourceText,
         pptText: task.node.pptText,
         schema: {
-          coverage: 0, grounding: 0, logic: 0, detail: 0, sourceCoverage: 0,
           summary: 'string',
           issues: [{
             type: 'string',
             severity: 'blocking|important|suggestion',
             message: 'string',
             nodeId: task.node.id,
-            sourceRange: 'string',
-            impact: 'local|downstream',
-            requiresHuman: false
+            sourceRange: 'string'
           }],
-          decision: 'approve|revise|human_review'
+          decision: 'approve|revise'
         }
       })
     })
@@ -524,18 +521,15 @@ export async function executeCourseTask(task, options = {}) {
         }).join('\n'),
         pptText: task.lesson?.finalNote?.markdown,
         schema: {
-          coverage: 0, grounding: 0, logic: 0, detail: 0, sourceCoverage: 0,
           summary: 'string',
           issues: [{
             type: 'string',
             severity: 'blocking|important|suggestion',
             message: 'string',
             nodeId: 'string',
-            sourceRange: 'string',
-            impact: 'local|downstream',
-            requiresHuman: false
+            sourceRange: 'string'
           }],
-          decision: 'approve|revise|human_review'
+          decision: 'approve|revise'
         }
       })
     })

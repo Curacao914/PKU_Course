@@ -236,16 +236,38 @@ export function createCommands(context) {
     const outputDir = path.resolve(options.options['output-dir'] || path.dirname(transcriptPath))
     fs.mkdirSync(outputDir, { recursive: true })
 
-    const lesson = createInitialLesson({
-      key: replayKey || `lesson-${Date.now()}`,
-      title: lessonTitle,
-      transcript,
-      blueprint: { mainLine: '' }
-    })
+    // 中间状态落盘：模型调用是这条链路里最贵的资源，而 runLessonNotes 全程在内存里。
+    // 每一步都把课次状态写成 JSON，崩了、超步数了、机器重启了都能从最近一步续跑；
+    // 同时也是事后唯一能拿到的评审报告与节点草稿（笔记成品只保留最终稿）。
+    const statePath = path.join(outputDir, 'lesson-state.json')
+    const resume = options.flags?.has('resume') && fs.existsSync(statePath)
+    const lesson = resume
+      ? JSON.parse(fs.readFileSync(statePath, 'utf8')).lesson
+      : createInitialLesson({
+        key: replayKey || `lesson-${Date.now()}`,
+        title: lessonTitle,
+        transcript,
+        blueprint: { mainLine: '' }
+      })
+    const saveState = (current, step) => {
+      const payload = {
+        schemaVersion: 1,
+        savedAt: new Date().toISOString(),
+        step,
+        lesson: current
+      }
+      const tempPath = `${statePath}.tmp`
+      fs.writeFileSync(tempPath, `${JSON.stringify(payload)}`)
+      fs.renameSync(tempPath, statePath)
+    }
     const courseSpec = {
       courseName: course,
       teacher: options.options.teacher || '',
-      promptVersion: options.options['prompt-version'] || undefined
+      promptVersion: options.options['prompt-version'] || undefined,
+      // 切片粒度：一个节点最多覆盖多少字/多少行转录。默认 12000 字 / 200 行（细切），
+      // 调大就是粗切，用于"切得细到底有没有必要"的对比实验。
+      ...(options.options['node-split-chars'] ? { nodeSplitThreshold: Number(options.options['node-split-chars']) } : {}),
+      ...(options.options['node-split-lines'] ? { nodeSplitLineThreshold: Number(options.options['node-split-lines']) } : {})
     }
 
     const store = openStore(config.ledgerPath)
@@ -271,8 +293,12 @@ export function createCommands(context) {
         modelConfig,
         callModel,
         autoApproveOutline,
-        maxSteps: Number(options.options['max-steps'] || 40),
-        onEvent: step => stderr(`  [${step.index + 1}] ${step.taskType} → ${step.action || '-'} (${step.note})`)
+        // 默认不设步数上限：终止由状态机负责（每节点最多重写两次、终审修订预算、空闲即停）。
+        maxSteps: options.options['max-steps'] ? Number(options.options['max-steps']) : undefined,
+        reviewConcurrency: Number(options.options['review-concurrency'] || 2),
+        totalConcurrency: Number(options.options['concurrency'] || 3),
+        onEvent: step => stderr(`  [${step.index + 1}] ${step.taskType} → ${step.action || '-'} (${step.note})`),
+        onState: saveState
       })
 
       const produced = result.lesson.status === 'completed' && Boolean(result.lesson.finalNote?.markdown)
@@ -289,7 +315,9 @@ export function createCommands(context) {
         nodeCount: result.lesson.nodes.length,
         finalChars: result.lesson.finalNote?.markdown?.length || 0,
         steps: result.steps,
-        autoApproveOutline
+        autoApproveOutline,
+        resumed: resume,
+        maxSteps: options.options['max-steps'] ? Number(options.options['max-steps']) : null
       }
       fs.writeFileSync(summaryPath, `${JSON.stringify(summary, null, 2)}\n`)
 
@@ -594,7 +622,15 @@ export function createCommands(context) {
       const perCommand = {
         download: { ...common, 'course-key': task.course_key, title: task.title },
         transcribe: { ...common, media: artifacts.mediaPath, lesson: task.title },
-        notes: { ...common, transcript: artifacts.transcriptPath, lesson: task.title },
+        notes: {
+          ...common,
+          transcript: artifacts.transcriptPath,
+          lesson: task.title,
+          // 这条链路里最贵的两步（写作、审查）都是模型调用，因此"跑一半停下"的代价
+          // 由这两个旗标决定：步数上限要够走完最坏路径，中止后要能续跑。
+          ...(options.options['max-steps'] ? { 'max-steps': options.options['max-steps'] } : {}),
+          ...(options.options['auto-approve-outline'] ? { 'auto-approve-outline': options.options['auto-approve-outline'] } : {})
+        },
         publish: {
           ...common,
           from: path.dirname(artifacts.notePath || ''),
@@ -604,7 +640,10 @@ export function createCommands(context) {
       }
       const commandOptions = {
         ...quiet,
-        options: perCommand[command] || { ...common }
+        options: perCommand[command] || { ...common },
+        // 自动链路默认续跑：笔记阶段每一步都落了盘，重跑一次要花真钱真时间，
+        // 没有理由从第一个节点重来。手工跑 notes 时仍要求显式 --resume。
+        flags: command === 'notes' ? new Set([...(quiet.flags || []), 'resume']) : quiet.flags
       }
 
       const missing = command === 'transcribe' ? !commandOptions.options.media
@@ -934,14 +973,20 @@ export const USAGE = `用法：course <命令> [选项]
   transcribe --media <文件> --course <名称> --lesson <课次> [--replay-key <键>] [--chunk-minutes <分钟>] [--output-dir <目录>]
                                            调用 Paraformer 转录（分片 + R2 中转 + 断点续跑）
   notes      --transcript <文件> --course <名称> --lesson <课次> [--replay-key <键>] [--output-dir <目录>]
-             [--auto-approve-outline 0|1] [--max-steps <步数>]
-                                           从转录稿生成单课笔记（大纲 → 节点 → 审查 → 拼装 → 终审）
+             [--auto-approve-outline 0|1] [--max-steps <步数>] [--resume]
+             [--concurrency <条数>] [--review-concurrency <条数>]
+             [--node-split-chars <字数>] [--node-split-lines <行数>]
+                                           从转录稿生成单课笔记（大纲 → 节点 → 写作 → 审查 → 拼装 → 终审）
+                                           每步把课次状态写入 <输出目录>/lesson-state.json；--resume 从该状态续跑
+                                           默认不设步数上限；并发默认写 1 + 审 2（合计 3 条）
   publish    --from <笔记目录> [--course <名称>] [--lesson <课次>] [--out <站点目录>] [--origin <域名>]
                                            把笔记发布到站点，内容变化时排入一条微信通知
   notify     [--probe] [--loop] [--max-items <条数>]
                                            把账本里排队的通知发到微信；--probe 只验证通道不发消息
-  cycle      [--max-tasks <条数>] [--course <名称>]
+  cycle      [--max-tasks <条数>] [--course <名称>] [--replay-key <键>] [--max-steps <步数>]
+             [--auto-approve-outline 0|1]
                                            一轮完整链路：扫描 → 逐条推进各阶段 → 投递通知
+                                           --max-steps / --auto-approve-outline 会透传给 notes 阶段
   verify     [--course <名称>] [--replay-key <键>] [--out <站点目录>]
                                            验收：跑一轮真实链路并按验收条件逐项断言
 

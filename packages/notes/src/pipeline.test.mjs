@@ -187,6 +187,48 @@ test('the loop stops at maxSteps instead of running forever', async () => {
   assert.equal(result.steps.length, 5)
 })
 
+test('independent tasks in one batch run concurrently', async () => {
+  const { callModel: base } = scriptedModel()
+  let active = 0
+  let peak = 0
+  const callModel = async payload => {
+    active += 1
+    peak = Math.max(peak, active)
+    await new Promise(resolve => setTimeout(resolve, 5))
+    active -= 1
+    return base(payload)
+  }
+  const result = await runLessonNotes({ lesson: lesson(), callModel, modelConfig: {} })
+  assert.equal(result.stopReason, 'completed')
+  assert.ok(peak >= 2, `同一批里的独立任务应并发执行（实际峰值 ${peak}）`)
+})
+
+test('every applied step hands the lesson state back for persistence', async () => {
+  const { callModel } = scriptedModel()
+  const seen = []
+  const result = await runLessonNotes({
+    lesson: lesson(),
+    callModel,
+    modelConfig: {},
+    onState: (current, step) => seen.push({ status: current.status, type: step.taskType })
+  })
+  assert.equal(seen.length, result.steps.length, '每一步都要有落盘机会')
+  assert.equal(seen.at(-1).status, 'completed')
+  assert.equal(seen.at(-1).type, 'final-review')
+})
+
+test('an always-failing task stops the run instead of retrying forever', async () => {
+  const { callModel } = scriptedModel({ reviewer: () => { throw new Error('模型服务不可用') } })
+  const result = await runLessonNotes({
+    lesson: lesson(),
+    callModel,
+    modelConfig: {},
+    courseSpec: { maxTechnicalRetries: 1 }
+  })
+  assert.equal(result.stopReason, 'task-failures')
+  assert.ok(result.steps.some(step => step.note === 'failed' && /模型服务不可用/.test(step.error || '')))
+})
+
 test('the pipeline refuses a lesson without a transcript', async () => {
   await assert.rejects(
     () => runLessonNotes({ lesson: createInitialLesson({ key: 'k', title: 't', transcript: '' }) }),

@@ -75,20 +75,19 @@ test('validateOutline and validateMarkdown reject malformed model output', () =>
   assert.equal(validateMarkdown({ markdown: '正文' }).markdown, '正文')
 })
 
-test('validateReview normalises scores and drops empty issues', () => {
+test('validateReview keeps the issue list and drops empty issues', () => {
   const review = validateReview({
     decision: 'approve',
-    coverage: 8, grounding: 9, logic: 7, detail: 8, sourceCoverage: 9,
+    // 模型仍可能沿用旧格式回传分数：校验层不再解释它们，也不再因为量纲报错。
+    coverage: 999,
     summary: ' 还行 ',
     issues: [{ severity: 'weird', message: '  ' }, { severity: 'blocking', message: ' 结论写反了 ' }]
   })
-  assert.equal(review.coverage, 80)
   assert.equal(review.summary, '还行')
   assert.equal(review.issues.length, 1, '空消息的问题被丢弃')
   assert.equal(review.issues[0].severity, 'blocking')
   assert.equal(review.issues[0].message, '结论写反了')
   assert.throws(() => validateReview({ decision: 'maybe' }), /审查结果无效/)
-  assert.throws(() => validateReview({ decision: 'approve', coverage: 999 }), /审查分数/)
 })
 
 test('validateSpliceData accepts both naming conventions', () => {
@@ -212,7 +211,6 @@ test('review-node stamps the reviewed draft version', async () => {
   }
   const { callModel, calls } = fakeModel(modelReply({
     decision: 'revise',
-    coverage: 8, grounding: 8, logic: 8, detail: 8, sourceCoverage: 8,
     summary: '需要补充',
     issues: [{ severity: 'blocking', message: '缺少法条' }]
   }))
@@ -224,7 +222,6 @@ test('review-node stamps the reviewed draft version', async () => {
   assert.equal(action.type, 'save-node-review')
   assert.equal(action.reviewerReport.decision, 'revise')
   assert.equal(action.reviewerReport.reviewedDraftVersion, 2, '必须记录审查的是第几版')
-  assert.equal(action.reviewerReport.coverage, 80)
   assert.equal(calls[0].role, 'reviewer')
   assert.match(calls[0].prompt.user, /当前草稿|正文/, '审查提示词应包含当前草稿')
 })
@@ -269,8 +266,7 @@ test('final-review hands the assembled note and node index to the reviewer', asy
     finalNote: { markdown: '# 拼装后的完整笔记' }
   }
   const { callModel, calls } = fakeModel(modelReply({
-    decision: 'approve', coverage: 90, grounding: 90, logic: 90, detail: 90, sourceCoverage: 90,
-    summary: '整体可靠', issues: []
+    decision: 'approve', summary: '整体可靠', issues: []
   }))
 
   const action = await executeCourseTask(

@@ -9,13 +9,11 @@ import {
   assertOutlineCoverage,
   deriveLessonStatus,
   normalizeReviewReport,
-  normalizeReviewScores,
   normalizedReviewDecision,
   planNodes,
   recordNodeTaskFailure,
   requestNodeRevision,
-  saveNodeDraft,
-  scoresMeetThreshold
+  saveNodeDraft
 } from './node-lifecycle.mjs'
 
 const node = (id, over = {}) => ({
@@ -152,56 +150,33 @@ test('deriveLessonStatus follows the original precedence', () => {
   assert.equal(deriveLessonStatus([node('a', { status: 'node_failed' })]), 'node_human_review')
 })
 
-test('review scores normalize from both scales and reject nonsense', () => {
-  assert.deepEqual(
-    normalizeReviewScores({ coverage: 8, grounding: 9, logic: 7, detail: 8, sourceCoverage: 9 }),
-    { coverage: 80, grounding: 90, logic: 70, detail: 80, sourceCoverage: 90 },
-    '五项都在 0—10 时按十分制放大'
+test('the review decision only looks at blocking issues', () => {
+  assert.equal(normalizedReviewDecision(approveReport(1)), 'approve')
+  assert.equal(normalizedReviewDecision(reviseReport(1)), 'revise', 'blocking 问题必须重写这一段')
+  assert.equal(
+    normalizedReviewDecision(approveReport(1, { issues: [{ severity: 'suggestion', message: '措辞可更顺' }] })),
+    'approve', '建议不触发重写'
   )
-  assert.deepEqual(
-    normalizeReviewScores({ coverage: 80, grounding: 55, logic: 700 / 10, detail: 100, sourceCoverage: 60 }),
-    { coverage: 80, grounding: 55, logic: 70, detail: 100, sourceCoverage: 60 },
-    '出现大于 10 的分值时按百分制处理'
+  assert.equal(
+    normalizedReviewDecision(approveReport(1, { issues: [{ severity: 'important', message: '可补充' }] })),
+    'approve', 'important 级问题只记录，不重写'
   )
-  assert.throws(() => normalizeReviewScores({ coverage: 120, grounding: 1, logic: 1, detail: 1, sourceCoverage: 1 }), /审查分数 coverage 无效/)
-  assert.throws(() => normalizeReviewScores({ coverage: -1, grounding: 1, logic: 1, detail: 1, sourceCoverage: 1 }), /无效/)
+  // 分数、decision 字段都不再影响判定：模型答 revise 却列不出 blocking 时不该白重写一轮。
+  assert.equal(normalizedReviewDecision(approveReport(1, { coverage: 10, decision: 'revise' })), 'approve')
+  assert.equal(normalizedReviewDecision({ ...approveReport(1), decision: 'human_review' }), 'approve')
 })
 
-test('the pass floor is the threshold minus 20, not the threshold itself', () => {
-  const borderline = { coverage: 55, grounding: 55, logic: 55, detail: 55, sourceCoverage: 55 }
-  assert.equal(scoresMeetThreshold(borderline, 75), true, '75 - 20 = 55 是下限')
-  assert.equal(scoresMeetThreshold({ ...borderline, detail: 54 }, 75), false)
-  assert.equal(scoresMeetThreshold({ ...borderline, detail: 45 }, 60), true, '下限不低于 45')
-  assert.equal(scoresMeetThreshold({ coverage: 0, grounding: 90, logic: 90, detail: 90, sourceCoverage: 90 }, 75), false)
-})
-
-test('the review decision prioritises content problems over scores', () => {
-  assert.equal(normalizedReviewDecision(approveReport(1), 75), 'approve')
-  assert.equal(normalizedReviewDecision(reviseReport(1), 75), 'revise', 'blocking 问题必须修订')
-  assert.equal(
-    normalizedReviewDecision(approveReport(1, { issues: [{ severity: 'suggestion', message: '措辞可更顺' }] }), 75),
-    'approve', 'suggestion 不应触发重写'
-  )
-  assert.equal(
-    normalizedReviewDecision(approveReport(1, { issues: [{ severity: 'important', message: '可补充', requiresHuman: true }] }), 75),
-    'revise', '需人工判断的问题同样必须先修订'
-  )
-  assert.equal(
-    normalizedReviewDecision({ ...approveReport(1), decision: 'human_review' }, 75),
-    'revise'
-  )
-  assert.equal(
-    normalizedReviewDecision(approveReport(1, { coverage: 50 }), 75),
-    'revise', '分数低于下限也要修订'
-  )
-})
-
-test('normalizeReviewReport defaults an unspecified decision to human_review', () => {
-  const report = normalizeReviewReport({ coverage: 8, grounding: 8, logic: 8, detail: 8, sourceCoverage: 8, summary: ' x ' }, 3)
-  assert.equal(report.decision, 'human_review', '模型没给明确结论时应交给人，而不是默认放行')
-  assert.equal(report.coverage, 80)
+test('normalizeReviewReport keeps issues and the reviewed version, without scores', () => {
+  const report = normalizeReviewReport({
+    decision: 'revise',
+    summary: ' x ',
+    issues: [{ severity: 'blocking', message: ' 结论写反了 ', nodeId: 'n1', sourceRange: 'L10-L20' }]
+  }, 3)
   assert.equal(report.reviewedDraftVersion, 3)
   assert.equal(report.summary, 'x')
+  assert.equal(report.issues[0].message, '结论写反了')
+  assert.equal(report.issues[0].nodeId, 'n1')
+  assert.equal(report.coverage, undefined, '不再生成评分为主的字段')
 })
 
 test('a review for a different draft version does not produce a decision', () => {
@@ -217,17 +192,15 @@ test('a review for a different draft version does not produce a decision', () =>
   assert.equal(target.reviewerReports.length, 0)
 })
 
-test('an approving review approves the node and releases its downstream blocks', () => {
-  let current = lesson([node('n1'), node('n2', { status: 'node_review', draft: '下游正文', blockedByNodeIds: ['n1'], versions: [{}] })])
+test('an approving review approves the node and records the report', () => {
+  let current = lesson([node('n1'), node('n2', { status: 'node_review', draft: '下游正文', versions: [{}] })])
   current = saveNodeDraft(current, 'n1', '上游正文')
   const reviewed = applyNodeReview(current, 'n1', approveReport(1), {})
 
   assert.equal(reviewed.nodes[0].status, 'node_approved')
   assert.equal(reviewed.nodes[0].reviewDecision, 'approve')
-  assert.equal(reviewed.nodes[0].reviewerReports.at(-1).value.coverage, 90)
-  const downstream = reviewed.nodes[1]
-  assert.deepEqual(downstream.blockedByNodeIds, [], '上游通过后应解除阻塞')
-  assert.equal(downstream.reviewRequired, true, '被阻塞期间内容可能过时，需重新检查一致性')
+  assert.equal(reviewed.nodes[0].reviewerReports.at(-1).value.summary, '整体可靠')
+  assert.equal(reviewed.nodes[1].status, 'node_review', '下游节点状态只由它自己的审查决定')
 })
 
 test('a revising review requests a revision and keeps the node out of approval', () => {
@@ -253,26 +226,31 @@ test('exhausted auto revisions let a node through with warnings instead of stall
   assert.equal(target.reviewerReports.at(-1).value.autoRevisionExhausted, true)
 })
 
-test('downstream-impacting problems block later nodes and record why', () => {
+test('an unchanged revision still counts toward the revision cap', () => {
+  let current = lesson([node('n1')])
+  current = saveNodeDraft(current, 'n1', '第一版正文')
+  const versions = current.nodes[0].versions.length
+  current = saveNodeDraft(current, 'n1', '第一版正文', { source: 'revision' })
+
+  assert.equal(current.nodes[0].revisionCount, 1, '原样返回也算完成了一次修订尝试')
+  assert.equal(current.nodes[0].versions.length, versions, '内容没变就不追加版本')
+})
+
+test('a node review no longer blocks or re-reviews later nodes', () => {
+  // 旧实现会让上游的 blocking 问题阻塞下游、并在上游修好后让下游重审一次。
+  // 那是反复确认那一类开销，跨节点一致性现在交给终审一次性检查。
   let current = lesson([
     node('n1'),
     node('n2', { status: 'node_approved', draft: '下游正文', versions: [{}] }),
     node('n3', { status: 'node_pending' })
   ])
   current = saveNodeDraft(current, 'n1', '上游正文')
-  const reviewed = applyNodeReview(current, 'n1', reviseReport(1, {
-    issues: [{ severity: 'blocking', message: '结论写反了', impact: 'downstream' }]
-  }), {})
+  const reviewed = applyNodeReview(current, 'n1', reviseReport(1), {})
 
-  const later = reviewed.nodes[1]
-  assert.deepEqual(later.blockedByNodeIds, ['n1'])
-  assert.equal(later.status, 'node_review', '已有正文的下游节点要重新检查一致性')
-  assert.equal(later.approvedAt, null)
-  assert.match(later.consistencyRequests.at(-1).message, /上游节点存在可能影响后文的实质问题/)
-  assert.equal(reviewed.nodes[2].status, 'node_pending', '没有正文的下游节点保持等待')
-
-  const localOnly = applyNodeReview(current, 'n1', reviseReport(1), {})
-  assert.deepEqual(localOnly.nodes[1].blockedByNodeIds, [], '仅本地影响的问题不应阻塞后文')
+  assert.equal(reviewed.nodes[0].status, 'node_revision_required')
+  assert.equal(reviewed.nodes[1].status, 'node_approved', '下游已通过的节点不受上游问题影响')
+  assert.notEqual(reviewed.nodes[1].reviewRequired, true, '不再产生"上游改了下游要重审"的额外审查')
+  assert.equal(reviewed.nodes[2].status, 'node_pending')
 })
 
 test('saveNodeDraft versions only real changes and tracks revision attempts per lane', () => {
@@ -327,15 +305,15 @@ test('approveNode refuses to approve without a passing, current review', () => {
   assert.equal(done.status, 'assembly_pending')
 })
 
-test('human approval demands a reason and release downstream work', () => {
-  let current = lesson([node('n1'), node('n2', { status: 'node_review', draft: '下游', blockedByNodeIds: ['n1'], versions: [{}] })])
+test('human approval demands a reason', () => {
+  let current = lesson([node('n1'), node('n2', { status: 'node_review', draft: '下游', versions: [{}] })])
   current = saveNodeDraft(current, 'n1', '正文')
   assert.throws(() => approveNodeHuman(current, 'n1', '  ', {}), /必须说明理由/)
 
   const done = approveNodeHuman(current, 'n1', '转录缺失该段，人工确认放行', {})
   assert.equal(done.nodes[0].status, 'node_approved')
   assert.equal(done.nodes[0].approvalReason, '转录缺失该段，人工确认放行')
-  assert.deepEqual(done.nodes[1].blockedByNodeIds, [])
+  assert.equal(done.nodes[1].status, 'node_review')
 })
 
 test('requestNodeRevision needs a message and marks the node manual', () => {
