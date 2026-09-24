@@ -43,6 +43,22 @@ test('applyEnvFile lets the existing environment win and reports what it applied
   assert.deepEqual(result.keys.sort(), ['DASHSCOPE_API_KEY', 'PKU_PASSWORD'])
 })
 
+test('keys left blank in the file are not reported as applied', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-env-'))
+  const file = path.join(dir, 'env')
+  fs.writeFileSync(file, [
+    'COURSE_AI_API_KEY=sk-real',
+    'COURSE_AI_BASE_URL=',
+    'COURSE_AI_MODEL=   ',
+    ''
+  ].join('\n'))
+
+  const result = applyEnvFile({}, file)
+  assert.deepEqual(result.keys, ['COURSE_AI_API_KEY'], '留空的键不算已配置')
+  assert.equal(result.env.COURSE_AI_BASE_URL, undefined, '留空不应写进环境，否则会掩盖默认值回落')
+  assert.equal(result.env.COURSE_AI_MODEL, undefined)
+})
+
 test('applyEnvFile treats an empty existing variable as unset', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-env-'))
   const file = path.join(dir, 'env')

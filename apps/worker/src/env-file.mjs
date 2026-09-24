@@ -50,6 +50,10 @@ export function applyEnvFile(env, filePath = DEFAULT_ENV_FILE) {
   const merged = { ...env }
   const applied = []
   for (const [key, value] of Object.entries(parsed)) {
+    // 文件里留空的键视为"未配置"，不写进环境，也不列进 keys。
+    // 否则 doctor 会把留空的键报成"已生效"，让人以为配置好了——
+    // 实际却悄悄回落到默认值（例如 baseUrl 回落成 api.openai.com）。
+    if (String(value ?? '').trim() === '') continue
     if (String(env[key] ?? '').trim() !== '') continue
     merged[key] = value
     applied.push(key)
