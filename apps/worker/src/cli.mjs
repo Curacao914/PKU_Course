@@ -70,6 +70,7 @@ export async function runCli(argv = [], deps = {}) {
     runPython: deps.runPython ?? defaultRunPython,
     which: deps.which ?? defaultWhich,
     openStore: deps.openStore ?? (path => openLedger(path)),
+    callModel: deps.callModel,
     stdout,
     stderr
   })

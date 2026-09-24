@@ -471,6 +471,134 @@ export function approveNode(lesson, nodeId, { courseSpec = {}, at } = {}) {
   return { ...next, nodes, status: deriveLessonStatus(nodes) }
 }
 
+const issueMessage = issue => typeof issue === 'string'
+  ? issue
+  : cleanText(issue?.message || issue?.detail || issue?.type || '')
+
+/** 终审问题能定位到哪些真实节点。定位不到时不能凭空挑一个节点改。 */
+export function issueNodeIds(issues = [], lesson = {}) {
+  const known = new Set((lesson.nodes || []).map(node => node.id))
+  return [...new Set((issues || [])
+    .map(issue => (typeof issue === 'object' ? issue.nodeId : ''))
+    .filter(id => known.has(id)))]
+}
+
+/**
+ * 应用终审结果。
+ *
+ * 四条出口，按"能定位到节点 → 有整体修订预算 → 预算耗尽带警告放行"的顺序判断：
+ *   1. 问题能定位到节点，且相关节点还有修订额度 → 把这些节点退回修订；
+ *   2. 问题定位不到节点（整体结构、跨节点重复）→ 走整篇修订，受 maxFinalAutoRevisions 约束；
+ *   3. 两种修订预算都用尽 → **带警告放行**，并把 autoRevisionExhausted 记进质量报告。
+ *      这是有意的：一个反复修不好的问题不应让整门课永远停在终审。
+ *   4. 终审通过 → 课次完成。
+ */
+export function applyFinalReview(lesson, report = {}, { courseSpec = {}, at } = {}) {
+  const spec = { ...DEFAULT_COURSE_SPEC, ...courseSpec }
+  if (!lesson.finalNote?.markdown) throw new Error('必须先拼装出完整笔记才能终审')
+
+  const normalized = normalizeReviewReport(report, lesson.finalNoteVersions?.length || 0, at)
+  const decision = normalizedReviewDecision(normalized, Number(spec.qualityThreshold))
+  const qualityReport = { ...normalized, decision, assembledNodeCount: lesson.nodes?.length || 0 }
+  const stamp = nowIso(at)
+
+  const finish = (finalReport) => ({
+    ...lesson,
+    status: 'completed',
+    completedAt: stamp,
+    finalReviewAttention: null,
+    finalNote: { ...lesson.finalNote, qualityReport: finalReport, stale: false, updatedAt: stamp },
+    finalReviewReports: versioned(finalReport, lesson.finalReviewReports, { source: 'worker' }, at),
+    qualityReport: finalReport,
+    updatedAt: stamp
+  })
+
+  if (decision !== 'revise') return finish(qualityReport)
+
+  const requests = qualityReport.issues.map(issueMessage).filter(Boolean)
+  const targetIds = issueNodeIds(qualityReport.issues, lesson)
+
+  if (!targetIds.length) {
+    const completedRevisions = Number(lesson.finalRevisionCount || 0)
+    const maxRevisions = Math.max(0, Number(spec.maxFinalAutoRevisions))
+    if (completedRevisions >= maxRevisions) {
+      return finish({ ...qualityReport, decision: 'approve', unmappedIssues: true, autoRevisionExhausted: true, autoAcceptedWithWarnings: true })
+    }
+    return {
+      ...lesson,
+      status: 'final_revision_required',
+      finalReviewAttention: null,
+      finalNote: { ...lesson.finalNote, stale: true, qualityReport },
+      finalReviewReports: versioned(qualityReport, lesson.finalReviewReports, { source: 'worker' }, at),
+      finalRevisionRequests: versioned({
+        message: requests.join('；') || qualityReport.summary || '最终检查要求修正整体结构、跨节点重复或术语一致性。',
+        issues: qualityReport.issues,
+        source: 'final-review'
+      }, lesson.finalRevisionRequests, { source: 'final-review' }, at),
+      qualityReport,
+      updatedAt: stamp
+    }
+  }
+
+  const maxNodeRevisions = Math.max(0, Number(spec.maxAutoRevisions))
+  const eligibleTargetIds = targetIds.filter(id => {
+    const node = (lesson.nodes || []).find(item => item.id === id)
+    return node && Number(node.revisionCount || 0) < maxNodeRevisions
+  })
+  const exhaustedTargetIds = targetIds.filter(id => !eligibleTargetIds.includes(id))
+
+  if (!eligibleTargetIds.length) {
+    return finish({
+      ...qualityReport,
+      decision: 'approve',
+      autoRevisionExhausted: true,
+      autoAcceptedWithWarnings: true,
+      exhaustedNodeIds: exhaustedTargetIds
+    })
+  }
+
+  const reviewForRevision = { ...qualityReport, skippedExhaustedNodeIds: exhaustedTargetIds }
+  const nodes = (lesson.nodes || []).map(node => {
+    if (!eligibleTargetIds.includes(node.id)) return node
+    return {
+      ...node,
+      status: 'node_revision_required',
+      reviewDecision: 'revise',
+      revisionRequests: versioned({
+        message: requests.join('；') || '最终检查要求重新核对本节点。',
+        source: 'final-review'
+      }, node.revisionRequests, { source: 'final-review' }, at),
+      updatedAt: stamp
+    }
+  })
+
+  return {
+    ...lesson,
+    status: 'node_revision_required',
+    nodes,
+    finalReviewAttention: null,
+    finalNote: { ...lesson.finalNote, stale: true, qualityReport: reviewForRevision },
+    finalReviewReports: versioned(reviewForRevision, lesson.finalReviewReports, { source: 'worker' }, at),
+    qualityReport: reviewForRevision,
+    updatedAt: stamp
+  }
+}
+
+/** 整篇修订完成后回到终审，并累加整篇修订次数。 */
+export function saveFinalNoteRevision(lesson, markdown, { trace = null, at } = {}) {
+  const next = cleanText(markdown)
+  if (!next) throw new Error('修订后的笔记不能为空')
+  const stamp = nowIso(at)
+  return {
+    ...lesson,
+    status: 'final_review',
+    finalNote: { ...lesson.finalNote, markdown: next, stale: true, updatedAt: stamp },
+    finalNoteVersions: versioned(next, lesson.finalNoteVersions, { source: 'final-revision', trace }, at),
+    finalRevisionCount: Number(lesson.finalRevisionCount || 0) + 1,
+    updatedAt: stamp
+  }
+}
+
 /** 记录一次技术性失败（网络、超时、格式），用于退避重试而不改动内容状态。 */
 export function recordNodeTaskFailure(lesson, nodeId, { taskType = 'writer', error = '', retryable = true, at } = {}) {
   return updateNode(lesson, nodeId, node => ({

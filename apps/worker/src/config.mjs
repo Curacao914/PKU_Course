@@ -11,7 +11,8 @@ const SECRET_KEYS = [
   'PKU_PASSWORD',
   'DASHSCOPE_API_KEY',
   'R2_ACCESS_KEY_ID',
-  'R2_SECRET_ACCESS_KEY'
+  'R2_SECRET_ACCESS_KEY',
+  'COURSE_AI_API_KEY'
 ]
 
 /** 新系统使用独立目录，与旧 worker 的 ~/.law-tech-course-worker 并存不冲突。 */
@@ -37,6 +38,24 @@ export function resolveWorkerConfig(env = process.env, options = {}) {
     ffprobe: env.COURSE_FFPROBE || 'ffprobe',
     headless: (options.headless ?? env.COURSE_HEADLESS) !== '0',
     limits: resolveAcquisitionLimits(env),
+    ai: {
+      apiKey: env.COURSE_AI_API_KEY || env.SCHEDULE_AI_API_KEY || env.OPENAI_API_KEY || '',
+      baseUrl: env.COURSE_AI_BASE_URL || env.SCHEDULE_AI_BASE_URL || 'https://api.openai.com/v1',
+      provider: env.COURSE_AI_PROVIDER || 'openai-compatible',
+      timeoutMs: Number(env.COURSE_AI_TIMEOUT_MS || 240_000),
+      temperature: Number(env.COURSE_AI_TEMPERATURE || 0.2),
+      jsonRetries: Number(env.COURSE_AI_JSON_RETRIES ?? 1),
+      costMode: env.COURSE_LLM_COST_MODE || 'economy',
+      models: {
+        default: env.COURSE_AI_MODEL || env.SCHEDULE_AI_MODEL || '',
+        outline: env.COURSE_OUTLINE_MODEL || '',
+        writer: env.COURSE_WRITER_MODEL || '',
+        reviewer: env.COURSE_REVIEWER_MODEL || '',
+        revision: env.COURSE_REVISION_MODEL || '',
+        finalReview: env.COURSE_FINAL_REVIEW_MODEL || '',
+        brief: env.COURSE_BRIEF_MODEL || ''
+      }
+    },
     asr: {
       entry: ASR_WORKER_ENTRY,
       chunkMinutes: Number(env.COURSE_ASR_CHUNK_MINUTES || 45),
@@ -51,7 +70,8 @@ export function resolveWorkerConfig(env = process.env, options = {}) {
       R2_ACCESS_KEY_ID: env.R2_ACCESS_KEY_ID || '',
       R2_SECRET_ACCESS_KEY: env.R2_SECRET_ACCESS_KEY || '',
       R2_ENDPOINT: env.R2_ENDPOINT || '',
-      R2_BUCKET: env.R2_BUCKET || ''
+      R2_BUCKET: env.R2_BUCKET || '',
+      COURSE_AI_API_KEY: env.COURSE_AI_API_KEY || ''
     }
   }
 }
@@ -83,6 +103,13 @@ export function describeConfig(config) {
     chromePath: config.chromePath || '(自动探测)',
     limits: config.limits,
     asr: { ...config.asr },
+    ai: {
+      baseUrl: config.ai.baseUrl,
+      provider: config.ai.provider,
+      costMode: config.ai.costMode,
+      timeoutMs: config.ai.timeoutMs,
+      models: config.ai.models
+    },
     credentials: Object.fromEntries(SECRET_KEYS.map(key => [key, state(config.sources[key])])),
     // R2 端点与桶名不是密钥，照常显示，便于排查对象存储配置
     storage: {

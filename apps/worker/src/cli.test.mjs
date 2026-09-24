@@ -72,6 +72,40 @@ function harness(overrides = {}) {
 
 const parse = line => JSON.parse(line)
 
+/** 与 pipeline 测试同构的假模型：按角色分发。 */
+function fakeModel() {
+  const calls = []
+  let writerCount = 0
+  const callModel = async ({ role }) => {
+    calls.push(role)
+    if (role === 'outline') {
+      return { parsed: {
+        mainLine: '主线',
+        // 覆盖全部 6 行（标题行 + 5 句），避免触发覆盖修复，保持这一步只验证主干
+        outline: [{ id: 'o1', title: '一、甲', lineRange: [1, 6] }]
+      }, trace: { role, model: 'fake' } }
+    }
+    if (role === 'writer') return { parsed: { markdown: `第 ${++writerCount} 段正文` }, trace: { role } }
+    if (role === 'reviewer') {
+      return { parsed: {
+        decision: 'approve', coverage: 90, grounding: 90, logic: 90, detail: 90, sourceCoverage: 90,
+        summary: '通过', issues: []
+      }, trace: { role } }
+    }
+    if (role === 'splicer') {
+      return { parsed: { courseOverview: {}, sectionSummaries: {}, sectionQuizzes: {}, knowledgeLink: {}, appendix: {} }, trace: { role } }
+    }
+    if (role === 'finalReview') {
+      return { parsed: {
+        decision: 'approve', coverage: 90, grounding: 90, logic: 90, detail: 90, sourceCoverage: 90,
+        summary: '可靠', issues: []
+      }, trace: { role } }
+    }
+    throw new Error(`未预期的角色：${role}`)
+  }
+  return { callModel, calls }
+}
+
 test('help prints usage without touching dependencies', async () => {
   const { deps, lines, calls } = harness()
   assert.equal(await runCli(['help'], deps), 0)
@@ -264,6 +298,69 @@ test('transcribe calls the python worker with the resolved paths and only ASR en
   const payload = parse(lines.at(-1))
   assert.equal(payload.summary.sentenceCount, 2)
   assert.match(payload.transcript, /raw-transcript\.md$/)
+})
+
+test('notes turns a transcript file into a completed note and a ledger stage', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const transcriptPath = path.join(dir, 'raw-transcript.md')
+  fs.writeFileSync(transcriptPath, [
+    '# 刑法分论 · 第10-12节 · 原始课堂转录',
+    '',
+    '[00:00:01 – 00:00:05] 第一句课堂内容',
+    '[00:00:06 – 00:00:10] 第二句课堂内容',
+    '[00:00:11 – 00:00:15] 第三句课堂内容',
+    '[00:00:16 – 00:00:20] 第四句课堂内容',
+    '[00:00:21 – 00:00:25] 第五句课堂内容'
+  ].join('\n'))
+
+  const model = fakeModel()
+  const { deps, lines, errors, ledger } = harness({ callModel: model.callModel })
+  ledger.discoverReplays([{ replay_key: 'replay-1', course_key: 'course-abc' }])
+  ledger.reportStage({ id: ledger.getTask('replay-1').id, stage: 'transcript_ready' })
+
+  const code = await runCli([
+    'notes', '--transcript', transcriptPath, '--course', '刑法分论', '--lesson', '第10-12节',
+    '--replay-key', 'replay-1', '--output-dir', path.join(dir, 'notes')
+  ], deps)
+
+  const payload = parse(lines.at(-1))
+  assert.equal(code, 0, errors.join('\n'))
+  assert.equal(payload.produced, true)
+  assert.equal(payload.status, 'completed')
+  assert.equal(payload.task.to, 'notes_ready')
+
+  const written = fs.readFileSync(payload.notePath, 'utf8')
+  assert.match(written, /^# 第10-12节/m)
+  assert.match(written, /第 1 段正文/)
+  assert.equal(ledger.getTask('replay-1').stage, 'notes_ready')
+  assert.ok(ledger.getTask('replay-1').artifacts.notePath)
+
+  const summary = JSON.parse(fs.readFileSync(payload.summaryPath, 'utf8'))
+  assert.equal(summary.stopReason, 'completed')
+  assert.deepEqual(model.calls, ['outline', 'writer', 'reviewer', 'splicer', 'finalReview'])
+})
+
+test('notes stops at the outline gate in manual mode and records why', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const transcriptPath = path.join(dir, 'raw-transcript.md')
+  fs.writeFileSync(transcriptPath, '[00:00:01 – 00:00:05] 内容')
+  const model = fakeModel()
+  const { deps, lines, ledger } = harness({ callModel: model.callModel })
+  ledger.discoverReplays([{ replay_key: 'replay-1', course_key: 'course-abc' }])
+
+  const code = await runCli([
+    'notes', '--transcript', transcriptPath, '--course', '刑法分论', '--lesson', '第10-12节',
+    '--replay-key', 'replay-1', '--auto-approve-outline', '0', '--output-dir', path.join(dir, 'notes')
+  ], deps)
+
+  const payload = parse(lines.at(-1))
+  assert.equal(code, 1, '未产出完整笔记时应以非零退出')
+  assert.equal(payload.produced, false)
+  assert.equal(payload.idleReason ?? payload.stopReason, 'idle')
+  const stored = ledger.getTask('replay-1')
+  assert.equal(stored.stage, 'discovered', '未完成时应保持在原阶段，不得推进')
+  assert.match(stored.last_error, /waiting-outline-approval/)
+  assert.ok(stored.next_attempt_at, '未完成时应写入退避时间，避免立刻重复消费')
 })
 
 test('transcribe advances the ledger task to transcript_ready', async () => {

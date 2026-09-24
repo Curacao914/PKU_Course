@@ -27,6 +27,12 @@ export {
 } from './worker-tasks.mjs'
 
 export {
+  applyTaskAction,
+  createInitialLesson,
+  runLessonNotes
+} from './pipeline.mjs'
+
+export {
   assembleFinalNote,
   buildFinalNoteMarkdown,
   chineseIndex,
@@ -58,12 +64,14 @@ export {
 export {
   DEFAULT_COURSE_SPEC,
   REVIEW_SCORE_KEYS,
+  applyFinalReview,
   applyNodeReview,
   approveNode,
   approveNodeHuman,
   assertOutlineCoverage,
   createNodeFromOutline,
   deriveLessonStatus,
+  issueNodeIds,
   normalizeIssue,
   normalizeReviewReport,
   normalizeReviewScores,
@@ -71,6 +79,7 @@ export {
   planNodes,
   recordNodeTaskFailure,
   requestNodeRevision,
+  saveFinalNoteRevision,
   saveNodeDraft,
   scoresMeetThreshold
 } from './node-lifecycle.mjs'

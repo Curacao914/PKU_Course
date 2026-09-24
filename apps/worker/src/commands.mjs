@@ -3,6 +3,18 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { createValidatedAcquisitionRuntime } from '@course/acquisition'
+import { callCourseModel, createInitialLesson, runLessonNotes } from '@course/notes'
+
+/** 文件名安全化：课程名与课次里常有斜杠与冒号。 */
+function safeFileName(value) {
+  return String(value || 'note')
+    .normalize('NFKC')
+    .replace(/[<>:"/\\|?*\u0000-\u001F]+/g, ' ')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 100) || 'note'
+}
 
 import { requireOption } from './args.mjs'
 import { describeConfig, pythonEnvironment } from './config.mjs'
@@ -12,7 +24,7 @@ import { describeConfig, pythonEnvironment } from './config.mjs'
  * 上下文进入，因此命令本身可以在没有 Chrome、没有网络、没有凭据的情况下测试。
  */
 export function createCommands(context) {
-  const { config, acquire, runPython, which, openStore, stdout, stderr } = context
+  const { config, acquire, runPython, which, openStore, callModel: injectedCallModel, stdout, stderr } = context
 
   function withLedger(work) {
     const store = openStore(config.ledgerPath)
@@ -119,6 +131,122 @@ export function createCommands(context) {
       recordings: flattened
     }, options)
     return flattened.length > 0 ? 0 : 1
+  }
+
+  /**
+   * 从转录稿生成单课笔记。
+   *
+   * 输入是转录稿文本文件（transcribe 命令的产物），输出是拼装好的 Markdown
+   * 与一份运行摘要。带 --replay-key 且账本中有该回放时，成功后推进到 notes_ready。
+   */
+  async function notes(options) {
+    const transcriptPath = path.resolve(requireOption(options.options, 'transcript', 'notes'))
+    if (!fs.existsSync(transcriptPath)) throw new Error(`找不到转录稿：${transcriptPath}`)
+    const course = requireOption(options.options, 'course', 'notes')
+    const lessonTitle = requireOption(options.options, 'lesson', 'notes')
+    const transcript = fs.readFileSync(transcriptPath, 'utf8')
+
+    const replayKey = options.options['replay-key'] || ''
+    const workerId = options.options['worker-id'] || defaultWorkerId()
+    const autoApproveOutline = options.options['auto-approve-outline'] !== '0'
+    const outputDir = path.resolve(options.options['output-dir'] || path.dirname(transcriptPath))
+    fs.mkdirSync(outputDir, { recursive: true })
+
+    const lesson = createInitialLesson({
+      key: replayKey || `lesson-${Date.now()}`,
+      title: lessonTitle,
+      transcript,
+      blueprint: { mainLine: '' }
+    })
+    const courseSpec = {
+      courseName: course,
+      teacher: options.options.teacher || '',
+      promptVersion: options.options['prompt-version'] || undefined
+    }
+
+    const store = openStore(config.ledgerPath)
+    try {
+      const task = replayKey ? claimForRun(store, replayKey, workerId) : null
+      const previousStage = task?.stage || 'transcript_ready'
+      const modelConfig = {
+        apiKey: config.ai.apiKey || 'unset',
+        baseUrl: config.ai.baseUrl,
+        provider: config.ai.provider,
+        source: 'environment',
+        models: config.ai.models,
+        deadlineAt: Number(options.options['deadline-ms'] || 0) > 0
+          ? Date.now() + Number(options.options['deadline-ms'])
+          : undefined
+      }
+      const callModel = injectedCallModel ||
+        (payload => callCourseModel({ ...payload, config: { ...modelConfig, ...(payload.config || {}) } }))
+
+      const result = await runLessonNotes({
+        lesson,
+        courseSpec,
+        modelConfig,
+        callModel,
+        autoApproveOutline,
+        maxSteps: Number(options.options['max-steps'] || 40),
+        onEvent: step => stderr(`  [${step.index + 1}] ${step.taskType} → ${step.action || '-'} (${step.note})`)
+      })
+
+      const produced = result.lesson.status === 'completed' && Boolean(result.lesson.finalNote?.markdown)
+      const notePath = path.join(outputDir, `${safeFileName(lessonTitle)}.md`)
+      const summaryPath = path.join(outputDir, 'notes-run-summary.json')
+      if (produced) fs.writeFileSync(notePath, `${result.lesson.finalNote.markdown}\n`)
+
+      const summary = {
+        course,
+        lesson: lessonTitle,
+        status: result.lesson.status,
+        stopReason: result.stopReason,
+        idleReason: result.idleDetail?.reason || null,
+        nodeCount: result.lesson.nodes.length,
+        finalChars: result.lesson.finalNote?.markdown?.length || 0,
+        steps: result.steps,
+        autoApproveOutline
+      }
+      fs.writeFileSync(summaryPath, `${JSON.stringify(summary, null, 2)}\n`)
+
+      if (task) {
+        if (produced) {
+          store.reportStage({
+            id: task.id,
+            stage: 'notes_ready',
+            message: '笔记撰写完成',
+            data: {
+              artifacts: { notePath, summaryPath, noteChars: summary.finalChars },
+              runtime: { nodeCount: summary.nodeCount, stepCount: result.steps.length }
+            }
+          })
+        } else {
+          store.reportStage({
+            id: task.id,
+            stage: previousStage,
+            message: '笔记撰写未完成',
+            error: `流水线停在 ${result.stopReason}${result.idleDetail?.reason ? `：${result.idleDetail.reason}` : ''}`,
+            nextAttemptAt: new Date(Date.now() + RETRY_DELAY_MS).toISOString()
+          })
+        }
+      }
+
+      emit({
+        course,
+        lesson: lessonTitle,
+        produced,
+        status: result.lesson.status,
+        stopReason: result.stopReason,
+        notePath: produced ? notePath : null,
+        summaryPath,
+        nodeCount: summary.nodeCount,
+        finalChars: summary.finalChars,
+        task: task ? { id: task.id, from: previousStage, to: produced ? 'notes_ready' : previousStage } : null
+      }, options)
+      return produced ? 0 : 1
+    } finally {
+      store.close()
+    }
   }
 
   async function status(options) {
@@ -265,7 +393,7 @@ export function createCommands(context) {
     }
   }
 
-  return { doctor, discover, download, transcribe, status }
+  return { doctor, discover, download, transcribe, notes, status }
 }
 
 export const USAGE = `用法：course <命令> [选项]
@@ -280,6 +408,9 @@ export const USAGE = `用法：course <命令> [选项]
                                            下载一条回放的媒体（HLS 分片 → MP4）
   transcribe --media <文件> --course <名称> --lesson <课次> [--replay-key <键>] [--chunk-minutes <分钟>] [--output-dir <目录>]
                                            调用 Paraformer 转录（分片 + R2 中转 + 断点续跑）
+  notes      --transcript <文件> --course <名称> --lesson <课次> [--replay-key <键>] [--output-dir <目录>]
+             [--auto-approve-outline 0|1] [--max-steps <步数>]
+                                           从转录稿生成单课笔记（大纲 → 节点 → 审查 → 拼装 → 终审）
 
 账本：download / transcribe 若带 --replay-key 且账本中已有该回放，会先领取任务，
 成功后推进阶段；失败则记录原因并退避 5 分钟。账本没有该回放时按独立运行处理。
