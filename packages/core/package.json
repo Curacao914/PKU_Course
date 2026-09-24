@@ -3,6 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "领域契约：TextPack v1、适配器契约、幂等键与状态枚举",
-  "main": "src/index.js"
+  "description": "领域契约：TextPack v1、适配器契约",
+  "exports": {
+    ".": "./src/index.mjs"
+  }
 }

@@ -1,13 +1,22 @@
 #!/usr/bin/env python3
+"""Paraformer-v2 转录核心。
+
+从 my-blog-main 的 scripts/course-worker/python/asr_core.py 摘出，只保留
+headless worker 实际使用的部分：网络重试、R2 预签名探测、分片转录、句子抽取、
+脱敏与错误摘要。
+
+已剥离（原文件的交互式遗留 CLI）：main()、configure_secrets()、
+maybe_import_previous_env()、previous_v004_dirs()、load_env_file()、
+find_recent_files()、choose_one()、choose_materials()、extract_material()、
+write_materials()、maybe_import_previous_output()、write_transcript()。
+
+由此不再依赖 python-pptx / pypdf / python-docx，也不再在 import 时求值任何
+本地路径常量（原实现把 ROOT/LOG_DIR/OUTPUT_ROOT 等写死在模块级）。
+"""
 from __future__ import annotations
 
-import getpass
-import hashlib
 import json
-import math
-import os
 import re
-import shutil
 import socket
 import ssl
 import subprocess
@@ -18,28 +27,12 @@ from pathlib import Path
 from typing import Any
 from urllib import error, request
 
-import boto3
-from botocore.config import Config
-from docx import Document
-from pptx import Presentation
-from pypdf import PdfReader
 
-ROOT = Path(__file__).resolve().parents[1]
-ENV_PATH = ROOT / ".env.local"
-LOG_DIR = ROOT / "logs"
-DIAG_DIR = ROOT / "diagnostics"
-OUTPUT_ROOT = ROOT / "outputs"
-PRIVATE_DIR = ROOT / ".private"
-INBOX_DIR = ROOT / "materials" / "inbox"
-
-DEFAULT_R2_ENDPOINT = ""
-DEFAULT_R2_BUCKET = ""
 DASHSCOPE_SUBMIT = "https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription"
 DASHSCOPE_TASK = "https://dashscope.aliyuncs.com/api/v1/tasks/"
 MODEL = "paraformer-v2"
 PRICE_PER_HOUR_CNY = 0.288
 HOME = str(Path.home())
-SUPPORTED_MATERIALS = {".pptx", ".pdf", ".docx", ".md", ".txt"}
 RETRYABLE_HTTP = {408, 425, 429, 500, 502, 503, 504}
 URL_RE = re.compile(r"https?://[^\s'\"<>]+", re.IGNORECASE)
 JWT_RE = re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_-]{10,})?")
@@ -91,78 +84,6 @@ def format_timestamp(milliseconds: int) -> str:
     hours, remainder = divmod(total, 3600)
     minutes, seconds = divmod(remainder, 60)
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-
-
-def load_env_file(path: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
-    if not path.exists():
-        return values
-    for line in path.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if stripped and not stripped.startswith("#") and "=" in stripped:
-            key, raw = stripped.split("=", 1)
-            values[key.strip()] = raw.strip()
-    return values
-
-
-def previous_v004_dirs() -> list[Path]:
-    return sorted(
-        [
-            p for p in ROOT.parent.glob("law-tech-course-pipeline-debug-v004-*")
-            if p.is_dir() and p.resolve() != ROOT.resolve()
-        ],
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-
-
-def maybe_import_previous_env() -> None:
-    if ENV_PATH.exists():
-        return
-    for previous in previous_v004_dirs():
-        candidate = previous / ".env.local"
-        if candidate.exists():
-            print(f"发现旧 V004 密钥配置：{previous.name}")
-            if (input("复用？[Y/n]: ").strip().lower() or "y") in {"y", "yes"}:
-                shutil.copy2(candidate, ENV_PATH)
-                os.chmod(ENV_PATH, 0o600)
-                print("✓ 已复用密钥配置。")
-            return
-    for candidate in sorted(
-        ROOT.parent.glob("law-tech-course-pipeline-debug-v003-paraformer*/.env.local"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    ):
-        print(f"发现 V003 密钥配置：{candidate.parent.name}")
-        if (input("复用？[Y/n]: ").strip().lower() or "y") in {"y", "yes"}:
-            shutil.copy2(candidate, ENV_PATH)
-            os.chmod(ENV_PATH, 0o600)
-            print("✓ 已复用密钥配置。")
-        return
-
-
-def configure_secrets() -> dict[str, str]:
-    maybe_import_previous_env()
-    values = load_env_file(ENV_PATH)
-    required = ("DASHSCOPE_API_KEY", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY")
-    if all(values.get(key) for key in required):
-        return values
-    print("输入不会回显，密钥只保存在 .env.local。")
-    values = {
-        "DASHSCOPE_API_KEY": getpass.getpass("阿里云百炼 DASHSCOPE_API_KEY: ").strip(),
-        "R2_ACCESS_KEY_ID": getpass.getpass("R2 Access Key ID: ").strip(),
-        "R2_SECRET_ACCESS_KEY": getpass.getpass("R2 Secret Access Key: ").strip(),
-        "R2_ENDPOINT": DEFAULT_R2_ENDPOINT,
-        "R2_BUCKET": DEFAULT_R2_BUCKET,
-    }
-    if not all(values.get(key) for key in required):
-        raise RuntimeError("三个密钥均不能为空")
-    ENV_PATH.write_text(
-        "\n".join(f"{key}={value}" for key, value in values.items()) + "\n",
-        encoding="utf-8",
-    )
-    os.chmod(ENV_PATH, 0o600)
-    return values
 
 
 def is_retryable_exception(exc: BaseException) -> bool:
@@ -226,116 +147,6 @@ def run_command(args: list[str], timeout: int, log) -> subprocess.CompletedProce
     if result.stderr:
         log("STDERR " + sanitize_text(result.stderr[-4000:]))
     return result
-
-
-def find_recent_files(extensions: set[str]) -> list[Path]:
-    found: dict[str, Path] = {}
-    INBOX_DIR.mkdir(parents=True, exist_ok=True)
-    for location in (Path.home() / "Downloads", INBOX_DIR):
-        if location.exists():
-            for path in location.iterdir():
-                if path.is_file() and path.suffix.lower() in extensions:
-                    found[str(path.resolve())] = path.resolve()
-    return sorted(found.values(), key=lambda p: p.stat().st_mtime, reverse=True)
-
-
-def choose_one(title: str, extensions: set[str]) -> Path:
-    files = find_recent_files(extensions)
-    if not files:
-        raise RuntimeError(f"没有找到{title}")
-    print(f"\n{title}：")
-    for i, path in enumerate(files[:12], 1):
-        print(f"  {i}. {path.name}")
-    raw = input("选择 [1]: ").strip() or "1"
-    return files[int(raw) - 1]
-
-
-def choose_materials() -> list[Path]:
-    files = find_recent_files(SUPPORTED_MATERIALS)
-    if not files:
-        raise RuntimeError("没有找到课程 PPTX/PDF/DOCX/MD/TXT")
-    print("\n最近的课程材料：")
-    for i, path in enumerate(files[:15], 1):
-        print(f"  {i}. {path.name}")
-    raw = input("选择一个或多个，例如 1 或 1,2 [1]: ").strip() or "1"
-    return [files[int(part.strip()) - 1] for part in raw.split(",")]
-
-
-def extract_material(path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    sections: list[dict[str, Any]] = []
-    ocr: list[dict[str, Any]] = []
-    suffix = path.suffix.lower()
-    if suffix == ".pptx":
-        deck = Presentation(str(path))
-        for i, slide in enumerate(deck.slides, 1):
-            texts: list[str] = []
-            for shape in slide.shapes:
-                if getattr(shape, "has_text_frame", False):
-                    value = "\n".join(
-                        p.text.strip() for p in shape.text_frame.paragraphs if p.text.strip()
-                    )
-                    if value:
-                        texts.append(value)
-                if getattr(shape, "has_table", False):
-                    for row in shape.table.rows:
-                        cells = [c.text.strip() for c in row.cells if c.text.strip()]
-                        if cells:
-                            texts.append(" | ".join(cells))
-            text = "\n".join(texts).strip()
-            sections.append({"label": f"第 {i} 页", "text": text})
-            if len(re.sub(r"\s+", "", text)) < 12:
-                ocr.append({"source": path.name, "kind": "pptx-slide", "index": i})
-    elif suffix == ".pdf":
-        reader = PdfReader(str(path))
-        for i, page in enumerate(reader.pages, 1):
-            text = (page.extract_text() or "").strip()
-            sections.append({"label": f"第 {i} 页", "text": text})
-            if len(re.sub(r"\s+", "", text)) < 20:
-                ocr.append({"source": path.name, "kind": "pdf-page", "index": i})
-    elif suffix == ".docx":
-        doc = Document(str(path))
-        blocks = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
-        for table in doc.tables:
-            for row in table.rows:
-                cells = [c.text.strip() for c in row.cells if c.text.strip()]
-                if cells:
-                    blocks.append(" | ".join(cells))
-        sections = [{"label": "全文", "text": "\n".join(blocks)}]
-    else:
-        sections = [{"label": "全文", "text": path.read_text(encoding="utf-8", errors="replace")}]
-    return sections, ocr
-
-
-def write_materials(output_dir: Path, paths: list[Path]) -> tuple[str, list[dict[str, Any]]]:
-    lines = ["# 课程材料文字", ""]
-    all_text: list[str] = []
-    all_ocr: list[dict[str, Any]] = []
-    for path in paths:
-        sections, ocr = extract_material(path)
-        lines.extend([f"## {path.stem}", ""])
-        for section in sections:
-            lines.extend([f"### {section['label']}", "", section["text"] or "（未提取到文字）", ""])
-            all_text.append(section["text"])
-        all_ocr.extend(ocr)
-    content = "\n".join(lines).rstrip() + "\n"
-    (output_dir / "course-materials.md").write_text(content, encoding="utf-8")
-    (output_dir / "ocr-needed.json").write_text(
-        json.dumps(all_ocr, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
-    return content, all_ocr
-
-
-def maybe_import_previous_output(lesson_id: str, output_dir: Path) -> None:
-    if output_dir.exists() and any(output_dir.iterdir()):
-        return
-    for previous in previous_v004_dirs():
-        source = previous / "outputs" / lesson_id
-        if source.exists():
-            print(f"发现旧 V004 输出：{source}")
-            if (input("迁移已有检查点？[Y/n]: ").strip().lower() or "y") in {"y", "yes"}:
-                shutil.copytree(source, output_dir, dirs_exist_ok=True)
-                print("✓ 已迁移旧输出，第 1 段等已完成检查点将直接复用。")
-            return
 
 
 def ffprobe_duration(source: Path, log) -> float:
@@ -618,156 +429,3 @@ def transcribe_chunk(
         )
         raise
 
-def write_transcript(path: Path, title: str, sentences: list[dict[str, Any]]) -> str:
-    lines = [f"# {title}", ""]
-    for sentence in sentences:
-        lines.extend([
-            f"[{format_timestamp(sentence['begin_time'])} – "
-            f"{format_timestamp(sentence['end_time'])}] {sentence['text']}",
-            "",
-        ])
-    content = "\n".join(lines).rstrip() + "\n"
-    path.write_text(content, encoding="utf-8")
-    return content
-
-
-def main() -> int:
-    for directory in (LOG_DIR, DIAG_DIR, OUTPUT_ROOT, PRIVATE_DIR, INBOX_DIR):
-        directory.mkdir(parents=True, exist_ok=True)
-
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    log_path = LOG_DIR / f"run-{stamp}.log"
-    report_path = DIAG_DIR / f"run-report-{stamp}.json"
-
-    def log(message: str) -> None:
-        with log_path.open("a", encoding="utf-8") as handle:
-            handle.write(f"{datetime.now(timezone.utc).isoformat()} {sanitize_text(message)}\n")
-
-    report: dict[str, Any] = {
-        "package": "V004-R2", "model": MODEL,
-        "startedAt": datetime.now(timezone.utc).isoformat(), "status": "running"
-    }
-
-    try:
-        config = configure_secrets()
-        source = choose_one("最近的课程视频", {".mp4"})
-        materials = choose_materials()
-        course = input(f"课程名称 [{materials[0].stem[:40]}]: ").strip() or materials[0].stem[:40]
-        lesson = input(f"课次名称 [{datetime.now().strftime('%Y-%m-%d')}]: ").strip() or datetime.now().strftime("%Y-%m-%d")
-        raw_chunk = input("每段分钟数 [45]: ").strip()
-        chunk_minutes = int(raw_chunk) if raw_chunk else 45
-
-        lesson_id = safe_slug(f"{course}-{lesson}")
-        output_dir = OUTPUT_ROOT / lesson_id
-        maybe_import_previous_output(lesson_id, output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        chunks_dir = output_dir / "chunks"
-        chunks_dir.mkdir(exist_ok=True)
-        temp_dir = PRIVATE_DIR / lesson_id
-        temp_dir.mkdir(parents=True, exist_ok=True)
-
-        material_content, ocr_needed = write_materials(output_dir, materials)
-        duration = ffprobe_duration(source, log)
-        chunk_seconds = chunk_minutes * 60
-        chunk_count = math.ceil(duration / chunk_seconds)
-        print(f"\n→ 全课 {duration / 3600:.2f} 小时，共 {chunk_count} 段")
-
-        endpoint = config.get("R2_ENDPOINT") or DEFAULT_R2_ENDPOINT
-        bucket = config.get("R2_BUCKET") or DEFAULT_R2_BUCKET
-        s3 = boto3.client(
-            "s3", endpoint_url=endpoint,
-            aws_access_key_id=config["R2_ACCESS_KEY_ID"],
-            aws_secret_access_key=config["R2_SECRET_ACCESS_KEY"],
-            region_name="auto", config=Config(signature_version="s3v4"),
-        )
-
-        checkpoints = []
-        for zero in range(chunk_count):
-            index = zero + 1
-            checkpoint_path = chunks_dir / f"chunk-{index:03d}.json"
-            task_path = chunks_dir / f"chunk-{index:03d}.task.json"
-            start = zero * chunk_seconds
-            length = min(chunk_seconds, duration - start)
-            if checkpoint_path.exists():
-                print(f"   ✓ 第 {index}/{chunk_count} 段已有结果，跳过")
-                checkpoints.append(json.loads(checkpoint_path.read_text(encoding="utf-8")))
-                continue
-            print(f"→ 处理第 {index}/{chunk_count} 段")
-            checkpoints.append(transcribe_chunk(
-                source, index, start, length, checkpoint_path, task_path,
-                temp_dir, config, s3, bucket, log
-            ))
-            print(f"   ✓ 第 {index} 段完成")
-
-        sentences = []
-        speech_ms = 0
-        for checkpoint in sorted(checkpoints, key=lambda x: x["chunkIndex"]):
-            sentences.extend(checkpoint["sentences"])
-            speech_ms += int(checkpoint.get("speechDurationMilliseconds") or 0)
-        sentences.sort(key=lambda x: (x["begin_time"], x["end_time"]))
-        transcript = write_transcript(
-            output_dir / "raw-transcript.md",
-            f"{course} · {lesson} · 原始课堂转录",
-            sentences,
-        )
-        lesson_input = (
-            f"# {course} · {lesson} · AI 课程加工输入\n\n"
-            "## 使用说明\n\n"
-            "以下包含教师课件文字与 ASR 原始转录。课件用于确认规范术语、章节结构和材料内容；"
-            "转录用于确认老师实际讲授、展开论证、案例和课堂边界。课件出现但转录无对应内容时，"
-            "不得直接认定老师已经讲授。ASR 中可能存在同音错字，应结合课件语境理解，不要机械逐字照抄。\n\n"
-            + material_content
-            + "\n\n"
-            + transcript
-        )
-        (output_dir / "lesson-input.md").write_text(lesson_input, encoding="utf-8")
-
-        cost = speech_ms / 3_600_000 * PRICE_PER_HOUR_CNY
-        summary = {
-            "package": "V004-R2",
-            "courseName": course,
-            "lessonName": lesson,
-            "videoDurationSeconds": round(duration, 3),
-            "chunkCount": chunk_count,
-            "sentenceCount": len(sentences),
-            "characterCount": sum(len(x["text"]) for x in sentences),
-            "ocrNeededCount": len(ocr_needed),
-            "speechDurationMilliseconds": speech_ms,
-            "estimatedCostCnyBeforeFreeQuota": round(cost, 6),
-            "mechanicalCorrectionApplied": False,
-        }
-        (output_dir / "run-summary.json").write_text(
-            json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-        )
-        report.update({
-            "status": "success",
-            "finishedAt": datetime.now(timezone.utc).isoformat(),
-            "outputDirectory": str(output_dir.relative_to(ROOT)),
-            "summary": summary,
-        })
-        print("\n✓ V004 R2 完整课程输入已生成")
-        print(f"句子：{len(sentences)}")
-        print(f"待 OCR 页：{len(ocr_needed)}")
-        print(f"免费额度前估算：¥{cost:.4f}")
-        print(f"打开：{output_dir / 'lesson-input.md'}")
-        return 0
-    except Exception as exc:
-        report.update({
-            "status": "failed",
-            "finishedAt": datetime.now(timezone.utc).isoformat(),
-            "error": sanitize_text(str(exc)),
-        })
-        log("FAILED " + str(exc))
-        print("\n✗ V004 R2 运行失败")
-        print("原因：" + sanitize_text(str(exc)))
-        print("已完成结果和已提交 task 都会保留，直接重跑即可继续。")
-        return 1
-    finally:
-        report_path.write_text(
-            json.dumps(sanitize_json(report), ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

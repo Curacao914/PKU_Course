@@ -3,6 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "CLI 与定时循环：discover/media/notes/publish/notify",
-  "main": "src/index.js"
+  "description": "CLI 与定时循环：doctor/discover/download/transcribe",
+  "exports": {
+    ".": "./src/cli.mjs"
+  },
+  "bin": {
+    "course": "./bin/course.mjs"
+  },
+  "dependencies": {
+    "@course/acquisition": "*",
+    "@course/asr": "*",
+    "@course/core": "*"
+  }
 }

@@ -15,6 +15,9 @@
     "test": "node --test \"packages/*/src/*.test.mjs\" \"apps/*/src/*.test.mjs\"",
     "test:acquisition": "node --test \"packages/acquisition/src/*.test.mjs\"",
     "test:core": "node --test \"packages/core/src/*.test.mjs\"",
-    "test:asr": "node --test \"packages/asr/src/*.test.mjs\""
+    "test:asr": "node --test \"packages/asr/src/*.test.mjs\"",
+    "test:py": "python3 packages/asr/python/test_asr_core.py",
+    "test:all": "npm test && npm run test:py",
+    "course": "node apps/worker/bin/course.mjs"
   }
 }

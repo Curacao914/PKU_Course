@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "description": "北大教学网采集：登录、发现回放、HLS 下载与合并",
-  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.mjs"
+  },
   "dependencies": {
     "playwright-core": "^1.49.0"
   }
