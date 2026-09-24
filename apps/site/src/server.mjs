@@ -4,6 +4,8 @@ import path from 'node:path'
 
 import { readSiteIndex } from '@course/publish'
 
+import { createAdminHandler } from './admin.mjs'
+
 /**
  * course.law-tech.dev 的站点服务器。
  *
@@ -59,10 +61,24 @@ export function resolveInsideRoot(root, requestPath) {
   return target
 }
 
-export function createRequestHandler({ root, adminToken = '' } = {}) {
+export function createRequestHandler({
+  root,
+  adminToken = '',
+  scratchRoot = '',
+  workerPath = '',
+  workerEnv = {},
+  runCommand
+} = {}) {
   const normalizedRoot = path.resolve(root)
+  const admin = createAdminHandler({
+    root: normalizedRoot,
+    scratchRoot: scratchRoot || normalizedRoot,
+    workerPath,
+    workerEnv,
+    runCommand
+  })
 
-  return function handle(req, res) {
+  return async function handle(req, res) {
     let url
     try {
       url = new URL(req.url || '/', 'http://localhost')
@@ -71,6 +87,14 @@ export function createRequestHandler({ root, adminToken = '' } = {}) {
       return
     }
     const pathname = url.pathname
+
+    // 管理台先接管：它要处理 POST，因此必须排在方法检查之前
+    try {
+      if (await admin.handle(req, res, pathname, url, { adminToken })) return
+    } catch (error) {
+      sendJson(res, 500, { ok: false, error: 'admin_failed', message: error instanceof Error ? error.message : String(error) })
+      return
+    }
 
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       sendJson(res, 405, { ok: false, error: 'method_not_allowed' })
@@ -95,21 +119,6 @@ export function createRequestHandler({ root, adminToken = '' } = {}) {
       } catch (error) {
         sendJson(res, 503, { ok: false, error: 'index_unreadable', message: String(error.message) })
       }
-      return
-    }
-
-    // 管理接口一律先过令牌；未配置令牌时直接拒绝，不提供任何默认放行
-    if (pathname.startsWith('/api/admin/')) {
-      const provided = req.headers['x-course-token'] || (req.headers.authorization || '').replace(/^Bearer\s+/i, '')
-      if (!adminToken) {
-        sendJson(res, 503, { ok: false, error: 'admin_token_unconfigured' })
-        return
-      }
-      if (provided !== adminToken) {
-        sendJson(res, 401, { ok: false, error: 'unauthorized' })
-        return
-      }
-      sendJson(res, 200, { ok: true, scope: 'admin', note: '管理操作在后续步骤接入' })
       return
     }
 
@@ -149,8 +158,11 @@ export function createSiteServer(options = {}) {
 }
 
 /** 启动服务器；port 传 0 时由系统分配（测试用）。 */
-export function startSiteServer({ root, port = 3100, host = '127.0.0.1', adminToken = '' } = {}) {
-  const server = createSiteServer({ root, adminToken })
+export function startSiteServer({
+  root, port = 3100, host = '127.0.0.1', adminToken = '',
+  scratchRoot = '', workerPath = '', workerEnv = {}, runCommand
+} = {}) {
+  const server = createSiteServer({ root, adminToken, scratchRoot, workerPath, workerEnv, runCommand })
   return new Promise((resolve, reject) => {
     server.once('error', reject)
     server.listen(port, host, () => {

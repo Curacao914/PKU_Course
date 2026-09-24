@@ -88,9 +88,14 @@ test('admin endpoints require the configured token', async () => {
     assert.equal((await fetch(`${site.url}/api/admin/ping`)).status, 401)
     assert.equal((await fetch(`${site.url}/api/admin/ping`, { headers: { 'x-course-token': 'wrong' } })).status, 401)
 
+    // 令牌正确即通过鉴权；/ping 不是真实路由，因此得到的是 404 而不是 401
     const ok = await fetch(`${site.url}/api/admin/ping`, { headers: { authorization: 'Bearer secret-token' } })
-    assert.equal(ok.status, 200)
-    assert.equal((await ok.json()).scope, 'admin')
+    assert.equal(ok.status, 404)
+    assert.equal((await ok.json()).error, 'unknown_admin_route')
+
+    const status = await fetch(`${site.url}/api/admin/status`, { headers: { 'x-course-token': 'secret-token' } })
+    assert.equal(status.status, 200)
+    assert.ok('ledger' in (await status.json()))
   } finally {
     await site.close()
   }
