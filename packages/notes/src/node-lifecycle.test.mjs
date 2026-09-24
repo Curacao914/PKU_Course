@@ -241,6 +241,31 @@ test('node slices follow logical transcript lines, not physical ones', () => {
   assert.equal(nodes[0].sourceText, '[L3] 第 3 句\n[L4] 第 4 句', '切片必须落在逻辑行 3-4 上')
 })
 
+test('write units group modules without changing the module plan', () => {
+  const lesson = { transcript: transcript(40), pptText: [] }
+  const outline = [
+    { id: 'o1', title: '共犯的成立', lineRange: [1, 13] },
+    { id: 'o2', title: '共犯的形态', lineRange: [14, 26] },
+    { id: 'o3', title: '罪数判断', lineRange: [27, 40] }
+  ]
+  const spec = { nodeSplitThreshold: 100000, nodeSplitLineThreshold: 100000 }
+
+  const perModule = planNodes({ lesson, outline, courseSpec: spec })
+  assert.equal(perModule.length, 3, '默认每个模块一个写作单元')
+
+  const single = planNodes({ lesson, outline, courseSpec: { ...spec, writeUnits: 1 } })
+  assert.equal(single.length, 1, '一次写完 = 一个写作单元')
+  assert.deepEqual(single[0].outlineNodeIds, ['o1', 'o2', 'o3'], '模块结构不因为"写几次"而改变')
+  assert.equal(single[0].moduleBriefs.length, 3)
+  assert.match(single[0].writerBrief.writeContract, /### 模块标题/, '合并写作时必须按模块标题分段')
+  assert.ok(single[0].sourceText.includes('第 1 行') && single[0].sourceText.includes('第 40 行'), '整节课的原文都在')
+  assert.deepEqual(single[0].lineRange, [1, 40])
+
+  const two = planNodes({ lesson, outline, courseSpec: { ...spec, writeUnits: 2 } })
+  assert.equal(two.length, 2)
+  assert.deepEqual(two.map(node => node.outlineNodeIds.length), [2, 1], '按顺序连续分组，不跳模块')
+})
+
 test('an unchanged revision still counts toward the revision cap', () => {
   let current = lesson([node('n1')])
   current = saveNodeDraft(current, 'n1', '第一版正文')

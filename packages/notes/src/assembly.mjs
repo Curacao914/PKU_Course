@@ -19,18 +19,33 @@ export function spliceString(value, fallback = '') {
   return cleanText(value) || fallback
 }
 
-function uniqueStrings(values = []) {
+/**
+ * 去重。
+ *
+ * 既要处理纯字符串（核心问题、学习目标），也要处理对象条目（自测题的
+ * {question, answer}、方法卡、索引行）——早先这里对所有值做 cleanText，
+ * 对象一律变成 "[object Object]"，于是"补足条数"静默失效：模型只给一条时
+ * 兜底题全被当成重复项丢掉。
+ */
+const dedupeKey = value => {
+  if (typeof value === 'string') return cleanText(value)
+  if (!value || typeof value !== 'object') return ''
+  return cleanText(value.question || value.title || value.term || value.name || value.concept || '') || JSON.stringify(value)
+}
+
+function uniqueItems(values = []) {
   const seen = new Set()
-  return (values || []).map(value => cleanText(value)).filter(value => {
-    if (!value || seen.has(value)) return false
-    seen.add(value)
+  return (values || []).filter(value => {
+    const key = dedupeKey(value)
+    if (!key || seen.has(key)) return false
+    seen.add(key)
     return true
   })
 }
 
 /** 取至少 minimum、最多 maximum 条：模型给的不够就用兜底补齐，给多了截断。 */
 function ensureCount(values, fallbacks, minimum, maximum) {
-  const merged = uniqueStrings([...(Array.isArray(values) ? values : []), ...(fallbacks || [])])
+  const merged = uniqueItems([...(Array.isArray(values) ? values : []), ...(fallbacks || [])])
   return merged.slice(0, Math.max(minimum, maximum))
 }
 
@@ -72,11 +87,72 @@ export function demoteBodyHeadings(markdown = '', floor = 4) {
 }
 
 /** 去掉节点正文里的 META 标记：它们是给跨课整合用的，不该出现在正文中。 */
-export function stripMetaBlock(markdown = '') {
-  return demoteBodyHeadings(cleanText(markdown)
+function stripRawMeta(markdown = '') {
+  return cleanText(markdown)
     .replace(/<!--\s*META[\s\S]*?-->\s*/gi, '')
     .replace(/META_FOR_NODE:\s*\n[\s\S]*?(?=\n\s*\n|$)/gi, '')
-    .trim())
+    .trim()
+}
+
+export function stripMetaBlock(markdown = '') {
+  return demoteBodyHeadings(stripRawMeta(markdown))
+}
+
+/** 标题比较用的归一：去掉井号、中式序号与空白，只留文字。 */
+const headingKey = value => String(value || '')
+  .replace(/^#+\s*/, '')
+  .replace(/^[（(]?[一二三四五六七八九十\d]+[）)、.．]\s*/, '')
+  .replace(/\s+/g, '')
+  .trim()
+
+/**
+ * 把一个写作节点的正文还原成它覆盖的知识模块。
+ *
+ * 写作单元可以合并多个模块（一次调用写完整节课），但成品笔记仍要按模块分节，
+ * 所以这里按模型输出的「### 模块标题」把它拆回去。
+ * 契约没被遵守时**不能丢内容**：整段正文都算作第一个模块的正文，其余模块留空，
+ * 由装配结果里的 moduleSplit 记录这件事（宁可有警告，也不要少几段）。
+ */
+export function nodeBodyPieces(node = {}) {
+  const body = stripRawMeta(node.draft || '')
+  const ids = Array.isArray(node.outlineNodeIds) && node.outlineNodeIds.length
+    ? node.outlineNodeIds
+    : [node.outlineNodeId].filter(Boolean)
+  const pieces = new Map(ids.map(id => [id, '']))
+  if (!ids.length || !body) return pieces
+
+  if (ids.length === 1) {
+    pieces.set(ids[0], demoteBodyHeadings(body))
+    return pieces
+  }
+
+  const briefs = node.moduleBriefs || []
+  const buckets = new Map(ids.map(id => [id, []]))
+  let current = ids[0]
+  let matched = false
+  for (const line of body.split('\n')) {
+    const heading = line.match(/^(#{1,6})\s+(\S.*)$/)
+    if (heading) {
+      const label = headingKey(heading[2])
+      const brief = briefs.find(item => {
+        const candidate = headingKey(item.title)
+        return candidate && (label === candidate || label.includes(candidate) || candidate.includes(label))
+      })
+      if (brief) {
+        current = brief.outlineNodeId
+        matched = true
+        continue // 标题由程序重新渲染，不重复保留
+      }
+    }
+    buckets.get(current)?.push(line)
+  }
+
+  if (!matched) {
+    pieces.set(ids[0], demoteBodyHeadings(body))
+    return pieces
+  }
+  for (const id of ids) pieces.set(id, demoteBodyHeadings(buckets.get(id).join('\n').trim()))
+  return pieces
 }
 
 export function extractNodeMetadata(node = {}) {
@@ -146,10 +222,13 @@ export function normalizedSpliceData(lesson = {}, value = {}) {
     const rawSummary = spliceString(incomingSummaries[node.id], node.rationale || '')
     const fallbackSummary = `本节围绕${topic}展开，承担本课主线中的一个独立论证环节。通过已批准节点中的概念、规则、案例或教师讲授内容，本节说明该问题如何与前后章节衔接，并为后续理解和应用提供基础。`
     sectionSummaries[node.id] = rawSummary.length >= 45 ? rawSummary : [rawSummary, fallbackSummary].filter(Boolean).join(' ')
+    // 兜底自测题按调研的题型优先级出：写出规则/要件 > Why/How/区别 > 情境应用。
+    // 不编答案——答案由模型在接缝阶段给出，兜底只保证"有题可自测"。
     sectionQuizzes[node.id] = ensureCount(incomingQuizzes[node.id], [
-      `如何用自己的话解释${topic}的核心内容？`,
-      `${topic}与本课相邻问题之间有什么区别或联系？`
-    ], 2, 4)
+      { question: `请写出${topic}涉及的规则或构成要件，并说明每个要件的判断标准。`, answer: '' },
+      { question: `${topic}与本课相邻内容的关系是什么？为什么会有这种关系？`, answer: '' },
+      { question: `换一个事实情境，${topic}的结论会不会变？依据是什么？`, answer: '' }
+    ], 3, 5)
   })
 
   const knowledge = value.knowledgeLink || value.knowledge_link || {}
@@ -161,6 +240,8 @@ export function normalizedSpliceData(lesson = {}, value = {}) {
     use: '作为后续课程中相关规则、制度或案例分析的理解基础'
   }))
 
+  const asrCorrections = (value.asrCorrections || value.asr_corrections || []).filter(item => item && (item.heard || item.shouldBe))
+  const methods = (value.methods || []).filter(item => item && (item.name || item.problem))
   const system = value.systemLayer || value.system_layer || {}
   const rawMap = system.knowledgeMap || value.knowledgeMap || {}
   const indexTables = value.indexTables || value.index_tables || {}
@@ -183,8 +264,10 @@ export function normalizedSpliceData(lesson = {}, value = {}) {
     indexTables: {
       concepts: (indexTables.concepts || []).filter(Boolean),
       statutes: (indexTables.statutes || indexTables.provisions || []).filter(Boolean),
-      cases: (indexTables.cases || []).filter(Boolean)
+      cases: (indexTables.cases || []).filter(Boolean),
+      asrCorrections
     },
+    methods,
     sectionSummaries,
     sectionQuizzes,
     knowledgeLink: {
@@ -211,10 +294,27 @@ export function renderCourseOverview(value = {}, lesson = {}) {
   return lines.join('\n')
 }
 
+const quizQuestion = item => typeof item === 'string' ? spliceString(item) : spliceString(item?.question || item?.q)
+const quizAnswer = item => typeof item === 'string' ? '' : spliceString(item?.answer || item?.a)
+
+/**
+ * 节末自测。
+ *
+ * 放在节末而不是节首：节前的事实性问题会让读者把阅读变成"找答案"，反而损害对
+ * 无关内容的加工（调研 §5.2）。答案折叠是必须的——检索的前提是先自己回忆再看答案。
+ */
 export function renderQuiz(items = []) {
-  const questions = Array.isArray(items) ? items.filter(Boolean).slice(0, 4) : []
-  if (!questions.length) return ''
-  return ['> **自测**（合上笔记，能回答吗？）', ...questions.map((item, index) => `> ${index + 1}. ${item}`)].join('\n')
+  const list = (Array.isArray(items) ? items : []).filter(Boolean).slice(0, 5)
+  if (!list.length) return ''
+  const lines = ['**自测**（合上笔记，先自己写出来，再看答案）', '']
+  list.forEach((item, index) => lines.push(`${index + 1}. ${quizQuestion(item)}`))
+  const answers = list.map((item, index) => [index + 1, quizAnswer(item)]).filter(([, text]) => text)
+  if (answers.length) {
+    lines.push('', '<details><summary>参考答案</summary>', '')
+    answers.forEach(([number, text]) => lines.push(`${number}. ${text}`))
+    lines.push('', '</details>')
+  }
+  return lines.join('\n')
 }
 
 export function renderKnowledgeLink(value = {}, lesson = {}) {
@@ -409,8 +509,40 @@ export function renderIndexTables(indexTables = {}, lesson = {}) {
     sections.push(['### 案例索引', '', '| 案例 | 争点 | 结论与规则适用 | 老师的评价 |', '|------|------|---------------|-----------|',
       ...cases.map(item => `| ${spliceString(item.name || item.case)} | ${spliceString(item.issue)} | ${spliceString(item.holding || item.rule)} | ${spliceString(item.teacherView || item.comment)} |`)].join('\n'))
   }
+  const corrections = (indexTables.asrCorrections || []).filter(Boolean)
+  if (corrections.length) {
+    sections.push(['### 术语与 ASR 更正', '', '> 课堂语音转写难免听错专业词；下表是核对后的更正，便于回听时不困惑。', '',
+      '| 转写原文 | 应为 | 依据 |', '|---------|------|------|',
+      ...corrections.map(item => `| ${spliceString(item.heard)} | ${spliceString(item.shouldBe || item.should_be)} | ${spliceString(item.basis)} |`)].join('\n'))
+  }
+
   if (!sections.length) return ''
   return [...sections.flatMap(section => [section, ''])].join('\n').trim()
+}
+
+/**
+ * 方法卡：实证 / 方法论课程的复用单元。
+ *
+ * 调研给的模板是「解决什么问题 → 核心识别假设 → 数据要求 → 估计量 → 常见误用 → 课堂实例」。
+ * 法教义学课程不给这一节——没有方法就没有卡。
+ */
+export function renderMethods(methods = []) {
+  const list = (Array.isArray(methods) ? methods : []).filter(item => item && (item.name || item.problem))
+  if (!list.length) return ''
+  const lines = ['## 方法卡', '', '> 课上学到的方法按这张卡整理，换一份数据也能照着用。', '']
+  list.forEach(method => {
+    lines.push(`### ${spliceString(method.name, '方法')}`, '')
+    const row = (label, value) => { if (value && String(value).trim()) lines.push(`- **${label}**：${spliceString(value)}`) }
+    row('解决什么问题', method.problem)
+    row('核心识别假设', method.assumption)
+    row('数据要求', method.data)
+    row('估计量 / 操作', method.estimator)
+    const misuse = (method.misuse || []).filter(Boolean)
+    if (misuse.length) lines.push(`- **常见误用**：`, ...misuse.map(item => `  - ${spliceString(item)}`))
+    row('课堂实例', method.example)
+    lines.push('')
+  })
+  return lines.join('\n').trim()
 }
 
 /**
@@ -477,10 +609,16 @@ export function renderQuizOverview(sectionQuizzes = {}, lesson = {}) {
     .map(node => ({ title: outlineTopic(node), items: (sectionQuizzes[node.id] || []).filter(Boolean) }))
     .filter(block => block.items.length)
   if (!blocks.length) return ''
-  const lines = ['### 自测总览', '']
+  const lines = ['### 自测总览', '', '> 复习时先自己写答案，再展开参考答案对照判断标准。', '']
   blocks.forEach(block => {
     lines.push(`**${block.title}**`, '')
-    block.items.forEach((item, index) => lines.push(`${index + 1}. ${item}`))
+    block.items.forEach((item, index) => lines.push(`${index + 1}. ${quizQuestion(item)}`))
+    const answers = block.items.map((item, index) => [index + 1, quizAnswer(item)]).filter(([, text]) => text)
+    if (answers.length) {
+      lines.push('', '<details><summary>参考答案</summary>', '')
+      answers.forEach(([number, text]) => lines.push(`${number}. ${text}`))
+      lines.push('', '</details>')
+    }
     lines.push('')
   })
   return lines.join('\n').trim()
@@ -504,8 +642,15 @@ export function buildFinalNoteMarkdown({ courseSpec = {}, lesson = {}, spliceDat
   const byOutline = new Map((lesson.outline || []).map(item => [item.id, []]))
   const orphan = []
   ;(lesson.nodes || []).forEach(node => {
-    if (byOutline.has(node.outlineNodeId)) byOutline.get(node.outlineNodeId).push(node)
-    else orphan.push(node)
+    const ids = Array.isArray(node.outlineNodeIds) && node.outlineNodeIds.length ? node.outlineNodeIds : [node.outlineNodeId]
+    // 大纲之外的节点（正常情况下不该有）单独收集：宁可多一个「其他」小节，也不能丢正文
+    if (!ids.some(id => byOutline.has(id))) {
+      orphan.push(stripMetaBlock(node.draft))
+      return
+    }
+    for (const [outlineId, text] of nodeBodyPieces(node)) {
+      if (byOutline.has(outlineId)) byOutline.get(outlineId).push(text)
+    }
   })
 
   const summaries = spliceData.sectionSummaries || {}
@@ -542,7 +687,7 @@ export function buildFinalNoteMarkdown({ courseSpec = {}, lesson = {}, spliceDat
     parts.push('', `### ${chineseIndex(index)}、${title}`, '')
     const summary = spliceString(summaries[outlineNode.id], outlineNode.rationale || '')
     if (summary) parts.push(summary, '')
-    ;(byOutline.get(outlineNode.id) || []).forEach(node => parts.push(stripMetaBlock(node.draft), ''))
+    ;(byOutline.get(outlineNode.id) || []).forEach(text => parts.push(text, ''))
     const quiz = renderQuiz(quizzes[outlineNode.id])
     if (quiz) parts.push(quiz, '')
     parts.push('***')
@@ -551,9 +696,12 @@ export function buildFinalNoteMarkdown({ courseSpec = {}, lesson = {}, spliceDat
   // 大纲之外仍有正文的节点不能丢：归入「其他」而不是静默消失
   if (orphan.length) {
     parts.push('', '### 其他', '')
-    orphan.forEach(node => parts.push(stripMetaBlock(node.draft), ''))
+    orphan.filter(Boolean).forEach(text => parts.push(text, ''))
     parts.push('***')
   }
+
+  const methods = renderMethods(spliceData.methods || [])
+  if (methods) parts.push('', methods, '', '***')
 
   // 检索层：先给索引表，再给易错点与辨析。复习时按名字找，不用重读全文。
   const indexTables = renderIndexTables(spliceData.indexTables || {}, lesson)
@@ -572,7 +720,7 @@ export function buildFinalNoteMarkdown({ courseSpec = {}, lesson = {}, spliceDat
       parts.push(`### ${outlineTopic(outlineNode)}（${kindLabel}）`, '')
       const summary = spliceString(summaries[outlineNode.id], outlineNode.rationale || '')
       if (summary) parts.push(summary, '')
-      ;(byOutline.get(outlineNode.id) || []).forEach(node => parts.push(stripMetaBlock(node.draft), ''))
+      ;(byOutline.get(outlineNode.id) || []).forEach(text => parts.push(text, ''))
     })
   }
 
@@ -603,9 +751,11 @@ export function assembleFinalNote(lesson, spliceData = {}, { courseSpec = {}, tr
   const normalized = normalizedSpliceData(lesson, spliceData)
   const markdown = buildFinalNoteMarkdown({ courseSpec, lesson, spliceData: normalized })
 
+  // 完整性校验按"模块片段"做：一次调用写多个模块时，正文被拆到各模块下，
+  // 逐片段确认都在成稿里，才能保证"切与不切"都不会丢内容。
   const missingBody = nodes.find(node => {
-    const body = stripMetaBlock(node.draft)
-    return body && !markdown.includes(body)
+    const pieces = [...nodeBodyPieces(node).values()].map(text => String(text || '').trim()).filter(Boolean)
+    return pieces.some(piece => !markdown.includes(piece))
   })
   if (missingBody) throw new Error(`拼装后的笔记缺少已批准节点正文：${missingBody.id}`)
   if (/\{\{[^}]+\}\}/.test(markdown)) throw new Error('拼装后的笔记仍残留接缝占位符')

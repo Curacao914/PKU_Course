@@ -219,7 +219,7 @@ export function planNodes({ lesson = {}, outline = [], courseSpec = {}, at } = {
   const charThreshold = Math.max(500, Number(spec.nodeSplitThreshold))
   const lineThreshold = Math.max(20, Number(spec.nodeSplitLineThreshold))
 
-  return outline.flatMap(outlineNode => {
+  const modules = outline.flatMap(outlineNode => {
     const source = linesForRange(lesson.transcript, outlineNode.lineRange)
     const lineSpan = outlineNode.lineRange[1] - outlineNode.lineRange[0] + 1
     const partCount = Math.max(1, Math.ceil(source.length / charThreshold), Math.ceil(lineSpan / lineThreshold))
@@ -227,6 +227,67 @@ export function planNodes({ lesson = {}, outline = [], courseSpec = {}, at } = {
       createNodeFromOutline({ outlineNode, partIndex, partCount, lesson, courseSpec: spec, at })
     )
   })
+
+  return groupWriteUnits(modules, spec.writeUnits)
+}
+
+/**
+ * 把知识模块合并成写作单元。
+ *
+ * 这两件事必须分开：
+ *   - **模块结构**（5—8 个知识模块）由大纲决定，是笔记好不好读的关键，不该被"写几次"影响；
+ *   - **写作单元**只决定"分几次模型调用写完"：1 次写完整节课最容易保持贯通，
+ *     但一次要吐一万多字；分 2—3 次则每次更从容。
+ * 一次写多个模块时，模型必须按模块标题分段，拼装层据此还原模块结构；
+ * 因此合并后的节点带 moduleBriefs，写作契约写在 writerBrief.writeContract 里。
+ */
+export function groupWriteUnits(nodes = [], unitCount) {
+  const total = Math.floor(Number(unitCount) || 0)
+  if (!nodes.length || !(total > 0) || total >= nodes.length) return nodes
+  const perUnit = nodes.length / total
+  const groups = []
+  for (let index = 0; index < total; index += 1) {
+    const start = Math.round(index * perUnit)
+    const end = Math.round((index + 1) * perUnit)
+    const group = nodes.slice(start, end)
+    if (group.length) groups.push(group)
+  }
+  return groups.map((group, index) => mergeWriteUnit(group, index))
+}
+
+function mergeWriteUnit(group, index) {
+  const first = group[0]
+  const last = group.at(-1)
+  const moduleBriefs = group.map(node => ({
+    outlineNodeId: node.outlineNodeId,
+    title: node.title,
+    lineRange: node.lineRange,
+    kind: node.kind || 'content',
+    goal: node.writerBrief?.currentNodeGoal || ''
+  }))
+  return {
+    ...first,
+    id: `${first.outlineNodeId}-unit-${index + 1}`,
+    title: moduleBriefs.length === 1 ? first.title : moduleBriefs.map(item => item.title).join(' / '),
+    kind: moduleBriefs.every(item => item.kind === moduleBriefs[0].kind) ? moduleBriefs[0].kind : 'content',
+    outlineNodeId: first.outlineNodeId,
+    outlineNodeIds: group.map(node => node.outlineNodeId),
+    moduleBriefs,
+    lineRange: [first.lineRange[0], last.lineRange[1]],
+    sourceText: group.map(node => node.sourceText).join('\n\n'),
+    pptText: group.map(node => node.pptText).filter(Boolean).join('\n\n'),
+    writerBrief: {
+      ...(first.writerBrief || {}),
+      moduleBriefs,
+      writeContract: moduleBriefs.length > 1
+        ? [
+          `本单元包含 ${moduleBriefs.length} 个知识模块，必须全部写完，顺序与 moduleBriefs 一致。`,
+          '每个模块以「### 模块标题」开头，标题与 moduleBriefs[].title 完全一致（程序按它对号入座）。',
+          '模块内部用「一、」「（一）」「1.」这类中式层级，不要再输出 Markdown 标题。'
+        ].join('')
+        : ''
+    }
+  }
 }
 
 /** 课次状态由节点状态推导，优先级与原实现一致。 */

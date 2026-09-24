@@ -96,6 +96,26 @@ function analyze(file) {
   // 7) 图示与表格
   const diagrams = (markdown.match(MERMAID_BLOCK) || []).length
   if (!diagrams) add('warn', 'no-knowledge-map', '没有任何 Mermaid 图：体系层缺了"知识地图"')
+
+  // 7.1) 知识地图节点数：超过 12 个就从"结构图"退化成"又一份目录"
+  const mermaidBlocks = markdown.split(MERMAID_BLOCK).slice(1).map(block => block.split('```')[0])
+  const mapNodes = mermaidBlocks
+    .flatMap(block => block.split('\n'))
+    .filter(line => /-->|\|/.test(line)).length
+  if (mapNodes > 12) add('warn', 'map-too-large', `知识地图画了 ${mapNodes} 条连线/节点，超过 12 就比文字更难读`)
+
+  // 7.2) 重点标记通胀：每节超过 3 处「老师强调」等于没有重点
+  const emphasis = (markdown.match(/老师(指出|强调|认为|提出|提醒)/g) || []).length
+  if (sectionStarts.length && emphasis / sectionStarts.length > 3) {
+    add('warn', 'emphasis-inflation', `平均每节 ${(emphasis / sectionStarts.length).toFixed(1)} 处教师态度标记，重点通胀`)
+  }
+
+  // 7.3) 用 emoji 当层级：视觉噪声，且不同渲染器表现不一致
+  const emojiHeadings = lines.filter(text => /^#{1,6}\s*[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(text)).length
+  if (emojiHeadings) add('warn', 'emoji-headings', `${emojiHeadings} 个标题用 emoji 开头；层级应由标题层级承担`)
+
+  // 7.4) 篇幅：超过 15000 字就该出背诵版（"我的大纲太长"与成绩负相关）
+  if (markdown.length > 20000) add('info', 'too-long', `正文 ${markdown.length} 字，建议另出 3000—4000 字背诵版`)
   const tables = lines.filter(text => /^\s*\|.+\|\s*$/.test(text)).length
   const lists = lines.filter(text => /^\s*([-*]|\d+[.)])\s+/.test(text)).length
 

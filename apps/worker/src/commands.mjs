@@ -268,6 +268,9 @@ export function createCommands(context) {
       // 调大就是粗切，用于"切得细到底有没有必要"的对比实验。
       ...(options.options['node-split-chars'] ? { nodeSplitThreshold: Number(options.options['node-split-chars']) } : {}),
       ...(options.options['node-split-lines'] ? { nodeSplitLineThreshold: Number(options.options['node-split-lines']) } : {}),
+      // 写作单元数：决定"分几次模型调用写完"，不影响模块结构。
+      // 1 = 一次写完（模型按模块标题分段），2/3 = 分几次；不传则按模块数各写一次。
+      ...(options.options['write-units'] ? { writeUnits: Number(options.options['write-units']) } : {}),
       // 目标节点数：1 = 整节课一个节点一次写完，2/3 = 粗切。
       // 指定目标节点数时，默认关闭"按体量再切分"——否则大纲给一个节点、程序又把它
       // 按 12000 字阈值切成十几个，等于没粗切。要保留再切分就显式给 --node-split-*。
@@ -1030,9 +1033,12 @@ export const USAGE = `用法：course <命令> [选项]
              [--auto-approve-outline 0|1] [--max-steps <步数>] [--resume]
              [--concurrency <条数>] [--review-concurrency <条数>]
              [--node-split-chars <字数>] [--node-split-lines <行数>] [--outline-nodes <个数>]
+             [--write-units <次数>]
                                            从转录稿生成单课笔记（大纲 → 节点 → 写作 → 审查 → 拼装 → 终审）
                                            每步把课次状态写入 <输出目录>/lesson-state.json；--resume 从该状态续跑
                                            默认不设步数上限；并发默认写 1 + 审 2（合计 3 条）
+                                           模块结构由大纲决定（两小时课 5—8 个模块）；
+                                           --write-units 只决定分几次模型调用写完（1 = 一次写完）
   publish    --from <笔记目录> [--course <名称>] [--lesson <课次>] [--out <站点目录>] [--origin <域名>]
                                            把笔记发布到站点，内容变化时排入一条微信通知
   notify     [--probe] [--loop] [--max-items <条数>]

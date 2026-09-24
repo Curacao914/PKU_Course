@@ -55,7 +55,15 @@ const goodSpliceData = () => ({
     o1: '本节承担本课的第一个论证环节，先确立共犯的成立条件，为后文罪数判断提供前置概念，并在全课主线中起到铺垫作用。',
     o2: '本节完成本课的第二段论证，把共犯的结论用于罪数判断，并在全课主线中收束前面的讨论。'
   },
-  sectionQuizzes: { o1: ['共犯成立需要哪些条件？', '共同故意与共同行为是什么关系？'], o2: ['罪数判断的标准是什么？', '与共犯条件有何联系？'] },
+  sectionQuizzes: {
+    o1: [
+      { question: '请写出共犯成立的要件，并说明每个要件的判断标准。', answer: '共同故意（意思联络）与共同行为；判断标准是各行为人之间是否存在相互利用、补充的意思联络。' },
+      { question: '共同故意与共同行为是什么关系？', answer: '两者是并列要件：缺少任一都不成立共犯，故意的判断先于行为分担的判断。' }
+    ],
+    o2: [
+      { question: '罪数判断的标准是什么？', answer: '以行为个数与法益侵害个数为基础，结合构成要件评价。' }
+    ]
+  },
   knowledgeLink: { inheritsFrom: '上一课讲过的构成要件', laysGroundworkFor: [{ concept: '共犯', use: '后续罪名分析' }], nextLessonPreview: '下一课讲未遂' },
   appendix: { terms: [{ term: '共犯', original: 'joint crime', definition: '二人以上共同故意犯罪' }] }
 })
@@ -126,8 +134,9 @@ test('normalizedSpliceData tops up thin model output without inventing facts', (
   assert.ok(normalized.courseOverview.lectureThread.length >= 60, '课程脉络补到 60 字以上')
   assert.ok(normalized.sectionSummaries.o1.length >= 45, '章节总结补到 45 字以上')
   assert.ok(normalized.sectionSummaries.o2.length >= 45, '模型没给的章节也要有总结')
-  assert.equal(normalized.sectionQuizzes.o1.length, 2, '自测补到至少 2 题')
-  assert.equal(normalized.sectionQuizzes.o2.length, 2)
+  assert.equal(normalized.sectionQuizzes.o1.length, 3, '自测补到至少 3 题')
+  assert.equal(normalized.sectionQuizzes.o2.length, 3)
+  assert.ok(normalized.sectionQuizzes.o2[0].question.includes('规则或构成要件'), '兜底题型优先"写出规则/要件"')
   assert.ok(normalized.knowledgeLink.laysGroundworkFor.length >= 1, '由大纲概念推断知识连接')
   // 补齐的是结构，不是课堂事实
   assert.ok(!normalized.sectionSummaries.o1.includes('判决'), '补齐内容不得引入具体案情')
@@ -156,7 +165,8 @@ test('buildFinalNoteMarkdown assembles sections in outline order', () => {
   assert.match(markdown, /### 二、罪数判断/)
   assert.ok(markdown.includes('共犯的成立需要共同故意与共同行为。'), '节点正文必须逐字进入')
   assert.ok(markdown.indexOf('共犯的成立需要') < markdown.indexOf('罪数的判断以行为个数'), '章节顺序与大纲一致')
-  assert.match(markdown, /> \*\*自测\*\*/)
+  assert.match(markdown, /\*\*自测\*\*（合上笔记，先自己写出来，再看答案）/, '自测在节末，且提示先自答')
+  assert.match(markdown, /<details><summary>参考答案<\/summary>/, '答案必须折叠：先回忆再看答案，检索才成立')
   assert.ok(markdown.indexOf('## 本课在课程中的位置') < markdown.indexOf('### 一、共犯的成立条件'), '体系层必须在正文之前')
   assert.ok(markdown.indexOf('### 一、共犯的成立条件') < markdown.indexOf('## 复习层'), '检索层必须在正文之后')
   assert.match(markdown, /## 知识连接/)
@@ -217,6 +227,43 @@ test('logistics and digression sections are routed to the appendix', () => {
   assert.ok(markdown.indexOf('老师介绍了两位助教的分工。') > appendixAt, '事务正文只出现在附录里')
   assert.ok(markdown.indexOf('共犯的成立需要共同故意。') < appendixAt, '正课正文仍在正文区')
   assert.ok(markdown.indexOf('### 二、课间通知') === -1, '事务小节不占正文的中式序号')
+})
+
+test('a single write unit covering several modules still renders as separate sections', () => {
+  // "不切"指的是分几次模型调用写完，不是把整节课压成一个小节：
+  // 模型按模块标题分段，拼装层据此还原成多个小节。
+  const lesson = {
+    title: '第10-12节',
+    transcript: '[00:00:10 – 00:00:20] 第一句',
+    blueprint: { mainLine: '主线' },
+    outline: [
+      { id: 'o1', title: '共犯的成立', lineRange: [1, 1] },
+      { id: 'o2', title: '罪数判断', lineRange: [1, 1] }
+    ],
+    nodes: [{
+      id: 'u1',
+      outlineNodeId: 'o1',
+      outlineNodeIds: ['o1', 'o2'],
+      moduleBriefs: [{ outlineNodeId: 'o1', title: '共犯的成立' }, { outlineNodeId: 'o2', title: '罪数判断' }],
+      status: 'node_approved',
+      draft: '### 共犯的成立\n\n共犯需要共同故意。\n\n### 罪数判断\n\n罪数按行为个数判断。',
+      versions: [{}],
+      concepts: [], statutes: [], cases: []
+    }]
+  }
+  const markdown = buildFinalNoteMarkdown({
+    courseSpec: { courseName: '刑法分论' },
+    lesson,
+    spliceData: normalizedSpliceData(lesson, {})
+  })
+
+  assert.match(markdown, /^### 一、共犯的成立$/m, '第一个模块按中式序号渲染')
+  assert.match(markdown, /^### 二、罪数判断$/m, '第二个模块同样独立成节')
+  assert.ok(markdown.indexOf('共犯需要共同故意。') < markdown.indexOf('罪数按行为个数判断。'), '模块顺序不变')
+  assert.ok(!/^### 共犯的成立$/m.test(markdown), '模型自带的标题不再重复出现')
+
+  const assembled = assembleFinalNote(lesson, {}, {})
+  assert.ok(assembled.finalNote.markdown.includes('罪数按行为个数判断。'), '完整性校验按模块片段逐个确认')
 })
 
 test('nodes outside the outline still reach the final note', () => {

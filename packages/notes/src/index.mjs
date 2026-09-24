@@ -51,6 +51,7 @@ export {
   renderIndexTables,
   renderKnowledgeMap,
   renderLearningObjectives,
+  renderMethods,
   renderPitfalls,
   renderPositionInCourse,
   renderQuizOverview,

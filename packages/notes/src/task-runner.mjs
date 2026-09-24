@@ -83,7 +83,16 @@ export function validateSpliceData(value) {
       lectureThread: cleanText(courseOverview.lectureThread || courseOverview.lecture_thread || '')
     },
     sectionSummaries: sectionSummaries && typeof sectionSummaries === 'object' ? sectionSummaries : {},
-    sectionQuizzes: sectionQuizzes && typeof sectionQuizzes === 'object' ? sectionQuizzes : {},
+    sectionQuizzes: (() => {
+      const source = sectionQuizzes && typeof sectionQuizzes === 'object' ? sectionQuizzes : {}
+      return Object.fromEntries(Object.entries(source).map(([key, items]) => [
+        key,
+        (Array.isArray(items) ? items : []).map(item => typeof item === 'string'
+          ? { question: cleanText(item), answer: '' }
+          : { question: cleanText(item?.question || item?.q || ''), answer: cleanText(item?.answer || item?.a || '') })
+          .filter(item => item.question)
+      ]))
+    })(),
     knowledgeLink: {
       inheritsFrom: cleanText(knowledgeLink.inheritsFrom || knowledgeLink.inherits_from || ''),
       laysGroundworkFor: Array.isArray(knowledgeLink.laysGroundworkFor)
@@ -92,6 +101,10 @@ export function validateSpliceData(value) {
       nextLessonPreview: cleanText(knowledgeLink.nextLessonPreview || knowledgeLink.next_lesson_preview || '')
     },
     appendix: value.appendix && typeof value.appendix === 'object' ? value.appendix : {},
+    // 术语与 ASR 更正表、方法卡：没有就给空数组，渲染层据此决定要不要出这一节。
+    asrCorrections: (Array.isArray(value.asrCorrections) ? value.asrCorrections : [])
+      .filter(item => item && (item.heard || item.shouldBe || item.should_be)),
+    methods: (Array.isArray(value.methods) ? value.methods : []).filter(item => item && (item.name || item.problem)),
     // 体系层与索引表：字段名两种写法都收（模型时而 snake_case）。
     systemLayer: (() => {
       const system = value.systemLayer || value.system_layer || {}
@@ -303,7 +316,10 @@ export async function executeCourseTask(task, options = {}) {
     const outline = task.lesson?.outline || []
     const nodes = task.lesson?.nodes || []
     const summarySchema = Object.fromEntries(outline.map(node => [node.id, 'string']))
-    const quizSchema = Object.fromEntries(outline.map(node => [node.id, ['string']]))
+    const quizSchema = Object.fromEntries(outline.map(node => [node.id, [{
+    question: 'string（题型优先：写出规则/要件、Why/How/区别、给情境判断）',
+    answer: 'string（参考答案，必须含判断标准或必须出现的关键词）'
+  }]]))
     const result = await callModel({
       config: modelConfig,
       role: 'splicer',
@@ -354,6 +370,16 @@ export async function executeCourseTask(task, options = {}) {
             statutes: [{ name: 'string', rule: 'string', condition: 'string', relation: 'string' }],
             cases: [{ name: 'string', issue: 'string', holding: 'string', teacherView: 'string' }]
           },
+          asrCorrections: [{ heard: 'string（转写原文）', shouldBe: 'string（应为）', basis: 'string（依据：课件/上下文/术语）' }],
+          methods: [{
+            name: 'string（方法名，如双重差分）',
+            problem: 'string（解决什么问题）',
+            assumption: 'string（核心识别假设）',
+            data: 'string（数据要求）',
+            estimator: 'string（估计量或操作）',
+            misuse: ['string（常见误用）'],
+            example: 'string（课堂实例）'
+          }],
           sectionSummaries: summarySchema,
           sectionQuizzes: quizSchema,
           knowledgeLink: {
