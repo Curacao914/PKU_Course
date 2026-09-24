@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 
+import { openLedger } from '@course/store'
+
 import { parseArgv, UsageError } from './args.mjs'
 import { createCommands, USAGE } from './commands.mjs'
 import { resolveWorkerConfig } from './config.mjs'
@@ -67,6 +69,7 @@ export async function runCli(argv = [], deps = {}) {
     acquire: deps.acquire ?? defaultAcquire,
     runPython: deps.runPython ?? defaultRunPython,
     which: deps.which ?? defaultWhich,
+    openStore: deps.openStore ?? (path => openLedger(path)),
     stdout,
     stderr
   })

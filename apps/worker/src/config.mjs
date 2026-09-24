@@ -30,6 +30,7 @@ export function resolveWorkerConfig(env = process.env, options = {}) {
     scratchRoot,
     profileDir,
     mediaRoot: path.join(scratchRoot, 'replays'),
+    ledgerPath: options.ledgerPath || env.COURSE_LEDGER_PATH || path.join(scratchRoot, 'ledger.sqlite'),
     chromePath: options.chromePath || env.COURSE_CHROME_PATH || '',
     python: options.python || env.COURSE_PYTHON || 'python3',
     ffmpeg: env.COURSE_FFMPEG || 'ffmpeg',
@@ -75,6 +76,7 @@ export function describeConfig(config) {
       keys: config.envFile.keys || []
     },
     scratchRoot: config.scratchRoot,
+    ledgerPath: config.ledgerPath,
     profileDir: config.profileDir,
     headless: config.headless,
     python: config.python,

@@ -3,6 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "账本：任务、租约、版本、投递（SQLite）",
-  "main": "src/index.js"
+  "description": "账本：任务、租约、阶段事件、投递（node:sqlite，无原生依赖）",
+  "exports": {
+    ".": "./src/index.mjs"
+  }
 }

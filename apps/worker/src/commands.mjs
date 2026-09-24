@@ -11,7 +11,16 @@ import { describeConfig, pythonEnvironment } from './config.mjs'
  * 上下文进入，因此命令本身可以在没有 Chrome、没有网络、没有凭据的情况下测试。
  */
 export function createCommands(context) {
-  const { config, acquire, runPython, which, stdout, stderr } = context
+  const { config, acquire, runPython, which, openStore, stdout, stderr } = context
+
+  function withLedger(work) {
+    const store = openStore(config.ledgerPath)
+    try {
+      return work(store)
+    } finally {
+      store.close()
+    }
+  }
 
   function emit(payload, options) {
     const text = JSON.stringify(payload, null, 2)
@@ -70,12 +79,29 @@ export function createCommands(context) {
         replayKey: recording.replayKey
       }))
     )
+    const recorded = withLedger(store => store.discoverReplays(flattened))
     if (options.options.out) {
       fs.mkdirSync(path.dirname(path.resolve(options.options.out)), { recursive: true })
       fs.writeFileSync(path.resolve(options.options.out), `${JSON.stringify({ ...result, flattened }, null, 2)}\n`)
     }
-    emit({ loginMode: result.loginMode, courses: result.courses.length, replays: flattened.length, recordings: flattened }, options)
+    emit({
+      loginMode: result.loginMode,
+      courses: result.courses.length,
+      replays: flattened.length,
+      recorded,
+      recordings: flattened
+    }, options)
     return flattened.length > 0 ? 0 : 1
+  }
+
+  async function status(options) {
+    const snapshot = withLedger(store => ({
+      path: store.path,
+      stages: store.countTasks(),
+      tasks: store.listTasks({ stage: options.options.stage || null, limit: Number(options.options.limit || 20) })
+    }))
+    emit(snapshot, options)
+    return 0
   }
 
   async function download(options) {
@@ -126,13 +152,15 @@ export function createCommands(context) {
     return 0
   }
 
-  return { doctor, discover, download, transcribe }
+  return { doctor, discover, download, transcribe, status }
 }
 
 export const USAGE = `用法：course <命令> [选项]
 
 命令：
   doctor                                   检查依赖与凭据是否齐备
+  status     [--stage <阶段>] [--limit <条数>]
+                                           查看账本：各阶段任务数与任务明细
   discover   [--course <名称>] [--course-key <键>] [--out <文件>]
                                            登录教学网，列出本学期课程与课堂实录
   download   --course-key <键> --replay-key <键> [--course <名称>] [--title <标题>]

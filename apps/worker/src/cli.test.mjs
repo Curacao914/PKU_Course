@@ -4,6 +4,8 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
+import { openLedger } from '@course/store'
+
 import { runCli } from './cli.mjs'
 
 const SECRETS = {
@@ -29,6 +31,8 @@ function harness(overrides = {}) {
   const lines = []
   const errors = []
   const calls = { which: [], python: [], acquire: [] }
+  // 每个 harness 自带独立内存账本：测试之间不共享状态，避免顺序污染
+  const ledger = openLedger(':memory:')
   const deps = {
     env: { ...SECRETS },
     stdout: line => lines.push(String(line)),
@@ -59,9 +63,16 @@ function harness(overrides = {}) {
         return { artifacts: { mediaScratchKey: 'media.mp4', mediaChecksum: 'deadbeef' }, runtime: { durationSeconds: 10785.6 } }
       }
     }),
+    openStore: () => ({
+      path: ':memory:',
+      discoverReplays: (...args) => ledger.discoverReplays(...args),
+      listTasks: (...args) => ledger.listTasks(...args),
+      countTasks: () => ledger.countTasks(),
+      close: () => {}
+    }),
     ...overrides
   }
-  return { deps, lines, errors, calls }
+  return { deps, lines, errors, calls, ledger }
 }
 
 const parse = line => JSON.parse(line)
@@ -122,6 +133,28 @@ test('discover flattens recordings and forwards the filters', async () => {
     replayKey: 'replay-1'
   })
   assert.deepEqual(calls.acquire[0], { courseName: '刑法分论', courseKey: '' })
+})
+
+test('discover records replays into the ledger idempotently', async () => {
+  const { deps, lines } = harness()
+  assert.equal(await runCli(['discover'], deps), 0)
+  assert.deepEqual(parse(lines.at(-1)).recorded, { inserted: 1, existing: 0 })
+
+  assert.equal(await runCli(['discover'], deps), 0)
+  assert.deepEqual(parse(lines.at(-1)).recorded, { inserted: 0, existing: 1 }, '重复发现不得重复登记')
+})
+
+test('status reports stage counts and task rows', async () => {
+  const { deps, lines } = harness()
+  await runCli(['discover'], deps)
+  lines.length = 0
+  assert.equal(await runCli(['status'], deps), 0)
+  const snapshot = parse(lines.at(-1))
+  assert.equal(snapshot.path, ':memory:')
+  assert.ok(snapshot.stages.some(row => row.stage === 'discovered' && row.n >= 1))
+  const task = snapshot.tasks.find(row => row.replay_key === 'replay-1')
+  assert.equal(task.course_name, '刑法分论')
+  assert.equal(task.stage, 'discovered')
 })
 
 test('discover exits 1 when the term has no recordings', async () => {
