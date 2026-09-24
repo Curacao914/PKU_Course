@@ -34,7 +34,12 @@ node /home/ubuntu/course-runtime/apps/worker/bin/course.mjs doctor
 | Python | 3.12.3，仓库内 `.venv` 已装 boto3 |
 | ffmpeg / ffprobe | 6.1.1（apt 安装） |
 | sqlite3 | 3.45.1 |
-| Chromium | Playwright 自带版本，路径写入 `COURSE_CHROME_PATH` |
+| Chromium | 153.0.8010.12，位于 `~/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome`（658M），路径写入 `COURSE_CHROME_PATH` |
+
+> **Chromium 必须从镜像装。** 官方 `npx playwright install` 会跳转到被墙的 Google CDN，
+> 实测卡在 0% 不动；同时跑 npx 版与本地版还会互抢 `__dirlock`。
+> 用 `./deploy/install-browser.sh`，它走 npmmirror（实测 22 MB/s）并先清残留。
+> 已实测在这台 1.9G 内存的机器上以持久化上下文方式成功启动（`SMOKE OK`，启动后仍余 1.2G）。
 | Cloudflare Tunnel | 已存在，本地托管；`course.law-tech.dev` 复用同一条隧道 |
 
 ## 手动运行各环节
