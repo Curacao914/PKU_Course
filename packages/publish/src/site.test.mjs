@@ -84,7 +84,7 @@ test('the mermaid loader only ships on pages that actually contain a diagram', (
   const withDiagram = renderNotePage(record({
     markdown: `${NOTE}\n\n\`\`\`mermaid\nflowchart TD\n  A[抽样] --> B[变量]\n\`\`\`\n`
   }))
-  assert.ok(withDiagram.includes('/assets/mermaid.min.js'), '有图才加载绘图库，且走自托管路径')
+  assert.match(withDiagram, /\/assets\/mermaid\.min\.js\?v=[\d.]+/, '自托管路径必须带版本号：边缘缓存不会因为文件内容变了就失效')
   assert.ok(withDiagram.includes('language-mermaid'), '渲染器仍输出原始代码块，供脚本接管')
 })
 

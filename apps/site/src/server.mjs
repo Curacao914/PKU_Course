@@ -134,7 +134,10 @@ export function createRequestHandler({
     if (normalizedAssets && pathname.startsWith('/assets/')) {
       const asset = resolveInsideRoot(normalizedAssets, pathname.slice('/assets/'.length))
       if (!asset || !fs.existsSync(asset) || !fs.statSync(asset).isFile()) {
-        send(res, 404, 'not found')
+        // 静态资源的 404 必须明确禁止缓存：Cloudflare 对 .js/.css 这类扩展名会按默认
+        // 规则缓存响应，一个"当时还不存在"的 404 会被边缘缓存住，之后文件放上去了
+        // 仍然返回 404（本次实测：cf-cache-status: HIT，age 50，max-age=14400）。
+        send(res, 404, 'not found', { 'cache-control': 'no-store' })
         return
       }
       const type = CONTENT_TYPES[path.extname(asset).toLowerCase()] || 'application/octet-stream'

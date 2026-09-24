@@ -126,12 +126,15 @@ export function buildNoteRecord({
  * 库是自托管的（站点服务器的 /assets/mermaid.min.js），不走 CDN：读者在国内，
  * 而且笔记页不该依赖第三方可用性。渲染失败时保留原始代码块，图看不成至少能读源码。
  */
+// 资源带版本号：CDN/边缘缓存不会因为文件内容变了就失效，换版本必须换 URL。
+const MERMAID_VERSION = '11.17.2'
+
 const MERMAID_LOADER = `<script type="module">
 const blocks = [...document.querySelectorAll('pre > code.language-mermaid, pre > code.lang-mermaid')]
 if (blocks.length) {
   const load = () => new Promise((resolve, reject) => {
     const script = document.createElement('script')
-    script.src = '/assets/mermaid.min.js'
+    script.src = '/assets/mermaid.min.js?v=${MERMAID_VERSION}'
     script.onload = resolve
     script.onerror = reject
     document.head.appendChild(script)
