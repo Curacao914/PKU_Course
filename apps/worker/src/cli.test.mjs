@@ -363,6 +363,65 @@ test('notes stops at the outline gate in manual mode and records why', async () 
   assert.ok(stored.next_attempt_at, '未完成时应写入退避时间，避免立刻重复消费')
 })
 
+test('publish builds the site, dedupes the notification and advances the stage', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const notesDir = path.join(dir, 'notes')
+  fs.mkdirSync(notesDir, { recursive: true })
+  fs.writeFileSync(path.join(notesDir, 'notes-run-summary.json'), JSON.stringify({
+    course: '刑法分论', lesson: '第10-12节', status: 'completed', stopReason: 'completed'
+  }))
+  fs.writeFileSync(path.join(notesDir, '第10-12节.md'), [
+    '# 第10-12节',
+    '',
+    '## 课程概览',
+    '',
+    '共犯的成立需要共同故意与共同行为。'
+  ].join('\n'))
+
+  const siteDir = path.join(dir, 'site')
+  const { deps, lines, ledger } = harness()
+  ledger.discoverReplays([{ replay_key: 'replay-1', course_key: 'course-abc' }])
+  ledger.reportStage({ id: ledger.getTask('replay-1').id, stage: 'notes_ready' })
+
+  const args = [
+    'publish', '--from', notesDir, '--out', siteDir,
+    '--replay-key', 'replay-1', '--origin', 'https://course.law-tech.dev'
+  ]
+  assert.equal(await runCli(args, deps), 0)
+  const payload = parse(lines.at(-1))
+  assert.equal(payload.changed, true)
+  assert.equal(payload.notes, 1)
+  assert.equal(payload.delivery.inserted, true)
+  assert.equal(payload.task.to, 'published')
+  assert.ok(fs.existsSync(path.join(siteDir, 'index.html')))
+  assert.ok(fs.existsSync(path.join(siteDir, 'notes/刑法分论/第10-12节.html')))
+  assert.equal(ledger.getTask('replay-1').stage, 'published')
+
+  // 内容没变时重复发布：站点照样重写，但不再通知
+  assert.equal(await runCli(args, deps), 0)
+  const second = parse(lines.at(-1))
+  assert.equal(second.changed, false)
+  assert.equal(second.delivery, null)
+  assert.equal(second.notes, 1, '笔记不应重复累加')
+
+  // 内容变了才重新通知
+  fs.writeFileSync(path.join(notesDir, '第10-12节.md'), '# 第10-12节\n\n## 课程概览\n\n补充一句新的内容。')
+  assert.equal(await runCli(args, deps), 0)
+  assert.equal(parse(lines.at(-1)).changed, true)
+
+  const queued = ledger.claimDelivery({ workerId: 'relay-1' })
+  assert.equal(queued.purpose, 'course-note')
+  assert.match(queued.object_url, /^https:\/\/course.law-tech.dev\/notes\//)
+  assert.match(queued.body_text, /刑法分论 · 第10-12节/)
+})
+
+test('publish refuses a directory without a notes run summary', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const { deps, errors } = harness()
+  assert.equal(await runCli(['publish', '--from', dir], deps), 1)
+  assert.match(errors.join('\n'), /找不到 .*notes-run-summary\.json/)
+})
+
 test('transcribe advances the ledger task to transcript_ready', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
   const media = path.join(dir, 'media.mp4')

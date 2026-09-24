@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "CLI 与定时循环：doctor/status/discover/download/transcribe",
+  "description": "CLI 与定时循环：doctor/status/discover/download/transcribe/notes/publish",
   "exports": {
     ".": "./src/cli.mjs"
   },
@@ -14,6 +14,8 @@
     "@course/acquisition": "*",
     "@course/asr": "*",
     "@course/core": "*",
+    "@course/notes": "*",
+    "@course/publish": "*",
     "@course/store": "*"
   }
 }

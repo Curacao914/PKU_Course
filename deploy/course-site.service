@@ -1,0 +1,20 @@
+[Unit]
+Description=course.law-tech.dev 站点（对外笔记阅读 + 管理接口）
+Documentation=https://course.law-tech.dev
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/course-runtime
+EnvironmentFile=-%h/.course-worker/env
+Environment=COURSE_SITE_ROOT=%h/.course-worker/site
+Environment=COURSE_SITE_PORT=3100
+Environment=COURSE_SITE_HOST=127.0.0.1
+ExecStart=__NODE__ apps/site/bin/serve.mjs
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

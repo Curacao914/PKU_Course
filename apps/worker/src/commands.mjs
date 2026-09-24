@@ -1,9 +1,11 @@
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
 import { createValidatedAcquisitionRuntime } from '@course/acquisition'
 import { callCourseModel, createInitialLesson, runLessonNotes } from '@course/notes'
+import { buildNoteRecord, readSiteIndex, writeSite } from '@course/publish'
 
 /** 文件名安全化：课程名与课次里常有斜杠与冒号。 */
 function safeFileName(value) {
@@ -249,6 +251,91 @@ export function createCommands(context) {
     }
   }
 
+  /**
+   * 把已完成的笔记发布到站点。
+   *
+   * 站点是全量重写的：笔记以百计，全量写比为每篇记忆"已发布/已删除"简单得多，
+   * 也不会出现删掉的笔记还挂在索引里的状态漂移。发布库本身是一份 JSON，
+   * 因此重新生成站点不需要重新跑模型。
+   */
+  async function publish(options) {
+    const from = path.resolve(requireOption(options.options, 'from', 'publish'))
+    const summaryPath = path.join(from, 'notes-run-summary.json')
+    if (!fs.existsSync(summaryPath)) {
+      throw new Error(`找不到 ${summaryPath}；--from 应指向 course notes 的输出目录`)
+    }
+    const runSummary = JSON.parse(fs.readFileSync(summaryPath, 'utf8'))
+    const course = options.options.course || runSummary.course
+    const lessonTitle = options.options.lesson || runSummary.lesson
+    const teacher = options.options.teacher || runSummary.teacher || ''
+    const notePath = path.join(from, `${safeFileName(lessonTitle)}.md`)
+    if (!fs.existsSync(notePath)) throw new Error(`找不到笔记正文：${notePath}`)
+    const markdown = fs.readFileSync(notePath, 'utf8')
+
+    const siteRoot = path.resolve(options.options.out || path.join(config.scratchRoot, 'site'))
+    const libraryPath = path.join(siteRoot, 'library.json')
+    const library = fs.existsSync(libraryPath) ? JSON.parse(fs.readFileSync(libraryPath, 'utf8')) : []
+    const record = buildNoteRecord({
+      courseName: course,
+      teacher,
+      lessonTitle,
+      markdown,
+      replayKey: runSummary.replayKey || options.options['replay-key'] || '',
+      publishedAt: options.options['published-at'] || new Date().toISOString()
+    })
+    const checksum = createHash('sha256').update(record.markdown).digest('hex')
+    const previous = library.find(item => item.slug === record.slug)
+    const changed = !previous || previous.checksum !== checksum
+
+    const nextLibrary = [...library.filter(item => item.slug !== record.slug), { ...record, checksum }]
+    fs.mkdirSync(siteRoot, { recursive: true })
+    fs.writeFileSync(libraryPath, `${JSON.stringify(nextLibrary, null, 2)}\n`)
+
+    const site = writeSite({
+      records: nextLibrary,
+      outputDir: siteRoot,
+      siteOrigin: options.options.origin || 'https://course.law-tech.dev'
+    })
+    const index = readSiteIndex(siteRoot)
+
+    // 同一条笔记只通知一次；内容变化时才重新通知
+    let delivery = null
+    const replayKey = record.replayKey || options.options['replay-key'] || ''
+    const store = openStore(config.ledgerPath)
+    try {
+      const task = replayKey ? store.getTask(replayKey) : null
+      if (changed) {
+        delivery = store.enqueueDelivery({
+          dedupeKey: `course-note:${record.slug}`,
+          purpose: 'course-note',
+          bodyText: `${record.courseName} · ${record.lessonTitle}\n${record.summary}`,
+          objectUrl: `${options.options.origin || 'https://course.law-tech.dev'}/${record.slug}.html`
+        })
+      }
+      if (task && task.stage !== 'published' && task.stage !== 'completed') {
+        store.reportStage({
+          id: task.id,
+          stage: 'published',
+          message: '已发布到站点',
+          data: { artifacts: { slug: record.slug, siteDir: site.outputDir } }
+        })
+      }
+      emit({
+        slug: record.slug,
+        url: `${options.options.origin || 'https://course.law-tech.dev'}/${record.slug}.html`,
+        changed,
+        notes: index.count,
+        siteDir: site.outputDir,
+        written: site.written,
+        delivery: delivery ? { inserted: delivery.inserted, dedupeKey: `course-note:${record.slug}` } : null,
+        task: task ? { id: task.id, to: task.stage === 'published' || task.stage === 'completed' ? task.stage : 'published' } : null
+      }, options)
+      return 0
+    } finally {
+      store.close()
+    }
+  }
+
   async function status(options) {
     const snapshot = withLedger(store => ({
       path: store.path,
@@ -393,7 +480,7 @@ export function createCommands(context) {
     }
   }
 
-  return { doctor, discover, download, transcribe, notes, status }
+  return { doctor, discover, download, transcribe, notes, publish, status }
 }
 
 export const USAGE = `用法：course <命令> [选项]
@@ -411,6 +498,8 @@ export const USAGE = `用法：course <命令> [选项]
   notes      --transcript <文件> --course <名称> --lesson <课次> [--replay-key <键>] [--output-dir <目录>]
              [--auto-approve-outline 0|1] [--max-steps <步数>]
                                            从转录稿生成单课笔记（大纲 → 节点 → 审查 → 拼装 → 终审）
+  publish    --from <笔记目录> [--course <名称>] [--lesson <课次>] [--out <站点目录>] [--origin <域名>]
+                                           把笔记发布到站点，内容变化时排入一条微信通知
 
 账本：download / transcribe 若带 --replay-key 且账本中已有该回放，会先领取任务，
 成功后推进阶段；失败则记录原因并退避 5 分钟。账本没有该回放时按独立运行处理。

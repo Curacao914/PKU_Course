@@ -3,6 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "course.law-tech.dev：对外笔记阅读 + 私有管理台",
-  "main": "src/index.js"
+  "description": "course.law-tech.dev：对外笔记阅读 + 管理接口（原生 node:http）",
+  "exports": {
+    ".": "./src/server.mjs"
+  },
+  "bin": {
+    "course-site": "./bin/serve.mjs"
+  },
+  "dependencies": {
+    "@course/publish": "*"
+  }
 }
