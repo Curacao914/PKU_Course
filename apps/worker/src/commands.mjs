@@ -1728,7 +1728,12 @@ export function createCommands(context) {
     }
   }
 
-  return { doctor, discover, download, transcribe, notes, materials, balance, publish, notify, cycle, verify, status, retry, prune, backup, adminPassword }
+  // 键名必须与 CLI 命令名一致：'admin-passwd' 带连字符，不能用标识符简写
+  return {
+    doctor, discover, download, transcribe, notes, materials, balance, publish,
+    notify, cycle, verify, status, retry, prune, backup,
+    'admin-passwd': adminPassword
+  }
 }
 
 export const USAGE = `用法：course <命令> [选项]
