@@ -72,6 +72,20 @@ export function openLedger(databasePath = ':memory:', options = {}) {
           claimed_by = '', lease_expires_at = NULL, updated_at = ?
       WHERE id = ?
     `),
+    countDeliveries: db.prepare('SELECT status, COUNT(*) AS n FROM deliveries GROUP BY status'),
+    listDeliveries: db.prepare('SELECT * FROM deliveries WHERE (? IS NULL OR status = ?) ORDER BY id DESC LIMIT ?'),
+    // deliveries 表用的是 scheduled_for（投递行没有 next_attempt_at 那一列）
+    reviveFailedDeliveries: db.prepare(`
+      UPDATE deliveries SET status = 'pending', attempts = 0, last_error = '',
+        scheduled_for = ?, claimed_by = '', claimed_at = NULL, updated_at = ?
+      WHERE status = 'failed'
+    `),
+    resetTask: db.prepare(`
+      UPDATE tasks
+      SET stage = ?, attempts = 0, last_error = '', next_attempt_at = NULL,
+          claimed_by = '', lease_expires_at = NULL, heartbeat_at = NULL, updated_at = ?
+      WHERE id = ?
+    `),
     insertEvent: db.prepare('INSERT INTO task_events (task_id, at, stage, message, data) VALUES (?, ?, ?, ?, ?)'),
     listEvents: db.prepare('SELECT * FROM task_events WHERE task_id = ? ORDER BY id'),
     listTasks: db.prepare('SELECT * FROM tasks WHERE (? IS NULL OR stage = ?) ORDER BY id LIMIT ?'),
@@ -112,6 +126,11 @@ export function openLedger(databasePath = ':memory:', options = {}) {
       artifacts: parseJson(row.artifacts, {}),
       runtime: parseJson(row.runtime, {})
     }
+  }
+
+  /** 投递行没有 JSON 字段，但保持与 hydrate 同形（管理台读的时候不用分两种）。 */
+  function hydrateDelivery(row) {
+    return row ? { ...row } : null
   }
 
   function transaction(work) {
@@ -232,6 +251,27 @@ export function openLedger(databasePath = ':memory:', options = {}) {
       })
     },
 
+    /**
+     * 把一个停下不动的任务放回可领取状态。
+     *
+     * 用于 needs_attention 之后的人工恢复：光把阶段改成 needs_attention 而没有办法
+     * 把它弄回来，等于把课次永久钉死——那比继续重试更糟。
+     */
+    resetTask({ replayKey, stage = '', now } = {}) {
+      const key = String(replayKey || '').trim()
+      if (!key) throw new Error('resetTask 需要 replayKey')
+      const at = nowIso(now)
+      return transaction(() => {
+        const current = statements.findByReplayKey.get(key)
+        if (!current) throw new Error(`任务不存在：${key}`)
+        const target = stage || current.stage
+        assertStage(target)
+        statements.resetTask.run(target, at, current.id)
+        statements.insertEvent.run(current.id, at, target, '人工重置：清空失败计数，等待重新领取', '{}')
+        return this.getTask(key)
+      })
+    },
+
     heartbeat({ id, workerId, leaseSeconds = 900, now } = {}) {
       const at = nowIso(now)
       const leaseUntil = new Date(new Date(at).getTime() + leaseSeconds * 1000).toISOString()
@@ -273,6 +313,21 @@ export function openLedger(databasePath = ':memory:', options = {}) {
         nowIso(scheduledFor ?? now), at, at
       )
       return { inserted: result.changes > 0, delivery: statements.findDelivery.get(String(dedupeKey)) }
+    },
+
+    countDeliveries() {
+      return Object.fromEntries(statements.countDeliveries.all().map(row => [row.status, row.n]))
+    },
+
+    listDeliveries({ status = null, limit = 50 } = {}) {
+      return statements.listDeliveries.all(status, status, Number(limit || 50)).map(hydrateDelivery)
+    },
+
+    /** 把发失败的通知放回队列重发（人工决定，不自动循环骚扰）。 */
+    reviveFailedDeliveries({ now } = {}) {
+      const at = nowIso(now)
+      const result = statements.reviveFailedDeliveries.run(at, at)
+      return { revived: result.changes }
     },
 
     claimDelivery({ workerId, now } = {}) {

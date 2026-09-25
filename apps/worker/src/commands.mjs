@@ -691,6 +691,13 @@ export function createCommands(context) {
 
     const store = openStore(config.ledgerPath)
     try {
+      // 发失败的通知（重试到上限后被标记 failed）不会自己回来：
+      // 要么人工重发，要么永远消失。这里给一条明确的重发入口。
+      if (options.flags.has('retry-failed')) {
+        const revived = store.reviveFailedDeliveries()
+        stderr(`已把 ${revived.revived} 条发送失败的通知放回队列`)
+      }
+
       const cycleOptions = {
         store,
         sender,
@@ -743,7 +750,7 @@ export function createCommands(context) {
     const quiet = { ...options, quiet: true }
     const summary = {
       workerId, startedAt: new Date().toISOString(), discovered: null, disk: null,
-      tasks: [], notification: null, errors: [], providerIssues: [], lowBalance: null
+      tasks: [], notification: null, errors: [], providerIssues: [], lowBalance: null, needsAttention: []
     }
 
     // 先把磁盘看清：空间不足时连扫描都不必做，但仍要把已排队的通知发出去
@@ -926,6 +933,46 @@ export function createCommands(context) {
     } catch (error) {
       summary.errors.push({ step: 'notify', message: error instanceof Error ? error.message : String(error) })
     }
+
+    // 反复失败的课次停下来并明确告诉用户。
+    // 无限重试的代价是"一直烧钱而且没人知道"；跑不动就该出现在通知里，
+    // 由人决定是修凭据、补课件还是人工重置（course retry）。
+    const stuck = []
+    try {
+      const store = openStore(config.ledgerPath)
+      try {
+        const maxAttempts = Number(options.options['max-attempts'] || 5)
+        for (const task of store.listTasks({ limit: 200 })) {
+          if (['published', 'completed', 'needs_attention'].includes(task.stage)) continue
+          if (Number(task.attempts || 0) < maxAttempts) continue
+          store.reportStage({
+            id: task.id,
+            stage: 'needs_attention',
+            message: `连续失败 ${task.attempts} 次，已停止自动重试`,
+            error: task.last_error || ''
+          })
+          store.enqueueDelivery({
+            dedupeKey: `needs-attention:${task.replay_key}`,
+            purpose: 'needs-attention',
+            bodyText: [
+              `【停下等你】${task.course_name || ''} · ${task.title || task.replay_key}`,
+              `连续失败 ${task.attempts} 次，已停止自动重试。`,
+              `阶段：${task.stage}`,
+              `原因：${String(task.last_error || '（未记录）').slice(0, 200)}`,
+              '',
+              '处理完（补凭据/补课件/手动重跑）后用 course retry --replay-key 放回队列。'
+            ].join('\n'),
+            objectUrl: 'https://course.law-tech.dev/admin'
+          })
+          stuck.push({ replayKey: task.replay_key, stage: task.stage, attempts: task.attempts })
+        }
+      } finally {
+        store.close()
+      }
+    } catch (error) {
+      summary.errors.push({ step: 'needs-attention', message: error instanceof Error ? error.message : String(error) })
+    }
+    summary.needsAttention = stuck
 
     // 付费故障与低余额：排一条可行动的提醒（按天去重，不重复轰炸）
     try {
@@ -1201,9 +1248,22 @@ export function createCommands(context) {
     const snapshot = withLedger(store => ({
       path: store.path,
       stages: store.countTasks(),
-      tasks: store.listTasks({ stage: options.options.stage || null, limit: Number(options.options.limit || 20) })
+      tasks: store.listTasks({ stage: options.options.stage || null, limit: Number(options.options.limit || 20) }),
+      // 通知发不出去不该无声无息：投递失败要在状态里看得见（管理台据此显示并支持重发）
+      deliveries: store.countDeliveries(),
+      failedDeliveries: store.listDeliveries({ status: 'failed', limit: 20 })
     }))
     emit(snapshot, options)
+    return 0
+  }
+
+  /** 人工恢复：把停下不动的课次放回可领取状态。 */
+  async function retry(options) {
+    const replayKey = requireOption(options.options, 'replay-key', 'retry')
+    const stage = options.options.stage || ''
+    const task = withLedger(store => store.resetTask({ replayKey, stage }))
+    stderr(`已重置 ${replayKey}：阶段 ${task.stage}，失败计数归零，下一轮 cycle 会重新领取`)
+    emit({ replayKey, stage: task.stage, attempts: task.attempts }, options)
     return 0
   }
 
@@ -1359,7 +1419,7 @@ export function createCommands(context) {
     }
   }
 
-  return { doctor, discover, download, transcribe, notes, materials, balance, publish, notify, cycle, verify, status }
+  return { doctor, discover, download, transcribe, notes, materials, balance, publish, notify, cycle, verify, status, retry }
 }
 
 export const USAGE = `用法：course <命令> [选项]
@@ -1399,8 +1459,11 @@ export const USAGE = `用法：course <命令> [选项]
                                            阿里云余额需账号 AK/SK，见 docs/07）
   publish    --from <笔记目录> [--course <名称>] [--lesson <课次>] [--out <站点目录>] [--origin <域名>]
                                            把笔记发布到站点，内容变化时排入一条微信通知
-  notify     [--probe] [--loop] [--max-items <条数>]
-                                           把账本里排队的通知发到微信；--probe 只验证通道不发消息
+  notify     [--probe] [--loop] [--max-items <条数>] [--retry-failed]
+                                           把账本里排队的通知发到微信；--probe 只验证通道；
+                                           --retry-failed 把发送失败的通知放回队列重发
+  retry      --replay-key <键> [--stage <阶段>]    人工恢复：清空失败计数并等待重新领取
+                                           （阶段默认不变，也可显式退回某个阶段）
   cycle      [--max-tasks <条数>] [--course <名称>] [--replay-key <键>] [--max-steps <步数>]
              [--auto-approve-outline 0|1]
                                            一轮完整链路：扫描 → 逐条推进各阶段 → 投递通知

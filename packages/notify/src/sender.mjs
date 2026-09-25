@@ -30,6 +30,7 @@ export function deliveryLinkLabel(purpose = '') {
   if (purpose === 'new-lesson') return '打开管理台传课件'
   if (purpose === 'provider-issue') return '去处理'
   if (purpose === 'balance-warning') return '去充值'
+  if (purpose === 'needs-attention') return '打开管理台处理'
   return '打开课程笔记'
 }
 

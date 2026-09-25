@@ -5,7 +5,7 @@ export class UsageError extends Error {
   }
 }
 
-export const COMMANDS = ['doctor', 'discover', 'download', 'transcribe', 'notes', 'materials', 'balance', 'publish', 'notify', 'cycle', 'verify', 'status', 'help']
+export const COMMANDS = ['doctor', 'discover', 'download', 'transcribe', 'notes', 'materials', 'balance', 'publish', 'notify', 'cycle', 'verify', 'status', 'retry', 'help']
 
 /**
  * 解析命令行。

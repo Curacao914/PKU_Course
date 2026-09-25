@@ -219,6 +219,44 @@ test('a failed stage can be retried after next_attempt_at passes', () => {
   db.close()
 })
 
+test('a failed task can be reset back into the queue', () => {
+  // needs_attention 之后必须有回来的路：只把阶段改成"等人处理"而没有恢复手段，
+  // 等于把课次永久钉死，比继续重试更糟。
+  const db = ledger()
+  db.discoverReplays([{ replay_key: 'replay-1', course_key: 'course-1', course_name: '刑法分论', title: '第1-2节' }])
+  const task = db.claimTask({ replayKey: 'replay-1', workerId: 'w1' }).task
+  db.reportStage({ id: task.id, stage: 'needs_attention', error: '连续失败 5 次' })
+  assert.equal(db.getTask('replay-1').stage, 'needs_attention')
+
+  const reset = db.resetTask({ replayKey: 'replay-1', stage: 'transcript_ready' })
+  assert.equal(reset.stage, 'transcript_ready')
+  assert.equal(reset.attempts, 0, '失败计数归零')
+  assert.equal(reset.last_error, '')
+  assert.equal(db.claimTask({ replayKey: 'replay-1', workerId: 'w2' }).claimed, true, '重置后能重新领取')
+
+  assert.throws(() => db.resetTask({ replayKey: 'nope' }), /任务不存在/)
+  assert.throws(() => db.resetTask({}), /需要 replayKey/)
+  assert.throws(() => db.resetTask({ replayKey: 'replay-1', stage: '不存在的阶段' }), /阶段/)
+})
+
+test('failed deliveries can be revived instead of disappearing silently', () => {
+  const db = ledger()
+  const queued = db.enqueueDelivery({ dedupeKey: 'k1', purpose: 'course-note', bodyText: 'x', objectUrl: '/n.html' })
+  assert.equal(queued.inserted, true)
+  const claimed = db.claimDelivery({ workerId: 'relay' })
+  db.ackDelivery({ id: claimed.id, status: 'failed', error: '网关不通' })
+  assert.deepEqual(db.countDeliveries(), { failed: 1 })
+
+  const failed = db.listDeliveries({ status: 'failed' })
+  assert.equal(failed.length, 1)
+  assert.equal(failed[0].last_error, '网关不通')
+
+  const revived = db.reviveFailedDeliveries()
+  assert.equal(revived.revived, 1)
+  assert.equal(db.claimDelivery({ workerId: 'relay' }).dedupe_key, 'k1', '重发后能重新领取')
+  assert.equal(db.listDeliveries({ status: 'failed' }).length, 0)
+})
+
 test('deliveries dedupe by key and follow pending → claimed → sent', () => {
   const db = ledger()
   const first = db.enqueueDelivery({
