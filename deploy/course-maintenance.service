@@ -1,0 +1,10 @@
+[Unit]
+Description=课程闭环的每日维护（备份账本 + 清理原件）
+Documentation=https://course.law-tech.dev
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/course-runtime
+# 先备份再清理：备份失败也不该阻断清理（两者互不依赖），但要能在日志里分别看到
+ExecStart=/usr/local/bin/node apps/worker/bin/course.mjs backup --keep 7
+ExecStart=/usr/local/bin/node apps/worker/bin/course.mjs prune --apply

@@ -1,0 +1,13 @@
+[Unit]
+Description=每天 03:40 做维护：备份账本、清理已验证的原件
+Documentation=https://course.law-tech.dev
+
+[Timer]
+# 凌晨跑，避开两次检测（07:30 / 19:30）与谷价写作窗口
+OnCalendar=*-*-* 03:40:00
+Persistent=true
+AccuracySec=1min
+Unit=course-maintenance.service
+
+[Install]
+WantedBy=timers.target

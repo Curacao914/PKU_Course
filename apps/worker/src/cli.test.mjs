@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -364,6 +365,54 @@ test('notes turns a transcript file into a completed note and a ledger stage', a
   const brief = JSON.parse(fs.readFileSync(summary.brief.path, 'utf8'))
   assert.ok(brief.briefing.length >= 60, '简报要有实质内容')
   assert.ok(brief.keyPoints.length >= 1, '简报要给出要点')
+})
+
+test('prune deletes originals only after the text is verified', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const scratch = path.join(dir, 'scratch')
+  const replay = path.join(scratch, 'replays', 'replay-1')
+  fs.mkdirSync(path.join(replay, 'transcript'), { recursive: true })
+  fs.mkdirSync(path.join(replay, 'output'), { recursive: true })
+  fs.mkdirSync(path.join(replay, 'fragments', 'primary'), { recursive: true })
+  const transcript = `# 转录\n\n${'[00:00:01 – 00:00:05] 一句话。\n'.repeat(60)}`
+  fs.writeFileSync(path.join(replay, 'transcript', 'raw-transcript.md'), transcript)
+  fs.writeFileSync(path.join(replay, 'output', 'media.mp4'), Buffer.alloc(2048, 7))
+  fs.writeFileSync(path.join(replay, 'fragments', 'primary', 'seg.ts'), Buffer.alloc(512, 3))
+  const checksum = crypto.createHash('sha256').update(transcript).digest('hex')
+  fs.writeFileSync(path.join(replay, 'transcript', 'run-summary.json'), JSON.stringify({ transcriptChecksum: checksum }))
+
+  const { deps, lines } = harness({ configOverrides: { scratchRoot: scratch } })
+
+  // 预演：只报告，不删
+  assert.equal(await runCli(['prune'], deps), 0)
+  const dry = parse(lines.at(-1))
+  assert.ok(dry.freedBytes > 2000, '预演要算出可清理的字节数')
+  assert.ok(fs.existsSync(path.join(replay, 'output', 'media.mp4')), '预演不得删除任何东西')
+
+  // 真删：转录稿校验通过才动
+  assert.equal(await runCli(['prune', '--apply'], deps), 0)
+  assert.ok(!fs.existsSync(path.join(replay, 'output', 'media.mp4')), '校验通过后删除原件')
+  assert.ok(!fs.existsSync(path.join(replay, 'fragments')), '分片一并清理')
+  assert.ok(fs.existsSync(path.join(replay, 'transcript', 'raw-transcript.md')), '纯文本永久保留')
+  assert.ok(fs.existsSync(path.join(replay, 'transcript', 'run-summary.json')))
+})
+
+test('prune keeps the original when the transcript does not match its checksum', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const scratch = path.join(dir, 'scratch')
+  const replay = path.join(scratch, 'replays', 'replay-2')
+  fs.mkdirSync(path.join(replay, 'transcript'), { recursive: true })
+  fs.mkdirSync(path.join(replay, 'output'), { recursive: true })
+  fs.writeFileSync(path.join(replay, 'transcript', 'raw-transcript.md'), '正文'.repeat(400))
+  fs.writeFileSync(path.join(replay, 'output', 'media.mp4'), Buffer.alloc(2048, 1))
+  fs.writeFileSync(path.join(replay, 'transcript', 'run-summary.json'), JSON.stringify({ transcriptChecksum: 'deadbeef' }))
+
+  const { deps, lines } = harness({ configOverrides: { scratchRoot: scratch } })
+  assert.equal(await runCli(['prune', '--apply'], deps), 0)
+  const report = parse(lines.at(-1))
+  assert.equal(report.freedBytes, 0, '校验和不符时一个字节都不删')
+  assert.ok(fs.existsSync(path.join(replay, 'output', 'media.mp4')))
+  assert.match(report.skipped[0].reason, /校验和不符/)
 })
 
 test('materials archives a deck and notes uses it as writing material', async () => {

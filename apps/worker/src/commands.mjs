@@ -1320,6 +1320,52 @@ export function createCommands(context) {
   }
 
   /**
+   * 账本与站点库的每日备份。
+   *
+   * 账本是整条流水线的记忆：课次阶段、尝试次数、事件流、投递队列，以及"哪些课次已经
+   * 处理过"的判断依据。丢了不会让机器坏掉，但会让人重新付一遍钱和时间。
+   * 用 SQLite 自己的 VACUUM INTO 做一致性快照（数据库正在被写也能安全复制），
+   * 只保留最近 N 份。
+   */
+  async function backup(options) {
+    const keep = Math.max(2, Number(options.options.keep || 7))
+    const dir = path.join(config.scratchRoot, 'backups')
+    fs.mkdirSync(dir, { recursive: true })
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+    const written = []
+
+    const ledgerTarget = path.join(dir, `ledger-${stamp}.sqlite`)
+    const store = openStore(config.ledgerPath)
+    try {
+      store.db.exec(`VACUUM INTO '${ledgerTarget.replace(/'/g, "''")}'`)
+    } finally {
+      store.close()
+    }
+    written.push({ file: path.basename(ledgerTarget), bytes: fs.statSync(ledgerTarget).size })
+
+    // 站点发布库（笔记是从笔记文件全量重写的，但"发过哪些、内容指纹是什么"记在这里）
+    const libraryPath = path.join(config.scratchRoot, 'site', 'library.json')
+    if (fs.existsSync(libraryPath)) {
+      const target = path.join(dir, `library-${stamp}.json`)
+      fs.copyFileSync(libraryPath, target)
+      written.push({ file: path.basename(target), bytes: fs.statSync(target).size })
+    }
+
+    // 只留最近 keep 份（按文件名里的时间戳排序即按时间排序）
+    const all = fs.readdirSync(dir)
+      .filter(name => /^(ledger|library)-/.test(name))
+      .sort()
+    const removed = []
+    for (const name of all.slice(0, Math.max(0, all.length - keep * 2))) {
+      fs.rmSync(path.join(dir, name), { force: true })
+      removed.push(name)
+    }
+
+    emit({ dir, keep, written, removed, total: fs.readdirSync(dir).length }, options)
+    return 0
+  }
+
+  /**
    * 清理：只删"原件"，而且必须在纯文本产物**通过校验**之后。
    *
    * 保留策略（用户的明确要求）：
@@ -1587,7 +1633,7 @@ export function createCommands(context) {
     }
   }
 
-  return { doctor, discover, download, transcribe, notes, materials, balance, publish, notify, cycle, verify, status, retry, prune }
+  return { doctor, discover, download, transcribe, notes, materials, balance, publish, notify, cycle, verify, status, retry, prune, backup }
 }
 
 export const USAGE = `用法：course <命令> [选项]
@@ -1634,6 +1680,7 @@ export const USAGE = `用法：course <命令> [选项]
                                            --retry-failed 把发送失败的通知放回队列重发
   retry      --replay-key <键> [--stage <阶段>]    人工恢复：清空失败计数并等待重新领取
                                            （阶段默认不变，也可显式退回某个阶段）
+  backup     [--keep <份数>]                     把账本与站点库做一致性快照（默认留 7 份）
   prune      [--apply] [--keep-originals]         清理原件：纯文本（转录稿/课件文字/笔记）
                                            永久保留；视频、音频、PPT 原文件只在转换成功
                                            且校验通过之后才删。默认只报告不删除
