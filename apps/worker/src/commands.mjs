@@ -6,6 +6,8 @@ import path from 'node:path'
 import { checkFreeSpace, createValidatedAcquisitionRuntime, formatBytes } from '@course/acquisition'
 import { addMaterial, guessMaterialIdentity, listMaterials, parseInboxName, readDecks, unassignedDir } from '@course/materials'
 
+import { hashPassword, validatePassword } from '@course/core'
+
 import {
   LOW_BALANCE_THRESHOLD_CNY,
   classifyProviderIssue,
@@ -42,6 +44,17 @@ function pruneRunHistory(runsDir, keep) {
   for (const entry of entries.slice(keep)) {
     fs.rmSync(path.join(runsDir, entry.name), { recursive: true, force: true })
   }
+}
+
+/** 从 stdin 读入（改密码用：密码不出现在命令行里，也就不会留在 ps 与 shell 历史里）。 */
+function readStdin() {
+  if (process.stdin.isTTY) return Promise.resolve('')
+  return new Promise(resolve => {
+    let data = ''
+    process.stdin.setEncoding('utf8')
+    process.stdin.on('data', chunk => { data += chunk })
+    process.stdin.on('end', () => resolve(data))
+  })
 }
 
 /** 成品正文字数（用于篇幅核对）。 */
@@ -1340,6 +1353,51 @@ export function createCommands(context) {
   }
 
   /**
+   * 管理台密码：设置 / 清除 / 查看状态。
+   *
+   * 这是**找回密码**的服务器侧入口：忘记密码时在这里重设，
+   * 或者用环境变量里的主令牌（COURSE_ADMIN_TOKEN）先登录再去管理台改。
+   * 密码只存 scrypt 哈希，所以这里也读不回明文——只能重设。
+   */
+  async function adminPassword(options) {
+    const file = path.join(config.scratchRoot, 'admin-password.json')
+    const status = () => ({
+      path: file,
+      passwordSet: fs.existsSync(file),
+      masterTokenSet: Boolean(String(env.COURSE_ADMIN_TOKEN || '').trim()),
+      updatedAt: (() => {
+        try {
+          return JSON.parse(fs.readFileSync(file, 'utf8')).updatedAt
+        } catch {
+          return null
+        }
+      })()
+    })
+
+    if (options.flags?.has('status') || (!options.options.set && !options.options['set-stdin'] && !options.flags?.has('clear'))) {
+      emit({ ...status(), hint: '忘记密码时：course admin-passwd --set-stdin 重设，或用主令牌登录后在管理台修改' }, options)
+      return 0
+    }
+    if (options.flags?.has('clear')) {
+      if (fs.existsSync(file)) fs.rmSync(file, { force: true })
+      emit({ ...status(), cleared: true, note: '已清除密码：现在只能用主令牌登录' }, options)
+      return 0
+    }
+
+    let password = String(options.options.set || '')
+    if (options.options['set-stdin']) {
+      password = String(await readStdin()).trim()
+    }
+    const problem = validatePassword(password)
+    if (problem) throw new Error(`密码不符合要求：${problem}`)
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, `${JSON.stringify(hashPassword(password), null, 2)}\n`, { mode: 0o600 })
+    stderr('密码已重设（只保存哈希，明文不落盘）。下次打开管理台用它登录即可。')
+    emit({ ...status(), changed: true }, options)
+    return 0
+  }
+
+  /**
    * 账本与站点库的每日备份。
    *
    * 账本是整条流水线的记忆：课次阶段、尝试次数、事件流、投递队列，以及"哪些课次已经
@@ -1670,7 +1728,7 @@ export function createCommands(context) {
     }
   }
 
-  return { doctor, discover, download, transcribe, notes, materials, balance, publish, notify, cycle, verify, status, retry, prune, backup }
+  return { doctor, discover, download, transcribe, notes, materials, balance, publish, notify, cycle, verify, status, retry, prune, backup, adminPassword }
 }
 
 export const USAGE = `用法：course <命令> [选项]
@@ -1708,6 +1766,9 @@ export const USAGE = `用法：course <命令> [选项]
                                            认不出归属的进 _unassigned，不猜，等你在管理台指定。
                                            （更省事的方式是直接在管理台上传：那里从账本
                                            列出课程与课次，选一下就行，文件名随便叫）
+  admin-passwd [--set <新密码> | --set-stdin] [--clear] [--status]
+                                           管理台密码：重设 / 清除 / 查看状态。
+                                           忘记密码时在服务器上跑这个（见 docs/10）
   balance    [--threshold <元>]                   查两个付费 API 的余额（DeepSeek 官方接口；
                                            阿里云余额需账号 AK/SK，见 docs/07）
   publish    --from <笔记目录> [--course <名称>] [--lesson <课次>] [--out <站点目录>] [--origin <域名>]

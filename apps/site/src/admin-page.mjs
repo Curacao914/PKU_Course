@@ -309,7 +309,27 @@ function renderSettings () {
     panel('运行参数', fields + '<div class="row"><button class="act primary" data-act="save-config">保存设置</button></div>' +
       '<div class="muted small">' + esc(c.path || '') + '</div>',
       '这里只放可以随手改的参数；密钥仍然只从服务器环境变量读取，不接受界面写入') +
-    '</div>'
+    '</div>' +
+    '<div style="height:16px"></div>' +
+    passwordPanel()
+}
+
+function passwordPanel () {
+  var auth = (state.status && state.status.auth) || {}
+  var status = auth.passwordSet
+    ? '<div class="pill ok"><span class="dot ok"></span>已设置登录密码</div>'
+    : '<div class="pill warn">还没设置密码：现在只能用服务器上的主令牌登录</div>'
+  var master = auth.masterTokenSet
+    ? '<div class="muted small">主令牌仍然有效——它是忘记密码时的找回路径（见 docs/10）</div>'
+    : '<div class="pill danger">服务器上没有配置主令牌，一旦忘记密码就只能去服务器重设</div>'
+  return panel('登录密码',
+    '<div class="sub">用自己设的密码登录管理台，比记 64 位随机串实际得多。密码只存哈希，明文不落盘。</div>' +
+    status + master +
+    '<div class="field" style="margin-top:12px"><label>新密码（至少 8 位）</label>' +
+    '<input data-pw="next" type="password" autocomplete="new-password" placeholder="换一个记得住的"></div>' +
+    '<div class="row"><button class="act primary" data-act="save-password">保存新密码</button>' +
+    '<button class="act" data-act="clear-password">清除密码（只留主令牌）</button></div>' +
+    '<div class="muted small">忘记密码时在服务器上跑：<code>course admin-passwd --set-stdin</code>（详见 docs/10-管理台登录与找回.md）</div>')
 }
 
 function go (tab) { state.tab = tab; render() }
@@ -381,7 +401,24 @@ document.addEventListener('click', function (event) {
   else if (act === 'prune') doAction('prune', {})
   else if (act === 'prune-apply') doAction('prune', { apply: true })
   else if (act === 'save-config') saveConfig()
+  else if (act === 'save-password') savePassword()
+  else if (act === 'clear-password') savePassword(true)
 })
+
+async function savePassword (clear) {
+  var next = document.querySelector('[data-pw="next"]')
+  var body = clear ? { action: 'clear' } : { password: next && next.value }
+  if (!clear && (!body.password || body.password.length < 8)) { $('out').textContent = '密码至少 8 位'; return }
+  var res = await fetch('/api/admin/password', { method: 'PUT', headers: headers(true), body: JSON.stringify(body) })
+  var data = await res.json()
+  $('out').textContent = JSON.stringify(data, null, 2)
+  if (res.ok && !clear) {
+    // 改完立刻用新密码继续（否则下一次刷新会因为旧凭据失效而被挡在门外）
+    $('token').value = body.password
+    localStorage.setItem(KEY, body.password)
+  }
+  load()
+}
 
 load()
 </script>

@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 
+import { clearPassword, readPasswordRecord, validatePassword, verifyPassword, writePassword } from '@course/core'
 import { addMaterial, listMaterials, unassignedDir } from '@course/materials'
 
 import { ADMIN_HTML } from './admin-page.mjs'
@@ -159,6 +160,9 @@ export function createAdminHandler({
 } = {}) {
   const failures = new Map()
   let running = null
+  // 主令牌由 handle() 每次请求传进来，但 handleApi 也需要它（鉴权 + 找回路径提示），
+  // 因此在这里留一个当前请求的闭包副本。
+  let activeToken = ''
 
   function clientKey(req) {
     return String(req.headers['cf-connecting-ip'] || req.socket?.remoteAddress || 'unknown')
@@ -394,6 +398,11 @@ export function createAdminHandler({
   async function handleApi(req, res, pathname, url) {
     if (pathname === `${ADMIN_PREFIX}status`) {
       const snap = snapshot()
+      // 鉴权方式让界面知道：是否已设密码、主令牌是否可用（后者是找回路径）
+      snap.auth = {
+        passwordSet: Boolean(readPasswordRecord(scratchRoot)),
+        masterTokenSet: Boolean(activeToken)
+      }
       // _unassigned：收件箱里认不出归属的课件，等人指定
       try {
         const parked = unassignedDir(materialsRoot)
@@ -533,6 +542,38 @@ export function createAdminHandler({
       return true
     }
 
+    /** 改密码：必须先用当前密码（或主令牌）通过鉴权，再给新密码。 */
+    if (pathname === `${ADMIN_PREFIX}password` && (req.method === 'PUT' || req.method === 'POST')) {
+      let payload = {}
+      try {
+        payload = safeJson(await readBody(req)) || {}
+      } catch (error) {
+        sendJson(res, 400, { ok: false, error: 'bad_body', message: error.message })
+        return true
+      }
+      const provided = String(req.headers['x-course-token'] || '')
+      const byMasterToken = Boolean(activeToken) && provided === activeToken
+      if (!byMasterToken && !verifyPassword(provided, readPasswordRecord(scratchRoot))) {
+        recordFailure(req)
+        sendJson(res, 401, { ok: false, error: 'unauthorized' })
+        return true
+      }
+      const action = String(payload.action || 'set')
+      if (action === 'clear') {
+        clearPassword(scratchRoot)
+        sendJson(res, 200, { ok: true, cleared: true, note: '已清除密码，现在只能用服务器上的主令牌登录' })
+        return true
+      }
+      const problem = validatePassword(payload.password)
+      if (problem) {
+        sendJson(res, 400, { ok: false, error: 'weak_password', message: problem })
+        return true
+      }
+      const file = writePassword(scratchRoot, payload.password)
+      sendJson(res, 200, { ok: true, changed: true, path: file })
+      return true
+    }
+
     if (pathname === `${ADMIN_PREFIX}config`) {
       if (req.method === 'GET') {
         sendJson(res, 200, { ok: true, path: configPath(), values: readConfigFile(), editable: EDITABLE_CONFIG })
@@ -580,6 +621,7 @@ export function createAdminHandler({
 
       if (!pathname.startsWith(ADMIN_PREFIX)) return false
 
+      activeToken = String(adminToken || '')
       if (!adminToken) {
         sendJson(res, 503, { ok: false, error: 'admin_token_unconfigured' })
         return true
@@ -588,10 +630,13 @@ export function createAdminHandler({
         sendJson(res, 429, { ok: false, error: 'too_many_attempts' })
         return true
       }
+      // 两条路都能进：自己设的密码，或环境变量里的主令牌（忘记密码时的万能钥匙）。
       const provided = String(req.headers['x-course-token'] || (req.headers.authorization || '').replace(/^Bearer\s+/i, '') || '')
-      if (provided !== adminToken) {
+      const byMasterToken = Boolean(activeToken) && provided === activeToken
+      const byPassword = verifyPassword(provided, readPasswordRecord(scratchRoot))
+      if (!byMasterToken && !byPassword) {
         recordFailure(req)
-        sendJson(res, 401, { ok: false, error: 'unauthorized' })
+        sendJson(res, 401, { ok: false, error: 'unauthorized', hint: '用管理台密码或服务器上的主令牌（见 docs/10）' })
         return true
       }
 
