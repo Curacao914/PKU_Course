@@ -80,6 +80,7 @@ export function openLedger(databasePath = ':memory:', options = {}) {
         scheduled_for = ?, claimed_by = '', claimed_at = NULL, updated_at = ?
       WHERE status = 'failed'
     `),
+    resetAttempts: db.prepare('UPDATE tasks SET attempts = 0 WHERE id = ?'),
     resetTask: db.prepare(`
       UPDATE tasks
       SET stage = ?, attempts = 0, last_error = '', next_attempt_at = NULL,
@@ -279,7 +280,14 @@ export function openLedger(databasePath = ':memory:', options = {}) {
       return result.changes > 0
     },
 
-    /** 记录阶段推进。lease 在这一步释放，下一次领取从新阶段继续。 */
+    /**
+     * 记录阶段推进。lease 在这一步释放，下一次领取从新阶段继续。
+     *
+     * **成功即清零 attempts**：这个计数器的语义是"当前阶段连续失败了几次"，
+     * 而不是"这个课次一生失败过几次"。不这样做会出真事：一节在欠费期失败 6 次、
+     * 之后正常转录成功的课，attempts 仍停在 6，于是"连续失败到上限就停下"的闸门
+     * 会立刻把它误判成"停下等你"——明明已经跑过去了。
+     */
     reportStage({ id, stage, message = '', data = {}, error = '', nextAttemptAt = null, now } = {}) {
       assertStage(stage)
       const at = nowIso(now)
@@ -295,6 +303,8 @@ export function openLedger(databasePath = ':memory:', options = {}) {
           at,
           id
         )
+        // 成功即清零：attempts 的语义是"当前阶段连续失败次数"（见上面的说明）
+        if (!error) statements.resetAttempts.run(id)
         statements.insertEvent.run(id, at, stage, String(message || ''), JSON.stringify(data.meta || {}))
         return this.getTask(current.replay_key)
       })

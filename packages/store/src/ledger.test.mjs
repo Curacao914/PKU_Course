@@ -219,6 +219,20 @@ test('a failed stage can be retried after next_attempt_at passes', () => {
   db.close()
 })
 
+test('a successful stage advance clears the consecutive-failure counter', () => {
+  // attempts 的语义是"当前阶段连续失败了几次"，不是"一生失败过几次"。
+  // 否则一节在欠费期失败多次、之后正常跑通的课，会被"连续失败到上限就停下"的闸门误判。
+  const db = ledger()
+  db.discoverReplays([{ replay_key: 'replay-1', course_key: 'course-1', course_name: '刑事执行法', title: '第5-6节' }])
+  const task = db.claimTask({ replayKey: 'replay-1', workerId: 'w1' }).task
+  db.reportStage({ id: task.id, stage: 'downloaded', error: 'Arrearage' })
+  const claimed = db.claimTask({ replayKey: 'replay-1', workerId: 'w1' })
+  assert.equal(claimed.task.attempts, 2, '连续失败要累计')
+
+  db.reportStage({ id: task.id, stage: 'transcript_ready', message: '转录完成' })
+  assert.equal(db.getTask('replay-1').attempts, 0, '成功之后清零，下一阶段从零开始数')
+})
+
 test('a failed task can be reset back into the queue', () => {
   // needs_attention 之后必须有回来的路：只把阶段改成"等人处理"而没有恢复手段，
   // 等于把课次永久钉死，比继续重试更糟。
