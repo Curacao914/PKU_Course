@@ -378,6 +378,10 @@ test('the console page is served without a token so the user can enter one', asy
   assert.match(res.state.body, /data-tab="courses"/)
   assert.match(res.state.body, /data-tab="notes"/)
   assert.match(res.state.body, /data-tab="settings"/)
+  // 页面里的按钮必须挂上事件委托认的属性（曾经写成 data-run，点了没反应）
+  const buttons = res.state.body.match(/<button[^>]*>/g) || []
+  const stray = buttons.filter(tag => /data-run=/.test(tag))
+  assert.deepEqual(stray, [], '按钮不该使用事件委托不认识的属性')
   assert.ok(!res.state.body.includes(TOKEN), '页面里不得内嵌令牌')
 })
 

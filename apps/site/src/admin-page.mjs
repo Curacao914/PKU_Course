@@ -73,7 +73,7 @@ pre{background:var(--bg-sunken);border:1px solid var(--line);border-radius:var(-
   <div class="spacer"></div>
   <span id="runState" class="pill"><span class="dot"></span>空闲</span>
   <input class="token" id="token" type="password" placeholder="管理令牌">
-  <button class="act" data-run="save">保存令牌</button>
+  <button class="act" data-act="save">保存令牌</button>
   <a class="act" href="/" target="_blank" rel="noopener" style="padding:5px 10px;border:1px solid var(--line-strong);border-radius:8px">看站点</a>
 </div></header>
 <nav class="tabs" role="tablist">
@@ -95,6 +95,10 @@ var KEY = 'course.admin.token'
 var state = { status: null, balance: null, config: null, tab: 'overview' }
 
 $('token').value = localStorage.getItem(KEY) || ''
+// 回车即登录：粘贴完令牌顺手敲一下回车是本能动作
+$('token').addEventListener('keydown', function (event) {
+  if (event.key === 'Enter') { event.preventDefault(); localStorage.setItem(KEY, $('token').value.trim()); load() }
+})
 
 function esc (v) {
   return String(v == null ? '' : v).replace(/[&<>"]/g, function (c) {
@@ -120,8 +124,13 @@ async function load () {
   var res = await fetch('/api/admin/status', { headers: headers(false) })
   var data = await res.json()
   if (!res.ok) {
-    $('tab-overview').innerHTML = panel('需要令牌', '<div class="muted">' +
-      (data.error === 'admin_token_unconfigured' ? '服务端没有配置 COURSE_ADMIN_TOKEN，管理台已关闭。' : '令牌不对，请重新输入。') + '</div>')
+    var reason = data.error === 'admin_token_unconfigured'
+      ? '服务端没有配置 COURSE_ADMIN_TOKEN，管理台已关闭。'
+      : data.error === 'too_many_attempts'
+        ? '凭据错误次数过多，请等 5 分钟再试。'
+        : $('token').value.trim() ? '密码或主令牌不对，请重新输入。' : '还没有填写登录凭据：把管理台密码或服务器上的主令牌粘进右上角输入框，点「保存令牌」（或直接回车）。'
+    $('tab-overview').innerHTML = panel('需要登录', '<div class="muted">' + reason + '</div>')
+    $('runState').innerHTML = '<span class="dot danger"></span>未登录'
     return
   }
   state.status = data
