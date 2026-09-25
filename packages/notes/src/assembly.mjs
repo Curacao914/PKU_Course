@@ -87,11 +87,25 @@ export function demoteBodyHeadings(markdown = '', floor = 4) {
 }
 
 /** 去掉节点正文里的 META 标记：它们是给跨课整合用的，不该出现在正文中。 */
+/**
+ * 把流水线词换成读者能看懂的说法。
+ *
+ * 「节点」是我们内部的实现词（一个写作单元/切分段），读者不知道它是什么，
+ * 也不该在笔记里看到。"本节点"改成"本节"是无损的——两处指的都是读者眼前的这一节。
+ * 提示词里已经禁止，但压缩压力下模型偶尔仍会写出来，程序兜住这最后一层。
+ */
+function normalizePipelineWording(markdown = '') {
+  return String(markdown)
+    .replace(/本节点/g, '本节')
+    .replace(/该节点/g, '该节')
+    .replace(/写作目标[:：]/g, '本节要点：')
+}
+
 function stripRawMeta(markdown = '') {
-  return cleanText(markdown)
+  return normalizePipelineWording(cleanText(markdown)
     .replace(/<!--\s*META[\s\S]*?-->\s*/gi, '')
     .replace(/META_FOR_NODE:\s*\n[\s\S]*?(?=\n\s*\n|$)/gi, '')
-    .trim()
+    .trim())
 }
 
 export function stripMetaBlock(markdown = '') {
