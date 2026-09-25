@@ -75,6 +75,64 @@ const call = async (handler, options, { token = TOKEN } = {}) => {
   return { handled, res, body: res.state.body ? JSON.parse(res.state.body) : null }
 }
 
+test('a deck can be uploaded from the browser without any filename convention', async () => {
+  // 归属由前端选择器给出（课程 + 课次 + 作用域），所以文件名随便叫什么都行。
+  const { handler, scratchRoot } = fixture()
+  const deck = Buffer.from(JSON.stringify({ slides: [{ slideNumber: 1, text: '第四讲 变量测量水平' }] }))
+  const params = new URLSearchParams({ course: '刑法分论', lesson: '第10-12节', scope: 'lesson', name: '老师发的课件（第4讲）.json' })
+
+  const uploaded = await call(handler, {
+    method: 'PUT',
+    url: `/api/admin/materials?${params.toString()}`,
+    body: deck
+  })
+  assert.equal(uploaded.res.state.status, 200)
+  assert.equal(uploaded.body.ok, true)
+  assert.equal(uploaded.body.slideCount, 1)
+  assert.match(uploaded.body.name, /第4讲/, '中文与括号都要保留')
+
+  const archived = path.join(scratchRoot, 'materials', '刑法分论', '第10-12节')
+  assert.ok(fs.existsSync(path.join(archived, uploaded.body.name)), '文件要落到归档目录')
+  assert.ok(fs.existsSync(path.join(archived, 'slides', `${uploaded.body.name}.json`)), '解析结果也要存下来')
+
+  // 全课程通用：不需要课次
+  const shared = await call(handler, {
+    method: 'PUT',
+    url: `/api/admin/materials?${new URLSearchParams({ course: '刑法分论', scope: 'course', name: '术语表.json' }).toString()}`,
+    body: deck
+  })
+  assert.equal(shared.body.ok, true)
+  assert.ok(fs.existsSync(path.join(scratchRoot, 'materials', '刑法分论', 'course', '术语表.json')))
+
+  // 本课次但没选课次：拒绝
+  const missing = await call(handler, {
+    method: 'PUT',
+    url: `/api/admin/materials?${new URLSearchParams({ course: '刑法分论', name: 'x.json' }).toString()}`,
+    body: deck
+  })
+  assert.equal(missing.res.state.status, 400)
+  assert.equal(missing.body.error, 'missing_lesson')
+
+  // 空文件：拒绝
+  const empty = await call(handler, {
+    method: 'PUT',
+    url: `/api/admin/materials?${params.toString()}`,
+    body: Buffer.alloc(0)
+  })
+  assert.equal(empty.res.state.status, 400)
+  assert.equal(empty.body.error, 'empty_body')
+})
+
+test('uploading requires the admin token', async () => {
+  const { handler } = fixture()
+  const res = await call(handler, {
+    method: 'PUT',
+    url: `/api/admin/materials?${new URLSearchParams({ course: 'c', lesson: 'l' }).toString()}`,
+    body: Buffer.from('x')
+  }, { token: '' })
+  assert.equal(res.res.state.status, 401)
+})
+
 test('the admin API fails closed without a configured token', async () => {
   const { handler } = fixture()
   const req = fakeRequest({ url: '/api/admin/status' })

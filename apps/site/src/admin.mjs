@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 
+import { addMaterial } from '@course/materials'
 import { readSiteIndex } from '@course/publish'
 import { openLedger } from '@course/store'
 
@@ -92,9 +93,21 @@ export function redactStatus(value) {
   return walk(value)
 }
 
+/** 上传文件名的安全化：课件名里常有中文、空格与括号，但绝不能带路径分隔符。 */
+export function safeMaterialName(value) {
+  return String(value || '')
+    .normalize('NFKC')
+    .replace(/[<>:"/\\|?*\u0000-\u001F]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^[. ]+|[. ]+$/g, '')
+    .slice(0, 120) || 'slides.pptx'
+}
+
 export function createAdminHandler({
   root,
   scratchRoot,
+  materialsRoot = path.join(scratchRoot, 'materials'),
   workerPath,
   workerEnv = {},
   runCommand = defaultRunCommand,
@@ -185,9 +198,94 @@ export function createAdminHandler({
     return redactStatus(status)
   }
 
+  /** 二进制请求体：课件动辄几十兆，不能按 UTF-8 字符串读。 */
+  function readBinary(req, limitBytes = 200 * 1024 * 1024) {
+    return new Promise((resolve, reject) => {
+      let size = 0
+      const chunks = []
+      req.on('data', chunk => {
+        size += chunk.length
+        if (size > limitBytes) {
+          reject(new Error(`文件超过上限 ${Math.round(limitBytes / 1024 / 1024)} MB`))
+          req.destroy()
+          return
+        }
+        chunks.push(chunk)
+      })
+      req.on('end', () => resolve(Buffer.concat(chunks)))
+      req.on('error', reject)
+    })
+  }
+
   async function handleApi(req, res, pathname, url) {
     if (pathname === `${ADMIN_PREFIX}status`) {
       sendJson(res, 200, snapshot())
+      return true
+    }
+
+    /**
+     * 课件上传。
+     *
+     * 用 PUT + 原始 body（而不是 multipart）：浏览器 fetch 直接把 File 当 body 发，
+     * 服务端不需要解析 multipart，也就没有多一个解析器的攻击面。
+     * 归属由前端的选择器给出（课程 + 课次 + 作用域），因此**不需要文件名约定**。
+     */
+    if (pathname === `${ADMIN_PREFIX}materials` && (req.method === 'PUT' || req.method === 'POST')) {
+      const course = String(url.searchParams.get('course') || '').trim()
+      const lesson = String(url.searchParams.get('lesson') || '').trim()
+      const scope = String(url.searchParams.get('scope') || 'lesson').trim()
+      const appliesTo = String(url.searchParams.get('appliesTo') || '').split(',').map(item => item.trim()).filter(Boolean)
+      const name = String(url.searchParams.get('name') || '').trim()
+      if (!course) {
+        sendJson(res, 400, { ok: false, error: 'missing_course', message: '必须先选课程' })
+        return true
+      }
+      if (scope !== 'course' && !lesson) {
+        sendJson(res, 400, { ok: false, error: 'missing_lesson', message: '本课次课件必须先选课次；全课程通用请选"全课程"' })
+        return true
+      }
+      let bytes
+      try {
+        bytes = await readBinary(req)
+      } catch (error) {
+        sendJson(res, 413, { ok: false, error: 'too_large', message: error.message })
+        return true
+      }
+      if (!bytes.length) {
+        sendJson(res, 400, { ok: false, error: 'empty_body' })
+        return true
+      }
+      const tempDir = path.join(scratchRoot, 'tmp')
+      fs.mkdirSync(tempDir, { recursive: true })
+      const safeName = safeMaterialName(name || 'slides.pptx')
+      const tempPath = path.join(tempDir, `upload-${Date.now()}-${safeName}`)
+      fs.writeFileSync(tempPath, bytes)
+      try {
+        const result = await addMaterial({
+          root: materialsRoot,
+          course,
+          lesson: scope === 'course' ? '' : lesson,
+          scope,
+          appliesTo,
+          filePath: tempPath,
+          name: safeName
+        })
+        sendJson(res, 200, {
+          ok: true,
+          course,
+          lesson: scope === 'course' ? '（全课程通用）' : lesson,
+          scope,
+          appliesTo,
+          name: result.entry.name,
+          slideCount: result.deck.slideCount,
+          bytes: result.entry.bytes,
+          checksum: result.entry.checksum.slice(0, 12)
+        })
+      } catch (error) {
+        sendJson(res, 500, { ok: false, error: 'material_failed', message: error instanceof Error ? error.message : String(error) })
+      } finally {
+        fs.rmSync(tempPath, { force: true })
+      }
       return true
     }
 
@@ -347,6 +445,24 @@ th,td { border-bottom:1px solid var(--line); padding:6px 8px; text-align:left; }
     </div>
   </div>
 
+  <div class="panel">
+    <h2>上传课件</h2>
+    <div class="sub">教学网上没有课件，课件只在你自己手里。传上来之后，笔记会用它对齐术语与结构；补传之后可以只重写受影响的模块。</div>
+    <div class="row"><label>课程 <select id="mCourse" onchange="fillLessons()"></select></label>
+      <label>课次 <select id="mLesson"></select></label></div>
+    <div class="row"><label>归属
+      <select id="mScope">
+        <option value="lesson">本课次</option>
+        <option value="course">全课程通用（术语表、大纲）</option>
+        <option value="shared">跨课次共用（上一讲的课件这讲接着用）</option>
+      </select></label>
+      <label id="mSharedWrap" style="display:none">适用的课次（可多选，Ctrl/⌘ 点选）<br><select id="mAppliesTo" multiple size="4"></select></label>
+    </div>
+    <div class="row"><input type="file" id="mFile" accept=".pptx,.ppt,.pdf">
+      <button onclick="upload()">上传并解析</button></div>
+    <pre id="mOut">（尚未上传）</pre>
+  </div>
+
   <div id="status"></div>
   <div class="panel"><h2>运行输出</h2><pre id="out">（尚未运行）</pre></div>
 </div>
@@ -365,6 +481,7 @@ async function load () {
     const data = await res.json()
     if (!res.ok) { $('status').innerHTML = '<div class="panel"><h2>状态</h2><div class="warn">' + (data.error || res.status) + '</div></div>'; return }
     $('status').innerHTML = render(data)
+    fillCourses(data)
   } catch (e) {
     $('status').innerHTML = '<div class="panel"><h2>状态</h2><div class="warn">' + e + '</div></div>'
   }
@@ -383,6 +500,48 @@ function render (d) {
 }
 
 function esc (v) { return String(v == null ? '' : v).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])) }
+
+// 课程与课次直接来自账本（发现过什么就有什么），所以上传时**不需要文件名约定**
+let ledgerTasks = []
+function fillCourses (data) {
+  ledgerTasks = (data.ledger && data.ledger.tasks) || []
+  const courses = [...new Set(ledgerTasks.map(t => t.courseName).filter(Boolean))]
+  const current = $('mCourse').value
+  $('mCourse').innerHTML = courses.map(c => '<option>' + esc(c) + '</option>').join('')
+  if (current && courses.includes(current)) $('mCourse').value = current
+  fillLessons()
+}
+function fillLessons () {
+  const course = $('mCourse').value
+  const lessons = ledgerTasks.filter(t => t.courseName === course).map(t => t.title).filter(Boolean)
+  $('mLesson').innerHTML = lessons.map(l => '<option>' + esc(l) + '</option>').join('')
+  $('mAppliesTo').innerHTML = lessons.map(l => '<option>' + esc(l) + '</option>').join('')
+}
+$('mScope').addEventListener('change', () => {
+  $('mSharedWrap').style.display = $('mScope').value === 'shared' ? '' : 'none'
+  $('mLesson').disabled = $('mScope').value === 'course'
+})
+
+async function upload () {
+  const file = $('mFile').files[0]
+  if (!file) { $('mOut').textContent = '先选一个 .pptx / .pdf 文件'; return }
+  const scope = $('mScope').value
+  const params = new URLSearchParams({
+    course: $('mCourse').value,
+    lesson: scope === 'course' ? '' : $('mLesson').value,
+    scope: scope === 'shared' ? 'lesson' : scope,
+    appliesTo: scope === 'shared' ? [...$('mAppliesTo').selectedOptions].map(o => o.value).join(',') : '',
+    name: file.name
+  })
+  $('mOut').textContent = '上传中…（' + file.name + '，' + Math.round(file.size / 1024) + ' KB）'
+  try {
+    const res = await fetch('/api/admin/materials?' + params.toString(), { method: 'PUT', headers: { 'x-course-token': $('token').value.trim() }, body: file })
+    const data = await res.json()
+    $('mOut').textContent = JSON.stringify(data, null, 2)
+  } catch (e) {
+    $('mOut').textContent = String(e)
+  }
+}
 
 async function run (action, extra) {
   $('out').textContent = '运行中…（' + action + '）'

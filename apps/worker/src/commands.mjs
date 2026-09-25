@@ -44,6 +44,15 @@ function pruneRunHistory(runsDir, keep) {
   }
 }
 
+/** 读 JSON 文件，坏了就返回 null（清理这类维护命令不该因为一个坏文件整轮失败）。 */
+function safeJsonFile(filePath) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'))
+  } catch {
+    return null
+  }
+}
+
 /** 文件名安全化：课程名与课次里常有斜杠与冒号。 */
 function safeFileName(value) {
   return String(value || 'note')
@@ -1294,6 +1303,112 @@ export function createCommands(context) {
     return 0
   }
 
+  /**
+   * 清理：只删"原件"，而且必须在纯文本产物**通过校验**之后。
+   *
+   * 保留策略（用户的明确要求）：
+   *   · 纯文本永久保留——转录稿、课件抽出的文字、笔记、简报、课次状态。它们小、可检索、是真正的资产。
+   *   · 原件（视频/音频/PPT/PDF）只在**转换成功且校验通过**之后才删：
+   *       - 媒体：转录稿存在、非空、且 sha256 与转录摘要里记录的一致；
+   *       - 课件：slides.json 存在、页数 > 0、且确实抽到了文字。
+   *     校验不通过一律保留，并在结果里说明原因——宁可占盘，不可丢原件。
+   * 默认**只报告不删除**（dry-run），加 --apply 才真的删。
+   */
+  async function prune(options) {
+    const apply = Boolean(options.flags?.has('apply'))
+    const keepOriginals = Boolean(options.flags?.has('keep-originals'))
+    const report = { apply, replays: [], materials: [], freedBytes: 0, keptBytes: 0, skipped: [] }
+    const sizeOf = target => {
+      try {
+        const stat = fs.statSync(target)
+        if (stat.isFile()) return stat.size
+        return fs.readdirSync(target).reduce((total, name) => total + sizeOf(path.join(target, name)), 0)
+      } catch {
+        return 0
+      }
+    }
+    const remove = target => {
+      const bytes = sizeOf(target)
+      if (apply) fs.rmSync(target, { recursive: true, force: true })
+      report.freedBytes += bytes
+      return bytes
+    }
+
+    // 1) 课次目录里的媒体与分片
+    const replaysRoot = path.join(config.scratchRoot, 'replays')
+    for (const replayKey of fs.existsSync(replaysRoot) ? fs.readdirSync(replaysRoot) : []) {
+      const dir = path.join(replaysRoot, replayKey)
+      if (!fs.statSync(dir).isDirectory()) continue
+      const transcriptPath = path.join(dir, 'transcript', 'raw-transcript.md')
+      const summaryPath = path.join(dir, 'transcript', 'run-summary.json')
+      const targets = [path.join(dir, 'output', 'media.mp4'), path.join(dir, 'fragments')].filter(item => fs.existsSync(item))
+      if (!targets.length) continue
+
+      if (keepOriginals) {
+        report.skipped.push({ replayKey, reason: '配置为保留原件（COURSE_KEEP_MEDIA=1 或 --keep-originals）' })
+        report.keptBytes += targets.reduce((total, item) => total + sizeOf(item), 0)
+        continue
+      }
+      if (!fs.existsSync(transcriptPath) || !fs.existsSync(summaryPath)) {
+        report.skipped.push({ replayKey, reason: '还没有转录稿，原件保留' })
+        report.keptBytes += targets.reduce((total, item) => total + sizeOf(item), 0)
+        continue
+      }
+      const transcript = fs.readFileSync(transcriptPath)
+      const summary = safeJsonFile(summaryPath) || {}
+      const actual = createHash('sha256').update(transcript).digest('hex')
+      const expected = String(summary.transcriptChecksum || '')
+      if (transcript.length < 500) {
+        report.skipped.push({ replayKey, reason: `转录稿只有 ${transcript.length} 字节，不像完整结果，原件保留` })
+        report.keptBytes += targets.reduce((total, item) => total + sizeOf(item), 0)
+        continue
+      }
+      if (expected && actual !== expected) {
+        report.skipped.push({ replayKey, reason: '转录稿校验和不符（文件被改过），原件保留' })
+        report.keptBytes += targets.reduce((total, item) => total + sizeOf(item), 0)
+        continue
+      }
+      const freed = targets.reduce((total, item) => total + remove(item), 0)
+      report.replays.push({ replayKey, freedBytes: freed, verified: expected ? 'checksum' : 'size-only' })
+    }
+
+    // 2) 课件原件（文字已经抽出来并存成 slides/*.json）
+    const materialsRoot = config.materialsRoot
+    const walk = (dir, out = []) => {
+      if (!fs.existsSync(dir)) return out
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name)
+        if (entry.isDirectory()) walk(full, out)
+        else out.push(full)
+      }
+      return out
+    }
+    const parsed = new Map(walk(materialsRoot).filter(file => file.endsWith('.json') && file.includes(`${path.sep}slides${path.sep}`))
+      .map(file => [path.basename(file).replace(/\.json$/, ''), file]))
+    for (const file of walk(materialsRoot)) {
+      const ext = path.extname(file).toLowerCase()
+      if (!['.pptx', '.ppt', '.pdf'].includes(ext)) continue
+      const name = path.basename(file)
+      const parsedPath = parsed.get(name)
+      const deck = parsedPath ? safeJsonFile(parsedPath) : null
+      const textLength = (deck?.slides || []).reduce((total, slide) => total + String(slide.text || '').length, 0)
+      if (!deck || !deck.slideCount || textLength < 20) {
+        report.skipped.push({ file: name, reason: '还没抽出可用文字，原件保留' })
+        report.keptBytes += sizeOf(file)
+        continue
+      }
+      const freed = remove(file)
+      report.materials.push({ file: name, freedBytes: freed, slides: deck.slideCount, textChars: textLength })
+    }
+
+    report.freedHuman = formatBytes(report.freedBytes)
+    report.keptHuman = formatBytes(report.keptBytes)
+    if (apply) stderr(`已清理 ${report.freedHuman}（原件），保留纯文本产物与 ${report.keptHuman} 待确认原件`)
+    else stderr(`预演：可清理 ${report.freedHuman}；加 --apply 才会真的删`)
+    emit(report, options)
+    return 0
+  }
+
   /** 人工恢复：把停下不动的课次放回可领取状态。 */
   async function retry(options) {
     const replayKey = requireOption(options.options, 'replay-key', 'retry')
@@ -1456,7 +1571,7 @@ export function createCommands(context) {
     }
   }
 
-  return { doctor, discover, download, transcribe, notes, materials, balance, publish, notify, cycle, verify, status, retry }
+  return { doctor, discover, download, transcribe, notes, materials, balance, publish, notify, cycle, verify, status, retry, prune }
 }
 
 export const USAGE = `用法：course <命令> [选项]
@@ -1501,6 +1616,9 @@ export const USAGE = `用法：course <命令> [选项]
                                            --retry-failed 把发送失败的通知放回队列重发
   retry      --replay-key <键> [--stage <阶段>]    人工恢复：清空失败计数并等待重新领取
                                            （阶段默认不变，也可显式退回某个阶段）
+  prune      [--apply] [--keep-originals]         清理原件：纯文本（转录稿/课件文字/笔记）
+                                           永久保留；视频、音频、PPT 原文件只在转换成功
+                                           且校验通过之后才删。默认只报告不删除
   cycle      [--max-tasks <条数>] [--course <名称>] [--replay-key <键>] [--max-steps <步数>]
              [--auto-approve-outline 0|1]
                                            一轮完整链路：扫描 → 逐条推进各阶段 → 投递通知

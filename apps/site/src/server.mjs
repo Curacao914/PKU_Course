@@ -68,6 +68,7 @@ export function createRequestHandler({
   workerPath = '',
   workerEnv = {},
   assetsDir = '',
+  materialsRoot = '',
   runCommand
 } = {}) {
   const normalizedRoot = path.resolve(root)
@@ -75,6 +76,7 @@ export function createRequestHandler({
   const admin = createAdminHandler({
     root: normalizedRoot,
     scratchRoot: scratchRoot || normalizedRoot,
+    ...(materialsRoot ? { materialsRoot } : {}),
     workerPath,
     workerEnv,
     runCommand
@@ -181,9 +183,9 @@ export function createSiteServer(options = {}) {
 /** 启动服务器；port 传 0 时由系统分配（测试用）。 */
 export function startSiteServer({
   root, port = 3100, host = '127.0.0.1', adminToken = '',
-  scratchRoot = '', workerPath = '', workerEnv = {}, assetsDir = '', runCommand
+  scratchRoot = '', workerPath = '', workerEnv = {}, assetsDir = '', materialsRoot = '', runCommand
 } = {}) {
-  const server = createSiteServer({ root, adminToken, scratchRoot, workerPath, workerEnv, assetsDir, runCommand })
+  const server = createSiteServer({ root, adminToken, scratchRoot, workerPath, workerEnv, assetsDir, materialsRoot, runCommand })
   return new Promise((resolve, reject) => {
     server.once('error', reject)
     server.listen(port, host, () => {

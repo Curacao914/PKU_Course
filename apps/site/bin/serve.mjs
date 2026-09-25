@@ -16,6 +16,8 @@ const adminToken = process.env.COURSE_ADMIN_TOKEN || ''
 const scratchRoot = process.env.COURSE_WORKER_SCRATCH_DIR || path.join(os.homedir(), '.course-worker')
 // 站点目录之外的自有静态资源（Mermaid 等）。站点目录每次发布全量重写，不适合放这些。
 const assetsDir = process.env.COURSE_ASSETS_DIR || path.join(os.homedir(), '.course-worker', 'assets')
+// 课件归档目录：管理台上传的课件落到这里，notes 阶段从这里取
+const materialsRoot = process.env.COURSE_MATERIALS_DIR || path.join(os.homedir(), '.course-worker', 'materials')
 
 const { url } = await startSiteServer({
   root,
@@ -24,6 +26,7 @@ const { url } = await startSiteServer({
   adminToken,
   scratchRoot,
   assetsDir,
+  materialsRoot,
   // 管理台触发的手动运行走与定时任务完全相同的入口，避免两套行为
   workerPath: process.env.COURSE_SITE_WORKER || path.join(repoRoot, 'apps/worker/bin/course.mjs'),
   workerEnv: { COURSE_WORKER_SCRATCH_DIR: scratchRoot }
