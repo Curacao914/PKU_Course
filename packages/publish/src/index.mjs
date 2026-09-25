@@ -15,5 +15,6 @@ export {
   readSiteIndex,
   renderIndexPage,
   renderNotePage,
+  renderSearchPage,
   writeSite
 } from './site.mjs'

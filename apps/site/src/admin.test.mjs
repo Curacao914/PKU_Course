@@ -6,7 +6,7 @@ import test from 'node:test'
 
 import { openLedger } from '@course/store'
 
-import { createAdminHandler, redactStatus } from './admin.mjs'
+import { ADMIN_HTML, ALLOWED_ACTIONS, buildActionArgs, createAdminHandler, redactStatus } from './admin.mjs'
 
 const TOKEN = 'test-admin-token'
 
@@ -392,3 +392,113 @@ test('non-admin paths are left to the static handler', async () => {
   const handled = await handler.handle(req, res, '/notes/x.html', new URL('http://x/notes/x.html'), { adminToken: TOKEN })
   assert.equal(handled, false)
 })
+/**
+ * 管理台的按钮审计。
+ *
+ * 起因：界面上的「保存令牌」曾经把属性写成 data-run，而事件委托只认 data-act——
+ * 点下去既不报错也没反应，看起来就像按钮坏了。这类错误不会有测试失败、也不会有
+ * 任何日志，只能靠"把两个集合摆在一起比"来发现。因此这里逐条比对：
+ *
+ *   1. 页面里出现的 data-act 与脚本里处理的分支必须一一对应（多一个少一个都算错）；
+ *   2. 页面里每个 tab / 跳转链接都要有对应的内容区；
+ *   3. 每个动作最终拼出的 argv，其命令名与旗标必须在 CLI 的用法文本里真的存在
+ *      （否则界面会照常弹"已开始"，而命令其实跑不起来）。
+ */
+test('every button in the console is wired to a handler, and no handler is orphaned', async () => {
+  const acts = new Set([...ADMIN_HTML.matchAll(/data-act="([^"]+)"/g)].map(m => m[1]))
+  const handled = new Set([...ADMIN_HTML.matchAll(/act === '([^']+)'/g)].map(m => m[1]))
+
+  assert.ok(acts.size >= 10, '页面里应当有足够多的按钮被解析到')
+  assert.deepEqual(
+    [...acts].filter(act => !handled.has(act)),
+    [],
+    '这些按钮没有对应的处理分支，点下去不会有任何反应'
+  )
+  assert.deepEqual(
+    [...handled].filter(act => !acts.has(act)),
+    [],
+    '这些分支没有按钮用到（多半是按钮改名后忘了同步）'
+  )
+  // 兜底：将来又加了一个没接线的按钮时，至少要弹一条"没接上"，而不是静默
+  assert.match(ADMIN_HTML, /还没有接上处理逻辑/, '未接线的按钮必须报错出声，不能静默')
+})
+
+test('every tab and in-page jump target exists', async () => {
+  const tabs = new Set([...ADMIN_HTML.matchAll(/data-tab="([^"]+)"/g)].map(m => m[1]))
+  assert.deepEqual([...tabs].sort(), ['courses', 'notes', 'overview', 'settings'])
+  for (const tab of tabs) assert.match(ADMIN_HTML, new RegExp('id="tab-' + tab + '"'), 'tab ' + tab + ' 要有一段对应的内容区')
+})
+
+test('clicking a button gives immediate visible feedback', async () => {
+  // 维护动作动辄跑几分钟：没有"立刻变化"的话，用户会以为按钮没反应
+  assert.match(ADMIN_HTML, /id="toast"/, '要有右下角提示条')
+  assert.match(ADMIN_HTML, /function busyButton/, '按钮要能置灰改字')
+  assert.match(ADMIN_HTML, /setRunState\('正在运行/, '顶部状态灯要立刻切到运行中')
+  assert.match(ADMIN_HTML, /setInterval\(/, '要跟着定时任务自动刷新')
+  // 全站只用事件委托，不用内联 handler（内联写法最容易与引号打架）
+  assert.ok(!/\son(click|change|input)=/.test(ADMIN_HTML), '不要内联事件属性')
+})
+
+test('each console action produces a CLI command that really exists', async () => {
+  const { USAGE } = await import('../../worker/src/commands.mjs')
+  const argvOf = (action, payload) => buildActionArgs(action, payload, '/repo/apps/worker/bin/course.mjs')
+
+  // 与 admin-page.mjs 里各按钮实际发出的载荷一一对应
+  const cases = [
+    ['retry', { replayKey: 'replay-1' }, ['retry', '--replay-key', 'replay-1']],
+    ['notify-retry', {}, ['notify', '--retry-failed']],
+    ['prune', {}, ['prune']],
+    ['prune', { apply: true }, ['prune', '--apply']],
+    ['discover', {}, ['discover']],
+    ['doctor', {}, ['doctor']],
+    ['backup', {}, ['backup']],
+    ['notify', {}, ['notify']],
+    ['cycle', { replayKey: 'replay-1', maxTasks: 1 }, ['cycle', '--max-tasks', '1', '--replay-key', 'replay-1']],
+    ['cycle', { maxTasks: 5 }, ['cycle', '--max-tasks', '5']],
+    ['republish', { transcriptPath: '/tmp/replay-1/output/transcript.txt', course: '刑法分论', lesson: '第10-12节', replayKey: 'replay-1' },
+      ['publish', '--from', '/tmp/replay-1/output', '--course', '刑法分论', '--lesson', '第10-12节', '--replay-key', 'replay-1']]
+  ]
+  const flags = new Set()
+  for (const [action, payload, expected] of cases) {
+    const argv = argvOf(action, payload)
+    assert.deepEqual(argv.slice(1), expected, action + ' 应当映射到固定的 argv')
+    for (const token of argv.slice(2)) if (token.startsWith('--')) flags.add(token)
+  }
+
+  // revise 要的是"已存在的转录稿"，单独造一个文件来核对
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-revise-'))
+  const transcript = path.join(dir, 'transcript.txt')
+  fs.writeFileSync(transcript, '正文')
+  const reviseArgv = argvOf('revise', { transcriptPath: transcript, course: '刑法分论', lesson: '第10-12节', module: 'node-3', request: '压缩到 1200 字' })
+  assert.deepEqual(reviseArgv.slice(1), [
+    'notes', '--transcript', transcript, '--course', '刑法分论', '--lesson', '第10-12节',
+    '--output-dir', dir, '--revise', 'node-3', '--request', '压缩到 1200 字', '--ignore-cost-window', '1'
+  ])
+  for (const token of reviseArgv.slice(2)) if (token.startsWith('--')) flags.add(token)
+
+  // 界面用到的每个旗标都必须真的写在用法里——改名一处忘一处是静默故障
+  for (const flag of flags) {
+    assert.ok(USAGE.includes(flag), 'CLI 用法里没有 ' + flag + '：界面会拼出一条跑不起来的命令')
+  }
+  // 命令名同理
+  // 用法文本里，命令名都在行首的两个空格之后（续行缩进更多，不会误判）
+  const commands = new Set([...USAGE.matchAll(/^ {2}([a-z][a-z-]*)/gm)].map(m => m[1]))
+  for (const [action, payload] of cases) {
+    const command = argvOf(action, payload)[1]
+    assert.ok(commands.has(command), 'CLI 里没有命令 ' + command)
+  }
+  assert.ok(commands.has('admin-passwd'), '带连字符的命令名也要能解析出来')
+})
+
+test('the whitelist covers exactly the actions the console can send', async () => {
+  const sent = new Set([...ADMIN_HTML.matchAll(/doAction\('([^']+)'/g)].map(m => m[1]))
+  // 还有一处是按钮的 data-act 直接透传（扫描/投递/体检/备份），从那一行里把名字取出来
+  const passthroughLine = ADMIN_HTML.split('\n').find(line => line.includes('doAction(act,')) || ''
+  const passthrough = [...passthroughLine.matchAll(/act === '([a-z-]+)'/g)].map(m => m[1])
+  assert.ok(sent.size + passthrough.length >= 9, '要能解析出界面发出的全部动作名')
+
+  for (const action of [...sent, ...passthrough]) {
+    assert.ok(ALLOWED_ACTIONS.has(action), '界面会发 ' + action + '，但它不在服务端白名单里，点了必定 400')
+  }
+})
+

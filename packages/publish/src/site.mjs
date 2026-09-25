@@ -420,15 +420,27 @@ export function estimateReadMinutes(markdown = '') {
  */
 const NOTE_SCRIPT = `<script>
 (function () {
+  // 目录锚点与标题 id 的对应关系。**必须解码**：中文标题的 id 是原文（一-执行程序总论），
+  // 而 a.hash 是百分号编码后的形式（%E4%B8%80-…），两者直接比较永远对不上——
+  // 表现为"读了半天，目录里一条都不高亮，继续阅读的入口也永远不出现"。
   var links = new Map();
-  document.querySelectorAll('.rail nav.toc a').forEach(function (a) { links.set(a.hash.slice(1), a) })
-  var headings = [].slice.call(document.querySelectorAll('article h2[id], article h3[id]'));
+  document.querySelectorAll('.rail nav.toc a').forEach(function (a) {
+    var id = fragmentId(a.getAttribute('href'))
+    if (!id) return
+    if (!links.has(id)) links.set(id, [])
+    links.get(id).push(a)
+  })
+  function fragmentId (href) {
+    var raw = String(href || '').replace(/^#/, '')
+    try { return decodeURIComponent(raw) } catch (e) { return raw }
+  }
+  // 窄屏与宽屏各有一份目录（一份在折叠面板里），高亮要同时落到两份上
+  var headings = [].slice.call(document.querySelectorAll('article h2[id], article h3[id], article h4[id]'));
 
   function setActive (id) {
-    var current = document.querySelector('.rail nav.toc a.active');
-    if (current) current.classList.remove('active');
-    var next = links.get(id);
-    if (next) next.classList.add('active');
+    document.querySelectorAll('.rail nav.toc a.active').forEach(function (a) { a.classList.remove('active') })
+    var next = links.get(id) || [];
+    next.forEach(function (a) { a.classList.add('active') })
   }
   if (headings.length && links.size) {
     var io = new IntersectionObserver(function () {
@@ -493,7 +505,7 @@ const NOTE_SCRIPT = `<script>
   var saved = null
   try { saved = localStorage.getItem(POS_KEY) } catch (e) {}
   if (resume && saved && links.has(saved)) {
-    var target = links.get(saved)
+    var target = links.get(saved)[0]
     resume.hidden = false
     resume.textContent = '继续上次阅读：' + target.textContent
     resume.addEventListener('click', function () {
@@ -504,9 +516,11 @@ const NOTE_SCRIPT = `<script>
   var lastSaved = ''
   setInterval(function () {
     var active = document.querySelector('.rail nav.toc a.active')
-    if (!active || active.hash.slice(1) === lastSaved) return
-    lastSaved = active.hash.slice(1)
-    try { localStorage.setItem(POS_KEY, lastSaved) } catch (e) {}
+    if (!active) return
+    var id = fragmentId(active.getAttribute('href'))
+    if (!id || id === lastSaved) return
+    lastSaved = id
+    try { localStorage.setItem(POS_KEY, id) } catch (e) {}
   }, 1500)
 
   // 小节锚点：悬停显示 #，点一下把「页面地址 + 小节」复制到剪贴板

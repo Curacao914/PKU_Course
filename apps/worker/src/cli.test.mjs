@@ -616,6 +616,37 @@ test('publish pushes the briefing, not a truncated note', async () => {
   assert.match(page, /本课简报/, '笔记页顶部要有简报，读者先建立基本印象')
 })
 
+test('publish --rebuild rewrites the site from the library without touching the ledger', async () => {
+  // 换模板、改样式之后要重生成 HTML，但这些跟笔记内容无关：不该为了它们再跑一遍模型，
+  // 也不该因为"重新生成"而再推一次微信。
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const notesDir = path.join(dir, 'notes')
+  fs.mkdirSync(notesDir, { recursive: true })
+  fs.writeFileSync(path.join(notesDir, 'notes-run-summary.json'), JSON.stringify({ course: '刑法分论', lesson: '第10-12节', status: 'completed' }))
+  fs.writeFileSync(path.join(notesDir, '第10-12节.md'), '# 第10-12节\n\n## 课程概览\n\n正文。')
+
+  const siteDir = path.join(dir, 'site')
+  const { deps, lines, ledger } = harness()
+  ledger.discoverReplays([{ replay_key: 'replay-1', course_key: 'course-abc' }])
+  ledger.reportStage({ id: ledger.getTask('replay-1').id, stage: 'notes_ready' })
+  assert.equal(await runCli(['publish', '--from', notesDir, '--out', siteDir, '--replay-key', 'replay-1', '--origin', 'https://course.law-tech.dev'], deps), 0)
+  const page = path.join(siteDir, 'notes/刑法分论/第10-12节.html')
+  assert.ok(fs.existsSync(page))
+
+  // 假装模板变了：把生成好的页面删掉，--rebuild 应当把它重新写回来
+  fs.rmSync(page)
+  fs.rmSync(path.join(siteDir, 'search/index.html'))
+  assert.equal(await runCli(['publish', '--rebuild', '--out', siteDir, '--origin', 'https://course.law-tech.dev'], deps), 0)
+  const rebuilt = parse(lines.at(-1))
+  assert.equal(rebuilt.rebuilt, true)
+  assert.equal(rebuilt.notes, 1)
+  assert.ok(rebuilt.pages >= 8, '索引页、搜索页、feed 都要一起重写')
+  assert.ok(fs.existsSync(page), '笔记页要重新生成')
+  assert.ok(fs.existsSync(path.join(siteDir, 'search/index.html')))
+  assert.equal(ledger.countDeliveries().pending, 1, '重建不该再排一条通知（内容没变）')
+  assert.equal(ledger.getTask('replay-1').stage, 'published', '重建不碰账本阶段')
+})
+
 test('publish refuses a directory without a notes run summary', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
   const { deps, errors } = harness()

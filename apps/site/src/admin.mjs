@@ -30,7 +30,7 @@ const DEFAULT_RUN_TIMEOUT_MS = 15 * 60 * 1000
  * 每个动作最终都落回与定时任务完全相同的那条 CLI 入口，因此不存在"界面上能做、
  * 命令行里不能做"的岔路。
  */
-const ALLOWED_ACTIONS = new Set([
+export const ALLOWED_ACTIONS = new Set([
   'doctor', 'discover', 'cycle', 'notify', 'notify-retry', 'download', 'transcribe', 'notes', 'publish', 'status',
   'retry', 'revise', 'republish', 'prune', 'backup', 'balance'
 ])
@@ -147,6 +147,64 @@ export function safeMaterialName(value) {
     .trim()
     .replace(/^[. ]+|[. ]+$/g, '')
     .slice(0, 120) || 'slides.pptx'
+}
+
+/**
+ * 动作 → argv。
+ *
+ * **白名单 + argv 数组**，永不拼 shell 字符串；每个动作最终都落回与定时任务
+ * 完全相同的那条 CLI 入口，因此不存在"界面上能做、命令行里不能做"的岔路。
+ *
+ * 放在模块级（而不是处理器闭包里）是为了让测试能逐条核对：界面上的每个按钮
+ * 到底会跑出什么命令、用的旗标在 CLI 里是否真的存在。这类"改名一处忘一处"
+ * 的错不会自己暴露——界面会照常弹出"已开始"，只是命令跑不起来。
+ */
+export function buildActionArgs(action, payload = {}, workerPath = '') {
+  const need = (name) => {
+    const value = String(payload[name] ?? '').trim()
+    if (!value) throw new Error(`缺少参数 ${name}`)
+    return value
+  }
+  const base = [workerPath]
+  switch (action) {
+    case 'retry':
+      return [...base, 'retry', '--replay-key', need('replayKey'), ...(payload.stage ? ['--stage', String(payload.stage)] : [])]
+    case 'revise': {
+      const transcriptPath = need('transcriptPath')
+      if (!fs.existsSync(transcriptPath)) throw new Error('找不到该课次的转录稿，无法重写模块')
+      return [
+        ...base, 'notes',
+        '--transcript', transcriptPath,
+        '--course', need('course'),
+        '--lesson', need('lesson'),
+        '--output-dir', path.dirname(transcriptPath),
+        '--revise', need('module'),
+        '--request', need('request'),
+        // 手动触发就是"我现在就要"，不再等低价窗口（用户点了按钮就该动）
+        '--ignore-cost-window', '1'
+      ]
+    }
+    case 'republish': {
+      const transcriptPath = need('transcriptPath')
+      return [
+        ...base, 'publish',
+        '--from', path.dirname(transcriptPath),
+        '--course', need('course'),
+        '--lesson', need('lesson'),
+        ...(payload.replayKey ? ['--replay-key', String(payload.replayKey)] : [])
+      ]
+    }
+    case 'notify-retry':
+      return [...base, 'notify', '--retry-failed']
+    case 'prune':
+      return [...base, 'prune', ...(payload.apply ? ['--apply'] : [])]
+    case 'cycle':
+      return [...base, 'cycle', '--max-tasks', String(Number(payload.maxTasks) || 5), ...(payload.replayKey ? ['--replay-key', String(payload.replayKey)] : [])]
+    case 'backup': case 'balance': case 'doctor': case 'discover': case 'notify': case 'status':
+      return [...base, action]
+    default:
+      return [...base, action, ...(payload.replayKey ? ['--replay-key', String(payload.replayKey)] : []), ...(payload.course ? ['--course', String(payload.course)] : [])]
+  }
 }
 
 export function createAdminHandler({
@@ -334,54 +392,8 @@ export function createAdminHandler({
     })
   }
 
-  /** 动作 → argv。参数只做存在性与枚举校验，绝不拼接成 shell 命令。 */
-  function buildActionArgs(action, payload = {}) {
-    const need = (name) => {
-      const value = String(payload[name] ?? '').trim()
-      if (!value) throw new Error(`缺少参数 ${name}`)
-      return value
-    }
-    const base = [workerPath]
-    switch (action) {
-      case 'retry':
-        return [...base, 'retry', '--replay-key', need('replayKey'), ...(payload.stage ? ['--stage', String(payload.stage)] : [])]
-      case 'revise': {
-        const transcriptPath = need('transcriptPath')
-        if (!fs.existsSync(transcriptPath)) throw new Error('找不到该课次的转录稿，无法重写模块')
-        return [
-          ...base, 'notes',
-          '--transcript', transcriptPath,
-          '--course', need('course'),
-          '--lesson', need('lesson'),
-          '--output-dir', path.dirname(transcriptPath),
-          '--revise', need('module'),
-          '--request', need('request'),
-          // 手动触发就是"我现在就要"，不再等低价窗口（用户点了按钮就该动）
-          '--ignore-cost-window', '1'
-        ]
-      }
-      case 'republish': {
-        const transcriptPath = need('transcriptPath')
-        return [
-          ...base, 'publish',
-          '--from', path.dirname(transcriptPath),
-          '--course', need('course'),
-          '--lesson', need('lesson'),
-          ...(payload.replayKey ? ['--replay-key', String(payload.replayKey)] : [])
-        ]
-      }
-      case 'notify-retry':
-        return [...base, 'notify', '--retry-failed']
-      case 'prune':
-        return [...base, 'prune', ...(payload.apply ? ['--apply'] : [])]
-      case 'cycle':
-        return [...base, 'cycle', '--max-tasks', String(Number(payload.maxTasks) || 5), ...(payload.replayKey ? ['--replay-key', String(payload.replayKey)] : [])]
-      case 'backup': case 'balance': case 'doctor': case 'discover': case 'notify': case 'status':
-        return [...base, action]
-      default:
-        return [...base, action, ...(payload.replayKey ? ['--replay-key', String(payload.replayKey)] : []), ...(payload.course ? ['--course', String(payload.course)] : [])]
-    }
-  }
+  // 动作 → argv 的映射放在模块级：测试要能直接拿它逐条核对界面发出的每个动作
+  const argsFor = (action, payload) => buildActionArgs(action, payload, workerPath)
 
   const configPath = () => path.join(scratchRoot, 'config.json')
 
@@ -517,7 +529,7 @@ export function createAdminHandler({
 
       let args
       try {
-        args = buildActionArgs(action, payload)
+        args = argsFor(action, payload)
       } catch (error) {
         sendJson(res, 400, { ok: false, error: 'bad_arguments', message: error instanceof Error ? error.message : String(error) })
         return true

@@ -108,6 +108,17 @@ test('the note page ships reading controls that work without an account', () => 
   assert.match(html, /prefers-color-scheme|浅色/, '默认仍是浅色，深色是可选项')
 })
 
+test('the toc highlight matches headings even when their ids are chinese', () => {
+  // a.hash 是**百分号编码**后的形式（#%E8%AF%BE%E7%A8%8B…），而标题 id 是原文（课程概览）。
+  // 早先直接拿 a.hash.slice(1) 当键去和标题 id 比，等于永远对不上：滚动高亮一条都不亮，
+  // 「继续上次阅读」也永远不出现。中文标题的站点上这不是边角问题，是主路径。
+  const html = renderNotePage(record({ markdown: NOTE }))
+  assert.match(html, /decodeURIComponent/, '片段要先解码，再与标题 id 比较')
+  assert.ok(!/links\.set\(a\.hash/.test(html), '不能拿未解码的 hash 当键')
+  assert.match(html, /links\.get\(id\) \|\| \[\]/, '同一个 id 在窄屏/宽屏各有一条目录，要高亮两条')
+  assert.match(html, /article h2\[id\], article h3\[id\], article h4\[id\]/, '目录里有四级标题，高亮要跟到四级')
+})
+
 test('the index groups by course and lists newest first', () => {
   const html = renderIndexPage([
     record({ lessonTitle: '第1-2节', publishedAt: '2026-09-01T00:00:00.000Z' }),

@@ -620,6 +620,29 @@ export function createCommands(context) {
    * 因此重新生成站点不需要重新跑模型。
    */
   async function publish(options) {
+    const siteRoot = path.resolve(options.options.out || path.join(config.scratchRoot, 'site'))
+    const libraryForRebuild = path.join(siteRoot, 'library.json')
+
+    /**
+     * --rebuild：只按发布库把站点重写一遍。
+     *
+     * 换模板、改样式、修页面脚本之后都要重新生成 HTML，而这些改动跟笔记内容无关：
+     * 为了它们把模型再跑一遍既贵又慢。发布库（library.json）本来就存着每篇的完整
+     * 记录，所以重建只读它——不碰账本，也不排新的微信通知（内容没变就不该再推一次）。
+     */
+    if (options.flags?.has('rebuild')) {
+      if (!fs.existsSync(libraryForRebuild)) throw new Error(`找不到发布库 ${libraryForRebuild}；先发布过至少一篇笔记再 --rebuild`)
+      const library = JSON.parse(fs.readFileSync(libraryForRebuild, 'utf8'))
+      const site = writeSite({
+        records: library,
+        outputDir: siteRoot,
+        siteOrigin: options.options.origin || 'https://course.law-tech.dev'
+      })
+      const index = readSiteIndex(siteRoot)
+      emit({ rebuilt: true, notes: index.count ?? library.length, siteRoot, pages: (site.written || []).length }, options)
+      return 0
+    }
+
     const from = path.resolve(requireOption(options.options, 'from', 'publish'))
     const summaryPath = path.join(from, 'notes-run-summary.json')
     if (!fs.existsSync(summaryPath)) {
@@ -636,9 +659,7 @@ export function createCommands(context) {
     const briefPath = path.join(from, 'brief.json')
     const brief = fs.existsSync(briefPath) ? JSON.parse(fs.readFileSync(briefPath, 'utf8')) : null
 
-    const siteRoot = path.resolve(options.options.out || path.join(config.scratchRoot, 'site'))
-    const libraryPath = path.join(siteRoot, 'library.json')
-    const library = fs.existsSync(libraryPath) ? JSON.parse(fs.readFileSync(libraryPath, 'utf8')) : []
+    const library = fs.existsSync(libraryForRebuild) ? JSON.parse(fs.readFileSync(libraryForRebuild, 'utf8')) : []
     const record = buildNoteRecord({
       courseName: course,
       teacher,
@@ -654,7 +675,7 @@ export function createCommands(context) {
 
     const nextLibrary = [...library.filter(item => item.slug !== record.slug), { ...record, checksum }]
     fs.mkdirSync(siteRoot, { recursive: true })
-    fs.writeFileSync(libraryPath, `${JSON.stringify(nextLibrary, null, 2)}\n`)
+    fs.writeFileSync(libraryForRebuild, `${JSON.stringify(nextLibrary, null, 2)}\n`)
 
     const site = writeSite({
       records: nextLibrary,
@@ -1778,6 +1799,8 @@ export const USAGE = `用法：course <命令> [选项]
   balance    [--threshold <元>]                   查两个付费 API 的余额（DeepSeek 官方接口；
                                            阿里云余额需账号 AK/SK，见 docs/07）
   publish    --from <笔记目录> [--course <名称>] [--lesson <课次>] [--out <站点目录>] [--origin <域名>]
+             --rebuild                     只按发布库重写站点（换模板/改样式后重建，
+                                           不跑模型、不发通知）
                                            把笔记发布到站点，内容变化时排入一条微信通知
   notify     [--probe] [--loop] [--max-items <条数>] [--retry-failed]
                                            把账本里排队的通知发到微信；--probe 只验证通道；
