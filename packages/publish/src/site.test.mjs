@@ -70,7 +70,7 @@ test('the note page renders content, toc and metadata without raw html', () => {
   assert.match(html, /<link rel="canonical" href="https:\/\/course.law-tech.dev\/notes\/刑法分论\/第10-12节-共犯与罪数">/)
   assert.match(html, /<nav class="toc">/)
   assert.match(html, /href="#课程概览"/)
-  assert.match(html, /<h2>课程概览<\/h2>/)
+  assert.match(html, /<h2 id="课程概览">课程概览<\/h2>/)
   assert.match(html, /共犯的成立需要共同故意与共同行为。/)
   assert.ok(!html.includes('<script>alert'), '模型输出中的脚本不得原样进入页面')
   assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/)

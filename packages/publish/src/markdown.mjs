@@ -135,7 +135,13 @@ export function renderMarkdown(markdown) {
     const heading = line.match(HEADING)
     if (heading) {
       const level = heading[1].length
-      blocks.push(`<h${level}>${renderInline(heading[2].trim())}</h${level}>`)
+      // 标题要带 id：目录链接、滚动高亮、锚点跳转全靠它。
+      // 此前只渲染 <h2>文本</h2>，目录里的 #锚点 实际是死链——点了不动，
+      // 而且"当前小节高亮"无从实现。
+      const text = heading[2].trim()
+      const id = slugify(text)
+      const idAttribute = id ? ` id="${escapeHtml(id)}"` : ''
+      blocks.push(`<h${level}${idAttribute}>${renderInline(text)}</h${level}>`)
       index += 1
       continue
     }

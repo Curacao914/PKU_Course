@@ -22,10 +22,19 @@ test('links only survive with a safe scheme', () => {
 
 test('headings, rules and paragraphs', () => {
   const html = renderMarkdown('# 一级\n\n## 二级\n\n正文一\n正文二\n\n***\n')
-  assert.match(html, /<h1>一级<\/h1>/)
-  assert.match(html, /<h2>二级<\/h2>/)
+  assert.match(html, /<h1 id="一级">一级<\/h1>/, '标题必须带 id：目录锚点与滚动高亮都靠它')
+  assert.match(html, /<h2 id="二级">二级<\/h2>/)
   assert.match(html, /<p>正文一\n正文二<\/p>/, '连续行合并为一个段落')
   assert.match(html, /<hr>/)
+})
+
+test('heading ids match the toc anchors', () => {
+  // 目录里的 #锚点 必须真的存在，否则点了不动、也无法高亮当前小节
+  const markdown = '## 课程概览\n\n内容\n\n### 一、共犯的成立条件\n\n内容'
+  const html = renderMarkdown(markdown)
+  for (const heading of extractHeadings(markdown)) {
+    assert.match(html, new RegExp(`id="${heading.id}"`), `\`${heading.text}\` 的锚点应当存在`)
+  }
 })
 
 test('blockquotes keep their inner structure', () => {

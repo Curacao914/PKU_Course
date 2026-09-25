@@ -24,70 +24,128 @@ export const SITE_CSS = `
   --muted: #6b827c;
   --line: #dde5e1;
   --accent: #2f6f61;
+  --accent-soft: rgba(47, 111, 97, .10);
   --radius: 18px;
+  --rail-w: 232px;
+  /* 中文长文的度量：约 38 个汉字一行。西文 65ch 的等效体验，汉字更宽，所以要更窄。 */
+  --measure: 38em;
 }
 * { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
 body {
   margin: 0; background: var(--paper); color: var(--ink);
   font-family: "Songti SC", "Noto Serif CJK SC", "Source Han Serif SC", Georgia, serif;
-  line-height: 1.85; -webkit-font-smoothing: antialiased;
+  /* 18px / 1.8：中文长文比西文需要更大字号与更松行距（西文 1.6 的经验值在中文上偏挤） */
+  font-size: 18px; line-height: 1.8; -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 a { color: var(--accent); text-decoration: none; border-bottom: 1px solid rgba(47,111,97,.28); }
 a:hover { border-bottom-color: var(--accent); }
-.wrap { max-width: 760px; margin: 0 auto; padding: 48px 22px 96px; }
-header.site { border-bottom: 1px solid var(--line); padding-bottom: 18px; margin-bottom: 34px; }
-header.site .brand { font-size: 15px; letter-spacing: .18em; color: var(--muted); }
-header.site h1 { margin: 10px 0 0; font-size: 26px; font-weight: 600; }
-.meta { color: var(--muted); font-size: 14px; margin-top: 8px; }
-article h1 { font-size: 28px; margin: 0 0 6px; }
-article h2 { font-size: 21px; margin: 40px 0 12px; padding-top: 12px; border-top: 1px solid var(--line); }
-article h3 { font-size: 17px; margin: 28px 0 10px; color: var(--ink-soft); }
-article p { margin: 12px 0; }
+/* 长文页：左栏目录 + 正文。目录在左（右栏会被当成广告跳过），
+   且只有"独立成栏"的目录才允许 sticky——正文内的目录不 sticky。 */
+.shell { display: grid; grid-template-columns: var(--rail-w) minmax(0, 1fr); gap: 56px;
+  max-width: 1080px; margin: 0 auto; padding: 44px 24px 112px; }
+.shell.single { grid-template-columns: minmax(0, 1fr); max-width: 720px; }
+.col { min-width: 0; }
+.col > * { max-width: var(--measure); }
+.rail { position: sticky; top: 24px; align-self: start; max-height: calc(100vh - 48px); overflow-y: auto; }
+.rail nav.toc { padding: 0; margin: 0; background: none; }
+.rail nav.toc h2 { border: 0; margin: 0 0 10px; padding: 0; font-size: 13px; letter-spacing: .14em;
+  color: var(--muted); font-weight: 500; }
+.rail nav.toc ol { list-style: none; margin: 0; padding: 0; font-size: 15px; line-height: 1.6; }
+.rail nav.toc li { margin: 0; }
+.rail nav.toc li.lv3 { padding-left: 14px; }
+.rail nav.toc a { display: block; padding: 5px 10px; border: 0; border-left: 2px solid transparent;
+  color: var(--ink-soft); border-radius: 0 8px 8px 0; }
+.rail nav.toc a:hover { background: var(--paper-soft); }
+.rail nav.toc a.active { color: var(--accent); border-left-color: var(--accent); background: var(--accent-soft); font-weight: 600; }
+.rail .rail-extra { margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--line); font-size: 13px; color: var(--muted); }
+.rail .rail-extra a { border: 0; }
+/* 移动端：目录折叠但必须显式可见（藏在无名图标后面等于没有） */
+.rail-toggle { display: none; }
+@media (max-width: 960px) {
+  .shell { grid-template-columns: minmax(0, 1fr); gap: 20px; padding: 28px 20px 96px; }
+  .rail { position: static; max-height: none; order: -1; }
+  .rail-toggle { display: block; }
+  .rail details { background: var(--paper-soft); border-radius: var(--radius); padding: 12px 16px; }
+  .rail details summary { cursor: pointer; font-size: 15px; color: var(--accent); }
+  .rail details nav.toc { margin-top: 12px; }
+  .rail .rail-extra { display: none; }
+}
+header.site { border-bottom: 1px solid var(--line); padding-bottom: 20px; margin-bottom: 34px; }
+header.site .brand { font-size: 13px; letter-spacing: .22em; color: var(--muted); }
+header.site .brand a { border: 0; color: var(--muted); }
+header.site h1 { margin: 12px 0 0; font-size: 30px; line-height: 1.25; font-weight: 600; letter-spacing: -.01em; }
+.meta { color: var(--muted); font-size: 14px; margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px 14px; }
+article h1 { font-size: 30px; margin: 0 0 6px; }
+article h2 { font-size: 22px; line-height: 1.3; margin: 44px 0 14px; padding-top: 14px;
+  border-top: 1px solid var(--line); scroll-margin-top: 5rem; }
+article h3 { font-size: 18px; line-height: 1.4; margin: 30px 0 10px; color: var(--ink-soft); scroll-margin-top: 5rem; }
+article h4 { font-size: 17px; margin: 22px 0 8px; color: var(--ink-soft); }
+article p { margin: 13px 0; }
 article blockquote {
-  margin: 18px 0; padding: 12px 18px; background: var(--paper-soft);
+  margin: 20px 0; padding: 12px 18px; background: var(--paper-soft);
   border-left: 3px solid var(--accent); border-radius: 0 var(--radius) var(--radius) 0; color: var(--ink-soft);
 }
 article blockquote p { margin: 4px 0; }
-article hr { border: 0; border-top: 1px solid var(--line); margin: 34px 0; }
-article code { background: var(--paper-soft); padding: 1px 6px; border-radius: 6px; font-size: .9em; }
+article hr { border: 0; border-top: 1px solid var(--line); margin: 38px 0; }
+article code { background: var(--paper-soft); padding: 1px 6px; border-radius: 6px; font-size: .88em; }
 article pre { background: var(--paper-soft); padding: 14px 16px; border-radius: var(--radius); overflow-x: auto; }
 article pre code { background: none; padding: 0; }
-/* 本课简报：笔记页顶部先给"基本印象"，再进正文细节 */
-article .brief { background: var(--paper-soft); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px 22px; margin: 0 0 28px; }
-article .brief h2 { margin: 0 0 10px; font-size: 17px; border: 0; padding: 0; color: var(--accent); letter-spacing: .04em; }
+article pre:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+article .brief { background: linear-gradient(180deg, #fff, var(--paper-soft)); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 20px 24px; margin: 0 0 30px;
+  box-shadow: 0 1px 2px rgba(22,48,43,.04), 0 12px 32px -24px rgba(22,48,43,.45); }
+article .brief h2 { margin: 0 0 10px; font-size: 15px; border: 0; padding: 0; color: var(--accent); letter-spacing: .1em; }
 article .brief p { margin: 0 0 10px; }
 article .brief ul { margin: 0; padding-left: 20px; }
-article .brief li { margin: 4px 0; }
+article .brief li { margin: 5px 0; }
 /* Mermaid 图：图宽时横向滚动而不是撑破版面 */
-.diagram { margin: 20px 0; padding: 8px 4px; overflow-x: auto; background: var(--paper-soft); border-radius: var(--radius); }
+.diagram { margin: 22px 0; padding: 10px 6px; overflow-x: auto; background: var(--paper-soft); border-radius: var(--radius); }
 .diagram svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
-article table { width: 100%; border-collapse: collapse; margin: 18px 0; font-size: 15px; }
-article th, article td { border: 1px solid var(--line); padding: 8px 10px; text-align: left; }
+article table { width: 100%; border-collapse: collapse; margin: 20px 0; font-size: 15px; line-height: 1.6; }
+article th, article td { border: 1px solid var(--line); padding: 8px 10px; text-align: left; vertical-align: top; }
 article th { background: var(--paper-soft); font-weight: 600; }
 article ul, article ol { padding-left: 22px; }
 article li { margin: 6px 0; }
 article li.task { list-style: none; margin-left: -20px; }
-details.note-meta { margin-top: 46px; color: var(--muted); font-size: 14px; }
-details.note-meta summary { cursor: pointer; }
+article details { margin: 16px 0; }
+article details summary { cursor: pointer; color: var(--accent); font-size: 15px; }
+details.note-meta { margin-top: 50px; color: var(--muted); font-size: 14px; }
 details.note-meta pre { background: var(--paper-soft); border-radius: var(--radius); padding: 12px 14px; overflow-x: auto; }
-.toc { background: var(--paper-soft); border-radius: var(--radius); padding: 16px 20px; margin: 26px 0; }
-.toc h2 { border: 0; margin: 0 0 8px; padding: 0; font-size: 15px; letter-spacing: .08em; color: var(--muted); }
-.toc ol { margin: 0; padding-left: 20px; font-size: 15px; }
-.toc li { margin: 4px 0; }
 .card {
-  display: block; padding: 18px 20px; margin: 14px 0; background: #fff;
+  display: block; padding: 20px 22px; margin: 14px 0; background: #fff;
   border: 1px solid var(--line); border-radius: var(--radius);
   box-shadow: 0 1px 2px rgba(22,48,43,.04), 0 8px 24px -18px rgba(22,48,43,.35);
 }
-.card:hover { border-color: var(--accent); }
-.card h3 { margin: 0 0 6px; font-size: 17px; color: var(--ink); }
-.card p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.7; }
-.course-group { margin-top: 34px; }
+.card:hover { border-color: var(--accent); transform: translateY(-1px); }
+.card { transition: border-color .15s ease, transform .15s ease; }
+.card h3 { margin: 0 0 6px; font-size: 18px; color: var(--ink); }
+.card p { margin: 0; color: var(--muted); font-size: 15px; line-height: 1.7; }
+.card .card-meta { margin-top: 8px; color: var(--muted); font-size: 13px; }
+.course-group { margin-top: 38px; }
 .course-group > h2 { font-size: 17px; color: var(--ink-soft); border-bottom: 1px solid var(--line); padding-bottom: 8px; }
-footer.site { margin-top: 60px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+.search { width: 100%; padding: 12px 16px; font-size: 16px; font-family: inherit;
+  border: 1px solid var(--line); border-radius: var(--radius); background: #fff; color: var(--ink); }
+.search:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+footer.site { margin-top: 64px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
 .empty { color: var(--muted); background: var(--paper-soft); border-radius: var(--radius); padding: 22px; }
+/* 阅读进度：细线，2—4px，不抢视线 */
+.progress { position: fixed; top: 0; left: 0; height: 3px; width: 0; background: var(--accent); z-index: 60; }
+.totop { position: fixed; right: 22px; bottom: 22px; z-index: 60; border: 1px solid var(--line);
+  background: #fff; color: var(--ink-soft); border-radius: 999px; padding: 9px 16px; font-family: inherit;
+  font-size: 14px; cursor: pointer; opacity: 0; pointer-events: none; transition: opacity .2s ease;
+  box-shadow: 0 6px 20px -12px rgba(22,48,43,.5); }
+.totop.show { opacity: 1; pointer-events: auto; }
+@media print {
+  .rail, .progress, .totop, footer.site { display: none; }
+  .shell { display: block; max-width: none; padding: 0; }
+  .col > * { max-width: none; }
+  body { font-size: 11pt; line-height: 1.6; }
+  article h2 { page-break-after: avoid; }
+}
 `
-
 export function noteSlug({ courseName, lessonTitle }) {
   return `notes/${slugify(courseName, 'course')}/${slugify(lessonTitle, 'lesson')}`
 }
