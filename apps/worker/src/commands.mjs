@@ -1374,7 +1374,9 @@ export function createCommands(context) {
       })()
     })
 
-    if (options.flags?.has('status') || (!options.options.set && !options.options['set-stdin'] && !options.flags?.has('clear'))) {
+    // 注意 --set-stdin 是旗标（没有值），不能从 options 里取
+    const wantsStdin = Boolean(options.flags?.has('set-stdin'))
+    if (options.flags?.has('status') || (!options.options.set && !wantsStdin && !options.flags?.has('clear'))) {
       emit({ ...status(), hint: '忘记密码时：course admin-passwd --set-stdin 重设，或用主令牌登录后在管理台修改' }, options)
       return 0
     }
@@ -1385,9 +1387,8 @@ export function createCommands(context) {
     }
 
     let password = String(options.options.set || '')
-    if (options.options['set-stdin']) {
-      password = String(await readStdin()).trim()
-    }
+    if (wantsStdin) password = String(await readStdin()).trim()
+    if (!password) throw new Error('没有读到密码：请用 --set-stdin 通过标准输入提供，或 --set <新密码>')
     const problem = validatePassword(password)
     if (problem) throw new Error(`密码不符合要求：${problem}`)
     fs.mkdirSync(path.dirname(file), { recursive: true })
