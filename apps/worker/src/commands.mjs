@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { checkFreeSpace, createValidatedAcquisitionRuntime, formatBytes } from '@course/acquisition'
-import { addMaterial, listMaterials, parseInboxName, readDecks } from '@course/materials'
+import { addMaterial, listMaterials, parseInboxName, readDecks, unassignedDir } from '@course/materials'
 
 import {
   LOW_BALANCE_THRESHOLD_CNY,
@@ -305,7 +305,7 @@ export function createCommands(context) {
     // 课件：教学网上没有课件，只能来自用户上传（materials 命令或管理台）。
     // 有课件时它同时承担三件事：术语/ASR 对照、结构对照、笔记里"依据第几页"的可核对性。
     // 注意：续跑时不覆盖已有课件的引用——重跑中途补传课件后，用 --revise 重写受影响模块。
-    const decks = readDecks({ root: config.materialsRoot, course, lesson: lessonTitle })
+    const decks = readDecks({ root: config.materialsRoot, course, lesson: lessonTitle, replayKey })
     if (decks.length) {
       stderr(`已载入 ${decks.length} 份课件（共 ${decks.reduce((total, deck) => total + deck.slides.length, 0)} 页）`)
     } else if (!resume) {
@@ -1113,6 +1113,8 @@ export function createCommands(context) {
       fs.mkdirSync(inbox, { recursive: true })
       const done = path.join(inbox, 'processed')
       fs.mkdirSync(done, { recursive: true })
+      const parked = unassignedDir(root)
+      fs.mkdirSync(parked, { recursive: true })
       const files = fs.readdirSync(inbox).filter(name => {
         const full = path.join(inbox, name)
         return fs.statSync(full).isFile() && !name.startsWith('.')
@@ -1120,8 +1122,11 @@ export function createCommands(context) {
       const results = []
       for (const name of files) {
         const identity = parseInboxName(name)
+        // 归属不明就**不猜**：停到 _unassigned 并报出来，让人在管理台指定。
+        // 猜错的代价是笔记用错课件，比多一步人工贵得多。
         if (!identity) {
-          results.push({ name, archived: false, reason: '命名不符合 课程__课次.扩展名' })
+          fs.renameSync(path.join(inbox, name), path.join(parked, name))
+          results.push({ name, archived: false, parked: true, reason: '文件名没有 课程__课次（或 课程__ALL）前缀，已停到 _unassigned 等你指定' })
           continue
         }
         try {
@@ -1129,38 +1134,53 @@ export function createCommands(context) {
             root,
             course: identity.course,
             lesson: identity.lesson,
+            scope: identity.scope,
+            replayKey: options.options['replay-key'] || '',
             filePath: path.join(inbox, name),
             name,
             python: config.python
           })
           fs.renameSync(path.join(inbox, name), path.join(done, name))
-          results.push({ name, archived: true, course: identity.course, lesson: identity.lesson, slideCount: deck.slideCount, checksum: entry.checksum.slice(0, 12) })
+          results.push({
+            name, archived: true, course: identity.course,
+            scope: entry.scope, lesson: entry.lesson || '（全课程通用）',
+            slideCount: deck.slideCount, checksum: entry.checksum.slice(0, 12)
+          })
         } catch (error) {
           results.push({ name, archived: false, reason: error instanceof Error ? error.message : String(error) })
         }
       }
       emit({ inbox, archived: results.filter(item => item.archived).length, results }, options)
-      return results.some(item => !item.archived && item.reason && !item.reason.startsWith('命名')) ? 1 : 0
+      return results.some(item => !item.archived && !item.parked) ? 1 : 0
     }
 
     const file = options.options.file
     if (file) {
       const course = requireOption(options.options, 'course', 'materials')
       const lesson = requireOption(options.options, 'lesson', 'materials')
+      const scope = options.options['course-scope'] ? 'course' : 'lesson'
+      const appliesTo = String(options.options['applies-to'] || '').split(',').map(item => item.trim()).filter(Boolean)
       const { entry, deck } = await addMaterial({
         root, course, lesson,
+        scope,
+        appliesTo,
+        replayKey: options.options['replay-key'] || '',
         filePath: path.resolve(file),
         name: options.options.name || path.basename(file),
         python: config.python
       })
-      emit({ course, lesson, ...entry, slides: deck.slides.length }, options)
+      emit({ ...entry, slides: deck.slides.length }, options)
       return 0
     }
 
     const course = options.options.course || ''
     const lesson = options.options.lesson || ''
     if (course && lesson) {
-      emit({ root, course, lesson, materials: listMaterials({ root, course, lesson }) }, options)
+      emit({
+        root, course, lesson,
+        replayKey: options.options['replay-key'] || '',
+        materials: listMaterials({ root, course, lesson, replayKey: options.options['replay-key'] || '' })
+      }, options)
       return 0
     }
     const courses = fs.existsSync(root) ? fs.readdirSync(root, { withFileTypes: true }).filter(item => item.isDirectory()).map(item => item.name) : []
@@ -1367,10 +1387,14 @@ export const USAGE = `用法：course <命令> [选项]
                                            --write-units 只决定分几次模型调用写完（1 = 一次写完）；
                                            --revise 只重写指定模块（其余模块草稿保留），需配合 --request
   materials  --file <课件> --course <名称> --lesson <课次> [--name <文件名>]
-             [--course <名称> --lesson <课次>]        列出该课次已有课件
+             [--course-scope] [--applies-to <课次,课次>] [--replay-key <键>]
+             [--course <名称> --lesson <课次>] [--replay-key <键>]   列出该课次会用到的课件
              --ingest                                 归档收件箱里的 课程__课次.扩展名
-                                           教学网上没有课件：课件由用户上传，归档后作为
-                                           术语/ASR 对照与结构对照材料参与笔记写作
+                                           教学网上没有课件：课件由用户上传。归属三种：
+                                           本课次（默认）／--course-scope 全课程通用／
+                                           --applies-to 跨课次共用（上一讲的 PPT 这讲接着用）。
+                                           命名不合 课程__课次（或 课程__ALL）的进 _unassigned，
+                                           不猜归属，等你在管理台指定
   balance    [--threshold <元>]                   查两个付费 API 的余额（DeepSeek 官方接口；
                                            阿里云余额需账号 AK/SK，见 docs/07）
   publish    --from <笔记目录> [--course <名称>] [--lesson <课次>] [--out <站点目录>] [--origin <域名>]

@@ -9,14 +9,16 @@ import { cleanText } from '@course/core'
 /**
  * 课件（PPT）归档与解析。
  *
- * 教学网上没有课件，课件只在用户手里，因此这条链路必须支持"随时补传"：
- * 课件晚到一步也要能用上——补传后只重写受影响的模块（`notes --revise`），
- * 不必整节课重跑。
+ * 教学网上没有课件，课件只在用户手里，因此这条链路要能回答三个问题：
+ *   1. **归属**：这门课、这一课次，还是跨课次共用（上一讲的 PPT 这讲接着用）？
+ *   2. **稳定标识**：课次标题会变（老师改个名、平台补个日期），所以真正的键是 replayKey；
+ *      标题只作兜底匹配。
+ *   3. **随时补传**：课件晚到一步也要能用——补传后用 `notes --revise` 只重写受影响模块。
  *
- * 归档形状：
- *   <root>/<课程>/<课次>/原文件.pptx
- *   <root>/<课程>/<课次>/slides/<文件名>.json   ← {"slideCount":N,"slides":[{"slideNumber":1,"text":""}]}
- *   <root>/<课程>/<课次>/meta.json              ← 每个材料的来源、哈希、解析时间
+ * 目录形状（scope = course 的放在 course/ 下，全课程通用）：
+ *   <root>/<课程>/course/            全课程通用课件 + meta.json
+ *   <root>/<课程>/<课次>/            该课次课件 + meta.json
+ *   <root>/_unassigned/              归属不明的文件（不猜，列出来让人指定）
  */
 
 const PYTHON_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'python', 'extract_slides.py')
@@ -32,12 +34,20 @@ export function safeSegment(value, fallback = 'unnamed') {
     .slice(0, 80) || fallback
 }
 
-export function materialDir({ root, course, lesson }) {
+/** 全课程通用课件的固定目录名。 */
+export const COURSE_SCOPE_DIR = 'course'
+
+export function courseMaterialDir({ root, course }) {
   if (!root) throw new Error('缺少课件归档根目录')
-  return path.join(path.resolve(root), safeSegment(course, 'course'), safeSegment(lesson, 'lesson'))
+  return path.join(path.resolve(root), safeSegment(course, 'course'))
 }
 
-/** 默认的 python 执行器：可用 deps 注入，测试不需要真的装 python。 */
+export function materialDir({ root, course, lesson }) {
+  if (!root) throw new Error('缺少课件归档根目录')
+  if (!lesson) return path.join(courseMaterialDir({ root, course }), COURSE_SCOPE_DIR)
+  return path.join(courseMaterialDir({ root, course }), safeSegment(lesson, 'lesson'))
+}
+
 function defaultRunPython({ python = 'python3', args, env = process.env }) {
   return new Promise((resolve, reject) => {
     const child = spawn(python, args, { env, stdio: ['ignore', 'pipe', 'pipe'] })
@@ -78,12 +88,30 @@ export function normalizeDeck(value = {}) {
   return { slideCount: slides.length, slides }
 }
 
-/** 收下一个课件：归档原件 + 解析出 json + 记元数据。同文件名重复上传视为替换。 */
+function readMeta(dir) {
+  const metaPath = path.join(dir, 'meta.json')
+  if (!fs.existsSync(metaPath)) return { materials: [] }
+  try {
+    return JSON.parse(fs.readFileSync(metaPath, 'utf8'))
+  } catch {
+    return { materials: [] }
+  }
+}
+
+/**
+ * 收下一个课件：归档原件 + 解析出 json + 记元数据。
+ *
+ * @param scope       'lesson'（默认，只给这一课次）| 'course'（全课程通用）
+ * @param appliesTo   跨课次共用的课次标题列表（上一讲的 PPT 这讲继续用时填这里）
+ * @param replayKey   该课次的稳定标识；标题改名后仍能对上
+ */
 export async function addMaterial({
-  root, course, lesson, filePath, name,
+  root, course, courseKey = '', lesson = '', replayKey = '', scope = 'lesson', appliesTo = [],
+  filePath, name,
   runPython = defaultRunPython, python = 'python3', env = process.env, at = new Date()
 } = {}) {
-  const dir = materialDir({ root, course, lesson })
+  const effectiveScope = scope === 'course' ? 'course' : 'lesson'
+  const dir = materialDir({ root, course, lesson: effectiveScope === 'course' ? '' : lesson })
   fs.mkdirSync(path.join(dir, 'slides'), { recursive: true })
   const fileName = safeSegment(name || path.basename(filePath), 'slides.pptx')
   const target = path.join(dir, fileName)
@@ -95,10 +123,15 @@ export async function addMaterial({
   const parsedPath = path.join(dir, 'slides', `${fileName}.json`)
   fs.writeFileSync(parsedPath, `${JSON.stringify({ ...deck, source: fileName, checksum }, null, 2)}\n`)
 
-  const metaPath = path.join(dir, 'meta.json')
-  const meta = fs.existsSync(metaPath) ? JSON.parse(fs.readFileSync(metaPath, 'utf8')) : { materials: [] }
+  const meta = readMeta(dir)
   const entry = {
     name: fileName,
+    scope: effectiveScope,
+    course,
+    courseKey,
+    lesson: effectiveScope === 'course' ? '' : lesson,
+    replayKey: effectiveScope === 'course' ? '' : replayKey,
+    appliesTo: effectiveScope === 'course' ? [] : (Array.isArray(appliesTo) ? appliesTo.filter(Boolean) : []),
     bytes: bytes.length,
     checksum,
     slideCount: deck.slideCount,
@@ -107,39 +140,85 @@ export async function addMaterial({
   }
   meta.materials = [...(meta.materials || []).filter(item => item.name !== fileName), entry]
   meta.updatedAt = at.toISOString()
-  fs.writeFileSync(metaPath, `${JSON.stringify(meta, null, 2)}\n`)
+  fs.writeFileSync(path.join(dir, 'meta.json'), `${JSON.stringify(meta, null, 2)}\n`)
   return { dir, entry, deck }
 }
 
-export function listMaterials({ root, course, lesson } = {}) {
-  const dir = materialDir({ root, course, lesson })
-  const metaPath = path.join(dir, 'meta.json')
-  if (!fs.existsSync(metaPath)) return []
-  try {
-    return JSON.parse(fs.readFileSync(metaPath, 'utf8')).materials || []
-  } catch {
-    return []
-  }
+/** 扫这门课下所有课次目录里的课件元数据（跨课次共用要能引用别的课次的文件）。 */
+function allLessonMaterials({ root, course }) {
+  const base = courseMaterialDir({ root, course })
+  if (!fs.existsSync(base)) return []
+  return fs.readdirSync(base, { withFileTypes: true })
+    .filter(entry => entry.isDirectory() && entry.name !== COURSE_SCOPE_DIR && !entry.name.startsWith('_'))
+    .flatMap(entry => readMeta(path.join(base, entry.name)).materials || [])
 }
 
-/**
- * 读出这一课次可用于模型调用的课件文本。
- * 形状与 `lesson.pptText` 一致：[{name, slides:[{slideNumber,text}]}]。
- */
-export function readDecks({ root, course, lesson } = {}) {
-  return listMaterials({ root, course, lesson })
+/** 某课次该加载哪些课件：全课程通用 + 本课次 + 显式声明适用本课次的跨课次课件。 */
+export function listMaterials({ root, course, lesson = '', replayKey = '' } = {}) {
+  const lessonScoped = lesson ? readMeta(materialDir({ root, course, lesson })).materials || [] : []
+  const courseScoped = readMeta(materialDir({ root, course, lesson: '' })).materials || []
+  const shared = lesson
+    ? allLessonMaterials({ root, course }).filter(item => (item.appliesTo || []).includes(lesson))
+    : []
+  // 归属判定：replayKey（稳定）优先，其次课次标题，最后看"显式声明适用于哪些课次"。
+  // 三条是"或"的关系——上一讲的 PPT 这一讲接着用时，它既不属于本课次目录，
+  // 也不共享 replayKey，只能靠 appliesTo 匹配上。
+  const applies = (item) => {
+    if (!item) return false
+    if (replayKey && item.replayKey === replayKey) return true
+    if (lesson && item.lesson === lesson) return true
+    return Boolean(lesson) && (item.appliesTo || []).includes(lesson)
+  }
+  const seen = new Set()
+  return [...courseScoped, ...lessonScoped, ...shared].filter(item => {
+    // 同名文件只保留一份（同一份课件可能既在本课次目录、又被别的课次声明共用）
+    const key = `${item.name}:${item.checksum || ''}`
+    if (item.scope === 'course') {
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    }
+    if (item.lesson === lesson || applies(item)) {
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    }
+    return false
+  })
+}
+
+/** 读出这一课次可用于模型调用的课件文本（形状与 lesson.pptText 一致）。 */
+export function readDecks({ root, course, lesson = '', replayKey = '' } = {}) {
+  return listMaterials({ root, course, lesson, replayKey })
     .map(item => {
       if (!item.parsedPath || !fs.existsSync(item.parsedPath)) return null
       const parsed = JSON.parse(fs.readFileSync(item.parsedPath, 'utf8'))
-      return { name: item.name, slides: parsed.slides || [] }
+      return { name: item.name, scope: item.scope || 'lesson', slides: parsed.slides || [] }
     })
     .filter(deck => deck && deck.slides.length)
 }
 
-/** 文件名 → 课次：收件箱里的文件按 `课程__课次.pptx` 命名归属；不匹配时返回 null。 */
+/**
+ * 文件名 → 归属。
+ *   `课程__课次.pptx`  → 该课次
+ *   `课程__ALL.pptx`   → 全课程通用
+ * 其余一律返回 null：归属不明时**不猜**，进 _unassigned 让人指定。
+ */
 export function parseInboxName(fileName) {
   const base = path.basename(String(fileName || ''))
   const match = base.match(/^(.+?)__(.+?)(\.[A-Za-z0-9]+)?$/)
   if (!match) return null
-  return { course: match[1].trim(), lesson: match[2].trim(), extension: match[3] || '' }
+  const course = match[1].trim()
+  const scopeRaw = match[2].trim()
+  const extension = match[3] || ''
+  if (!course || !scopeRaw) return null
+  if (/^(all|ALL|全部|全课程)$/.test(scopeRaw)) {
+    return { course, lesson: '', scope: 'course', extension }
+  }
+  return { course, lesson: scopeRaw, scope: 'lesson', extension }
+}
+
+/** 归属不明的文件先放这里，等人在管理台指定，不做模糊猜测。 */
+export function unassignedDir(root) {
+  return path.join(path.resolve(root), '_unassigned')
 }

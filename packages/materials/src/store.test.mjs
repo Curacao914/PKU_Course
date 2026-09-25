@@ -45,12 +45,42 @@ test('safeSegment keeps CJK and strips path-hostile characters', () => {
   assert.equal(safeSegment('   '), 'unnamed')
 })
 
-test('parseInboxName maps 课程__课次.pptx to a lesson', () => {
+test('parseInboxName reads the course__lesson convention', () => {
   assert.deepEqual(
     parseInboxName('法律实证分析__2026-09-23第1-2节.pptx'),
-    { course: '法律实证分析', lesson: '2026-09-23第1-2节', extension: '.pptx' }
+    { course: '法律实证分析', lesson: '2026-09-23第1-2节', scope: 'lesson', extension: '.pptx' }
+  )
+  assert.deepEqual(
+    parseInboxName('法律实证分析__ALL.pptx'),
+    { course: '法律实证分析', lesson: '', scope: 'course', extension: '.pptx' },
+    '课程__ALL 表示全课程通用（例如术语表、课程大纲）'
   )
   assert.equal(parseInboxName('随便一个名字.pptx'), null, '命名不合约定就不猜归属')
+})
+
+test('a lesson loads course-wide decks plus its own, and only the shared ones it declares', async () => {
+  const root = tmp('course-materials-scope-')
+  const make = async (payload, name) => {
+    const file = path.join(root, `${name}.json`)
+    fs.writeFileSync(file, JSON.stringify({ slides: [{ slideNumber: 1, text: name }] }))
+    return file
+  }
+
+  await addMaterial({ root: path.join(root, 'archive'), course: '刑法分论', lesson: '第10-12节', filePath: await make({}, '本讲'), name: '本讲.json' })
+  await addMaterial({ root: path.join(root, 'archive'), course: '刑法分论', lesson: '', scope: 'course', filePath: await make({}, '术语表'), name: '术语表.json' })
+  await addMaterial({
+    root: path.join(root, 'archive'), course: '刑法分论', lesson: '第7-9节',
+    appliesTo: ['第7-9节', '第10-12节'], filePath: await make({}, '上一讲'), name: '上一讲.json'
+  })
+  await addMaterial({ root: path.join(root, 'archive'), course: '刑法分论', lesson: '第13-15节', filePath: await make({}, '下一讲'), name: '下一讲.json' })
+
+  const names = listMaterials({ root: path.join(root, 'archive'), course: '刑法分论', lesson: '第10-12节' }).map(item => item.name).sort()
+  // 排序按码点：上(U+4E0A) < 本(U+672C) < 术(U+672F)
+  assert.deepEqual(names, ['上一讲.json', '本讲.json', '术语表.json'], '全课程通用 + 本课次 + 声明适用本课次的跨课次课件')
+
+  const decks = readDecks({ root: path.join(root, 'archive'), course: '刑法分论', lesson: '第10-12节' })
+  assert.equal(decks.length, 3)
+  assert.ok(decks.some(deck => deck.scope === 'course'), '全课程通用的课件要标明作用域')
 })
 
 test('normalizeDeck drops empty slides and sorts by slide number', () => {
