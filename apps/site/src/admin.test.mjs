@@ -133,6 +133,77 @@ test('uploading requires the admin token', async () => {
   assert.equal(res.res.state.status, 401)
 })
 
+test('admin actions map to whitelisted CLI argv, never to a shell string', async () => {
+  const { handler, calls } = fixture()
+  const run = (action, extra) => call(handler, {
+    method: 'POST', url: '/api/admin/run',
+    body: JSON.stringify(Object.assign({ action }, extra || {}))
+  })
+
+  await run('retry', { replayKey: 'replay-1' })
+  assert.deepEqual(calls.at(-1).args.slice(1), ['retry', '--replay-key', 'replay-1'])
+
+  await run('prune', { apply: true })
+  assert.deepEqual(calls.at(-1).args.slice(1), ['prune', '--apply'])
+
+  await run('notify-retry')
+  assert.deepEqual(calls.at(-1).args.slice(1), ['notify', '--retry-failed'])
+
+  // 缺参数要被挡住，而不是拼出一条残缺命令
+  const bad = await run('revise', { course: '刑法分论' })
+  assert.equal(bad.res.state.status, 400)
+  assert.equal(bad.body.error, 'bad_arguments')
+
+  // 不在白名单里的动作一律拒绝
+  const unknown = await run('rm-rf')
+  assert.equal(unknown.res.state.status, 400)
+  assert.equal(unknown.body.error, 'unsupported_action')
+})
+
+test('run parameters can be edited from the console and are validated', async () => {
+  const { handler, scratchRoot } = fixture()
+  const initial = await call(handler, { url: '/api/admin/config' })
+  assert.equal(initial.res.state.status, 200)
+  assert.ok(initial.body.editable.targetChars, '可改的键要带说明，界面据此生成表单')
+
+  const saved = await call(handler, {
+    method: 'PUT', url: '/api/admin/config',
+    body: JSON.stringify({ values: { targetChars: '12000', llmCostMode: 'economy', keepMedia: 'true' } })
+  })
+  assert.equal(saved.res.state.status, 200)
+  assert.deepEqual(saved.body.applied.sort(), ['keepMedia', 'llmCostMode', 'targetChars'])
+
+  const onDisk = JSON.parse(fs.readFileSync(path.join(scratchRoot, 'config.json'), 'utf8'))
+  assert.equal(onDisk.targetChars, 12000)
+  assert.equal(onDisk.keepMedia, true, '布尔值要落成布尔，不是字符串')
+
+  const reread = await call(handler, { url: '/api/admin/config' })
+  assert.equal(reread.body.values.targetChars, 12000)
+
+  // 不认识的键、越界的值都要报错而不是静默写入
+  const unknown = await call(handler, { method: 'PUT', url: '/api/admin/config', body: JSON.stringify({ values: { apiKey: 'sk-x' } }) })
+  assert.equal(unknown.res.state.status, 400)
+  assert.match(unknown.body.errors.join(''), /不支持修改 apiKey/, '界面不能写密钥')
+
+  const outOfRange = await call(handler, { method: 'PUT', url: '/api/admin/config', body: JSON.stringify({ values: { targetChars: 999999 } }) })
+  assert.equal(outOfRange.res.state.status, 400)
+  assert.match(outOfRange.body.errors.join(''), /targetChars/)
+})
+
+test('the balance endpoint reports provider state without blocking the status page', async () => {
+  const { handler } = fixture({
+    runCommand: async args => ({
+      code: 0,
+      stdout: JSON.stringify({ threshold: 5, balances: [{ provider: 'deepseek', total: 12.15 }, { provider: 'aliyun', configured: false }] }),
+      stderr: ''
+    })
+  })
+  const { res, body } = await call(handler, { url: '/api/admin/balance' })
+  assert.equal(res.state.status, 200)
+  assert.equal(body.ok, true)
+  assert.equal(body.balances.length, 2)
+})
+
 test('the admin API fails closed without a configured token', async () => {
   const { handler } = fixture()
   const req = fakeRequest({ url: '/api/admin/status' })
@@ -260,7 +331,11 @@ test('the console page is served without a token so the user can enter one', asy
   assert.equal(handled, true)
   assert.equal(res.state.status, 200)
   assert.match(res.state.headers['content-type'], /text\/html/)
-  assert.match(res.state.body, /课程闭环控制台/)
+  assert.match(res.state.body, /管理台/, '无令牌时也要能打开页面输入令牌')
+  assert.match(res.state.body, /data-tab="overview"/, '四个区在页面里（概览/课程/笔记/设置）')
+  assert.match(res.state.body, /data-tab="courses"/)
+  assert.match(res.state.body, /data-tab="notes"/)
+  assert.match(res.state.body, /data-tab="settings"/)
   assert.ok(!res.state.body.includes(TOKEN), '页面里不得内嵌令牌')
 })
 

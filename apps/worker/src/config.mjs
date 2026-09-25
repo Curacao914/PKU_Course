@@ -18,10 +18,27 @@ const SECRET_KEYS = [
 /** 新系统使用独立目录，与旧 worker 的 ~/.law-tech-course-worker 并存不冲突。 */
 export const DEFAULT_SCRATCH_ROOT = path.join(os.homedir(), '.course-worker')
 
+/**
+ * 管理台可以改的运行时配置（config.json）。
+ *
+ * 边界很清楚：**密钥永远只从环境变量来**（不接受界面写入），
+ * 这里只收"调参"这类可以随手改的东西。文件优先于环境变量——
+ * 界面改完立刻生效，不必去服务器上编辑 env。
+ */
+export function readRuntimeConfig(scratchRoot) {
+  const file = path.join(path.resolve(scratchRoot), 'config.json')
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'))
+  } catch {
+    return {}
+  }
+}
+
 export function resolveWorkerConfig(env = process.env, options = {}) {
   const scratchRoot = path.resolve(
     options.scratchRoot || env.COURSE_WORKER_SCRATCH_DIR || DEFAULT_SCRATCH_ROOT
   )
+  const runtime = readRuntimeConfig(scratchRoot)
   const profileDir = path.resolve(
     options.profileDir || env.COURSE_BROWSER_PROFILE_DIR || path.join(scratchRoot, 'browser-profile')
   )
@@ -43,10 +60,22 @@ export function resolveWorkerConfig(env = process.env, options = {}) {
     headless: (options.headless ?? env.COURSE_HEADLESS) !== '0',
     // 开始下载前的磁盘下限：一节课媒体有 1—2G 峰值，且 swap 与数据同盘，
     // 写满不只是下不了课，而是整机开始出问题。
-    minFreeBytes: Number(env.COURSE_WORKER_MIN_FREE_BYTES || DEFAULT_MIN_FREE_BYTES),
+    minFreeBytes: Number(runtime.minFreeBytes || env.COURSE_WORKER_MIN_FREE_BYTES || DEFAULT_MIN_FREE_BYTES),
     // 转写成功后是否保留原始媒体。默认删除：一节课 600MB—2GB，
     // 全部留着会很快吃满盘，而视频本来就在教学平台上，转录稿才是要留的东西。
-    keepMedia: env.COURSE_KEEP_MEDIA === '1',
+    keepMedia: runtime.keepMedia === true || env.COURSE_KEEP_MEDIA === '1',
+    // 笔记阶段的可调参数：命令行显式传的值优先，其次是界面里改的 config.json
+    notes: {
+      targetChars: Number(runtime.targetChars || 0) || 0,
+      writeUnits: Number(runtime.writeUnits || 0) || 0,
+      concurrency: Number(runtime.concurrency || 0) || 0,
+      reviewConcurrency: Number(runtime.reviewConcurrency || 0) || 0
+    },
+    // 成本窗口：界面里改的模式与时段
+    llm: {
+      mode: String(runtime.llmCostMode || env.COURSE_LLM_COST_MODE || 'economy'),
+      peakWindows: String(runtime.llmPeakWindows || env.COURSE_LLM_PEAK_WINDOWS || '')
+    },
     limits: resolveAcquisitionLimits(env),
     ai: {
       apiKey: env.COURSE_AI_API_KEY || env.SCHEDULE_AI_API_KEY || env.OPENAI_API_KEY || '',
@@ -73,7 +102,7 @@ export function resolveWorkerConfig(env = process.env, options = {}) {
       target: env.COURSE_WECHAT_TARGET || env.LAW_TECH_WECHAT_TARGET || '',
       publicUrl: env.COURSE_PUBLIC_URL || 'https://course.law-tech.dev',
       pollSeconds: Number(env.COURSE_NOTIFY_POLL_SECONDS || 30),
-      maxAttempts: Number(env.COURSE_NOTIFY_MAX_ATTEMPTS || 3)
+      maxAttempts: Number(runtime.notifyMaxAttempts || env.COURSE_NOTIFY_MAX_ATTEMPTS || 3)
     },
     asr: {
       entry: ASR_WORKER_ENTRY,

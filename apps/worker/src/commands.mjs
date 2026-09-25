@@ -400,10 +400,12 @@ export function createCommands(context) {
       ...(options.options['node-split-lines'] ? { nodeSplitLineThreshold: Number(options.options['node-split-lines']) } : {}),
       // 篇幅预算：整节课的目标字数（默认 15000，两小时与三小时课都够用）。
       // 不设预算时模型会一路写下去；调研里"大纲太长"与成绩负相关。
-      targetChars: Number(options.options['target-chars'] || 15000),
+      targetChars: Number(options.options['target-chars'] || config.notes?.targetChars || 15000),
       // 写作单元数：决定"分几次模型调用写完"，不影响模块结构。
       // 1 = 一次写完（模型按模块标题分段），2/3 = 分几次；不传则按模块数各写一次。
-      ...(options.options['write-units'] ? { writeUnits: Number(options.options['write-units']) } : {}),
+      ...(options.options['write-units'] || config.notes?.writeUnits
+        ? { writeUnits: Number(options.options['write-units'] || config.notes.writeUnits) }
+        : {}),
       // 目标节点数：1 = 整节课一个节点一次写完，2/3 = 粗切。
       // 指定目标节点数时，默认关闭"按体量再切分"——否则大纲给一个节点、程序又把它
       // 按 12000 字阈值切成十几个，等于没粗切。要保留再切分就显式给 --node-split-*。
@@ -421,7 +423,10 @@ export function createCommands(context) {
     // 到点不能写时**顺延**而不是失败——这是计划内的等待，账本按窗口开始时间重试。
     if (!options.options['ignore-cost-window']) {
       const decision = getCourseLlmWindowDecision({
-        schedule: normalizeCourseLlmSchedule({}, env),
+        schedule: normalizeCourseLlmSchedule({
+          mode: config.llm?.mode || 'economy',
+          peakWindows: config.llm?.peakWindows || undefined
+        }, env),
         now: clockNow()
       })
       if (!decision.allowed) {
@@ -480,8 +485,8 @@ export function createCommands(context) {
         autoApproveOutline,
         // 默认不设步数上限：终止由状态机负责（每节点最多重写两次、终审修订预算、空闲即停）。
         maxSteps: options.options['max-steps'] ? Number(options.options['max-steps']) : undefined,
-        reviewConcurrency: Number(options.options['review-concurrency'] || 2),
-        totalConcurrency: Number(options.options['concurrency'] || 3),
+        reviewConcurrency: Number(options.options['review-concurrency'] || config.notes?.reviewConcurrency || 2),
+        totalConcurrency: Number(options.options['concurrency'] || config.notes?.concurrency || 3),
         onEvent: step => stderr(`  [${step.index + 1}] ${step.taskType} → ${step.action || '-'} (${step.note})`),
         onState: saveState
       })

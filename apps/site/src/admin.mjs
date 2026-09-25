@@ -2,7 +2,9 @@ import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 
-import { addMaterial } from '@course/materials'
+import { addMaterial, listMaterials, unassignedDir } from '@course/materials'
+
+import { ADMIN_HTML } from './admin-page.mjs'
 import { readSiteIndex } from '@course/publish'
 import { openLedger } from '@course/store'
 
@@ -22,7 +24,49 @@ const AUTH_FAILURE_LIMIT = 5
 const AUTH_FAILURE_WINDOW_MS = 5 * 60 * 1000
 const DEFAULT_RUN_TIMEOUT_MS = 15 * 60 * 1000
 
-const ALLOWED_ACTIONS = new Set(['doctor', 'discover', 'cycle', 'notify', 'download', 'transcribe', 'notes', 'publish', 'status'])
+/**
+ * 允许管理台触发的动作——**白名单 + argv 数组**，永不拼 shell 字符串。
+ * 每个动作最终都落回与定时任务完全相同的那条 CLI 入口，因此不存在"界面上能做、
+ * 命令行里不能做"的岔路。
+ */
+const ALLOWED_ACTIONS = new Set([
+  'doctor', 'discover', 'cycle', 'notify', 'notify-retry', 'download', 'transcribe', 'notes', 'publish', 'status',
+  'retry', 'revise', 'republish', 'prune', 'backup', 'balance'
+])
+
+/** 可写配置的键与类型：表单能改的东西就是这些，别的只能改环境变量。 */
+export const EDITABLE_CONFIG = {
+  targetChars: { type: 'number', min: 3000, max: 60000, label: '单课目标字数', hint: '两小时课 15000 左右；超出 1.25 倍会告警' },
+  writeUnits: { type: 'number', min: 0, max: 20, label: '写作单元数', hint: '0 = 按模块各写一次；1 = 一次写完（模块结构不变）' },
+  concurrency: { type: 'number', min: 1, max: 6, label: '并发任务数' },
+  reviewConcurrency: { type: 'number', min: 1, max: 4, label: '并发审查数' },
+  llmCostMode: { type: 'string', enum: ['economy', 'standard', 'immediate'], label: '成本窗口模式', hint: 'economy = 避开高价时段，笔记顺延到低价窗口' },
+  llmPeakWindows: { type: 'string', label: '高价时段', hint: '形如 09:00-12:00,14:00-18:00（北京时间）' },
+  keepMedia: { type: 'boolean', label: '保留媒体原件', hint: '打开后 prune 不会删视频/音频' },
+  notifyMaxAttempts: { type: 'number', min: 1, max: 10, label: '通知最大重试次数' },
+  minFreeBytes: { type: 'number', min: 1_000_000_000, max: 50_000_000_000, label: '磁盘下限（字节）' }
+}
+
+export function validateConfigPatch(patch = {}) {
+  const clean = {}
+  const errors = []
+  for (const [key, value] of Object.entries(patch)) {
+    const spec = EDITABLE_CONFIG[key]
+    if (!spec) { errors.push(`不支持修改 ${key}`); continue }
+    if (spec.type === 'number') {
+      const num = Number(value)
+      if (!Number.isFinite(num) || num < spec.min || num > spec.max) { errors.push(`${key} 需要在 ${spec.min}—${spec.max} 之间`); continue }
+      clean[key] = Math.round(num)
+    } else if (spec.type === 'boolean') {
+      clean[key] = value === true || value === 'true' || value === 1 || value === '1'
+    } else {
+      const text = String(value ?? '').trim()
+      if (spec.enum && !spec.enum.includes(text)) { errors.push(`${key} 只能是 ${spec.enum.join(' / ')}`); continue }
+      clean[key] = text
+    }
+  }
+  return { clean, errors }
+}
 
 function sendJson(res, status, value, headers = {}) {
   const body = Buffer.from(`${JSON.stringify(value, null, 2)}\n`)
@@ -137,6 +181,55 @@ export function createAdminHandler({
     else failures.set(key, { at: entry.at, count: entry.count + 1 })
   }
 
+  /** 从课次产物里读出笔记模块列表（管理台要能"只重写某一个模块"）。 */
+  function readLessonState(task) {
+    const transcriptPath = task?.artifacts?.transcriptPath || ''
+    if (!transcriptPath) return null
+    const statePath = path.join(path.dirname(transcriptPath), 'lesson-state.json')
+    if (!fs.existsSync(statePath)) return null
+    try {
+      const state = JSON.parse(fs.readFileSync(statePath, 'utf8'))
+      const lesson = state.lesson || {}
+      return {
+        statePath,
+        outputDir: path.dirname(transcriptPath),
+        status: lesson.status || null,
+        finalChars: (lesson.finalNote?.markdown || '').length,
+        savedAt: state.savedAt || null,
+        modules: (lesson.nodes || []).map(node => ({
+          id: node.id,
+          title: node.title,
+          status: node.status,
+          chars: (node.draft || '').length,
+          revisions: Number(node.revisionCount || 0),
+          outlineNodeId: node.outlineNodeId
+        }))
+      }
+    } catch {
+      return null
+    }
+  }
+
+  /** 待办：需要人动手的三类事。管理台的第一屏就该回答"现在要我做什么"。 */
+  function collectTodos(tasks) {
+    const todos = { missingMaterials: [], stuck: [], failedDeliveries: 0 }
+    for (const task of tasks) {
+      if (task.stage === 'needs_attention') {
+        todos.stuck.push({
+          replayKey: task.replayKey, courseName: task.courseName, title: task.title,
+          stage: task.stage, attempts: task.attempts, lastError: task.lastError
+        })
+        continue
+      }
+      // 已经有转录稿但还没课件：说明马上要写笔记了，这时补课件最有用
+      const hasTranscript = Boolean(task.artifactsPath || task.hasTranscript)
+      if (hasTranscript && !task.materials.length) {
+        todos.missingMaterials.push({ replayKey: task.replayKey, courseName: task.courseName, title: task.title })
+      }
+    }
+    return todos
+  }
+
   function snapshot() {
     const status = {
       generatedAt: new Date(now()).toISOString(),
@@ -150,10 +243,13 @@ export function createAdminHandler({
     try {
       const store = openLedger(path.resolve(scratchRoot, 'ledger.sqlite'))
       try {
-        status.ledger = {
-          path: store.path,
-          stages: store.countTasks(),
-          tasks: store.listTasks({ limit: 20 }).map(task => ({
+        const rawTasks = store.listTasks({ limit: 60 })
+        const tasks = rawTasks.map(task => {
+          const artifacts = task.artifacts || {}
+          const materials = task.course_name && task.title
+            ? listMaterials({ root: materialsRoot, course: task.course_name, lesson: task.title, replayKey: task.replay_key })
+            : []
+          return {
             replayKey: task.replay_key,
             courseName: task.course_name,
             title: task.title,
@@ -161,12 +257,29 @@ export function createAdminHandler({
             attempts: task.attempts,
             lastError: task.last_error,
             nextAttemptAt: task.next_attempt_at,
-            updatedAt: task.updated_at
-          })),
-          deliveries: store.db.prepare(
-            'SELECT dedupe_key, purpose, status, attempts, sent_at, last_error FROM deliveries ORDER BY id DESC LIMIT 20'
-          ).all()
+            updatedAt: task.updated_at,
+            // 路径要露出来：管理台的"重写某模块 / 重新发布"都靠它定位产物
+            artifacts: {
+              transcriptPath: artifacts.transcriptPath || '',
+              notePath: artifacts.notePath || '',
+              slug: artifacts.slug || '',
+              mediaPath: artifacts.mediaPath || ''
+            },
+            hasTranscript: Boolean(artifacts.transcriptPath && fs.existsSync(artifacts.transcriptPath)),
+            materials: materials.map(item => ({ name: item.name, scope: item.scope, slideCount: item.slideCount, addedAt: item.addedAt })),
+            lesson: readLessonState(task)
+          }
+        })
+        status.ledger = {
+          path: store.path,
+          stages: store.countTasks(),
+          tasks,
+          deliveries: store.listDeliveries({ limit: 30 }),
+          deliveriesByStatus: store.countDeliveries()
         }
+        status.todos = collectTodos(tasks)
+        status.todos.failedDeliveries = Number(status.ledger.deliveriesByStatus.failed || 0)
+        status.todos.missingMaterials = status.todos.missingMaterials.filter(item => item.replayKey)
       } finally {
         store.close()
       }
@@ -217,9 +330,95 @@ export function createAdminHandler({
     })
   }
 
+  /** 动作 → argv。参数只做存在性与枚举校验，绝不拼接成 shell 命令。 */
+  function buildActionArgs(action, payload = {}) {
+    const need = (name) => {
+      const value = String(payload[name] ?? '').trim()
+      if (!value) throw new Error(`缺少参数 ${name}`)
+      return value
+    }
+    const base = [workerPath]
+    switch (action) {
+      case 'retry':
+        return [...base, 'retry', '--replay-key', need('replayKey'), ...(payload.stage ? ['--stage', String(payload.stage)] : [])]
+      case 'revise': {
+        const transcriptPath = need('transcriptPath')
+        if (!fs.existsSync(transcriptPath)) throw new Error('找不到该课次的转录稿，无法重写模块')
+        return [
+          ...base, 'notes',
+          '--transcript', transcriptPath,
+          '--course', need('course'),
+          '--lesson', need('lesson'),
+          '--output-dir', path.dirname(transcriptPath),
+          '--revise', need('module'),
+          '--request', need('request'),
+          // 手动触发就是"我现在就要"，不再等低价窗口（用户点了按钮就该动）
+          '--ignore-cost-window', '1'
+        ]
+      }
+      case 'republish': {
+        const transcriptPath = need('transcriptPath')
+        return [
+          ...base, 'publish',
+          '--from', path.dirname(transcriptPath),
+          '--course', need('course'),
+          '--lesson', need('lesson'),
+          ...(payload.replayKey ? ['--replay-key', String(payload.replayKey)] : [])
+        ]
+      }
+      case 'notify-retry':
+        return [...base, 'notify', '--retry-failed']
+      case 'prune':
+        return [...base, 'prune', ...(payload.apply ? ['--apply'] : [])]
+      case 'cycle':
+        return [...base, 'cycle', '--max-tasks', String(Number(payload.maxTasks) || 5), ...(payload.replayKey ? ['--replay-key', String(payload.replayKey)] : [])]
+      case 'backup': case 'balance': case 'doctor': case 'discover': case 'notify': case 'status':
+        return [...base, action]
+      default:
+        return [...base, action, ...(payload.replayKey ? ['--replay-key', String(payload.replayKey)] : []), ...(payload.course ? ['--course', String(payload.course)] : [])]
+    }
+  }
+
+  const configPath = () => path.join(scratchRoot, 'config.json')
+
+  function readConfigFile() {
+    const file = configPath()
+    if (!fs.existsSync(file)) return {}
+    try {
+      return JSON.parse(fs.readFileSync(file, 'utf8'))
+    } catch {
+      return {}
+    }
+  }
+
   async function handleApi(req, res, pathname, url) {
     if (pathname === `${ADMIN_PREFIX}status`) {
-      sendJson(res, 200, snapshot())
+      const snap = snapshot()
+      // _unassigned：收件箱里认不出归属的课件，等人指定
+      try {
+        const parked = unassignedDir(materialsRoot)
+        snap.unassigned = fs.existsSync(parked) ? fs.readdirSync(parked).filter(name => !name.startsWith('.')) : []
+      } catch {
+        snap.unassigned = []
+      }
+      sendJson(res, 200, snap)
+      return true
+    }
+
+    /**
+     * 余额单独一个接口。
+     *
+     * 不塞进 status 的原因有两个：它是外部网络调用（慢、可能失败），
+     * 而且它要起子进程——如果和"运行中"的手动任务挤在同一个 runCommand 上，
+     * 两边会互相等（实测：状态页把正在跑的 cycle 卡死）。
+     */
+    if (pathname === `${ADMIN_PREFIX}balance`) {
+      try {
+        const result = await runCommand([workerPath, 'balance'], { env: workerEnv, timeoutMs: 25_000 })
+        sendJson(res, 200, { ok: result.code === 0, ...(safeJson(result.stdout) || {}), stderr: String(result.stderr || '').slice(-500) })
+      } catch (error) {
+        sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : String(error) })
+      }
       return true
     }
 
@@ -307,10 +506,13 @@ export function createAdminHandler({
         return true
       }
 
-      const args = [workerPath, action === 'cycle' ? 'cycle' : action]
-      if (action === 'cycle') args.push('--max-tasks', String(payload.maxTasks || 5))
-      if (payload.replayKey) args.push('--replay-key', String(payload.replayKey))
-      if (payload.course) args.push('--course', String(payload.course))
+      let args
+      try {
+        args = buildActionArgs(action, payload)
+      } catch (error) {
+        sendJson(res, 400, { ok: false, error: 'bad_arguments', message: error instanceof Error ? error.message : String(error) })
+        return true
+      }
 
       running = { action, startedAt: new Date(now()).toISOString() }
       try {
@@ -329,6 +531,32 @@ export function createAdminHandler({
         running = null
       }
       return true
+    }
+
+    if (pathname === `${ADMIN_PREFIX}config`) {
+      if (req.method === 'GET') {
+        sendJson(res, 200, { ok: true, path: configPath(), values: readConfigFile(), editable: EDITABLE_CONFIG })
+        return true
+      }
+      if (req.method === 'PUT' || req.method === 'POST') {
+        let payload = {}
+        try {
+          payload = safeJson(await readBody(req)) || {}
+        } catch (error) {
+          sendJson(res, 400, { ok: false, error: 'bad_body', message: error.message })
+          return true
+        }
+        const { clean, errors } = validateConfigPatch(payload.values || payload || {})
+        if (errors.length) {
+          sendJson(res, 400, { ok: false, error: 'invalid_config', errors })
+          return true
+        }
+        const next = { ...readConfigFile(), ...clean, updatedAt: new Date(now()).toISOString() }
+        fs.mkdirSync(path.dirname(configPath()), { recursive: true })
+        fs.writeFileSync(configPath(), `${JSON.stringify(next, null, 2)}\n`)
+        sendJson(res, 200, { ok: true, values: next, applied: Object.keys(clean) })
+        return true
+      }
     }
 
     sendJson(res, 404, { ok: false, error: 'unknown_admin_route', path: pathname })
@@ -393,170 +621,5 @@ export function defaultRunCommand(args, { env = {}, timeoutMs = DEFAULT_RUN_TIME
   })
 }
 
-export const ADMIN_HTML = `<!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>课程闭环控制台</title>
-<style>
-:root { --paper:#fbfaf7; --ink:#16302b; --muted:#6b827c; --line:#dde5e1; --accent:#2f6f61; --warn:#9a5b2b; }
-* { box-sizing: border-box; }
-body { margin:0; background:var(--paper); color:var(--ink); font-family:-apple-system,"PingFang SC",system-ui,sans-serif; line-height:1.7; }
-.wrap { max-width:900px; margin:0 auto; padding:36px 20px 80px; }
-h1 { font-size:22px; margin:0 0 4px; }
-.sub { color:var(--muted); font-size:13px; margin-bottom:22px; }
-.panel { background:#fff; border:1px solid var(--line); border-radius:14px; padding:16px 18px; margin-bottom:16px; }
-.panel h2 { font-size:14px; letter-spacing:.08em; color:var(--muted); margin:0 0 10px; }
-.row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
-button { font:inherit; padding:7px 14px; border-radius:9px; border:1px solid var(--line); background:#fff; color:var(--ink); cursor:pointer; }
-button:hover { border-color:var(--accent); color:var(--accent); }
-button:disabled { opacity:.5; cursor:not-allowed; }
-input { font:inherit; padding:7px 10px; border-radius:9px; border:1px solid var(--line); min-width:240px; }
-pre { background:#f3f6f4; border-radius:10px; padding:12px; overflow:auto; max-height:340px; font-size:12px; }
-.pill { display:inline-block; padding:1px 8px; border-radius:999px; background:#f3f6f4; color:var(--muted); font-size:12px; margin-right:6px; }
-.warn { color:var(--warn); }
-table { width:100%; border-collapse:collapse; font-size:13px; }
-th,td { border-bottom:1px solid var(--line); padding:6px 8px; text-align:left; }
-</style>
-</head>
-<body>
-<div class="wrap">
-  <h1>课程闭环控制台</h1>
-  <div class="sub">course.law-tech.dev · 手动触发各环节并查看账本状态</div>
-
-  <div class="panel">
-    <h2>访问令牌</h2>
-    <div class="row">
-      <input id="token" type="password" placeholder="COURSE_ADMIN_TOKEN" autocomplete="off">
-      <button onclick="save()">保存</button>
-      <button onclick="load()">刷新状态</button>
-    </div>
-    <div class="sub" style="margin:8px 0 0">令牌只保存在本机浏览器；未配置令牌时接口一律返回 503。</div>
-  </div>
-
-  <div class="panel">
-    <h2>手动运行</h2>
-    <div class="row">
-      <button onclick="run('discover')">扫描教学网</button>
-      <button onclick="run('cycle', {maxTasks:5})">跑一轮完整链路</button>
-      <button onclick="run('notify')">投递通知</button>
-      <button onclick="run('doctor')">体检</button>
-    </div>
-  </div>
-
-  <div class="panel">
-    <h2>上传课件</h2>
-    <div class="sub">教学网上没有课件，课件只在你自己手里。传上来之后，笔记会用它对齐术语与结构；补传之后可以只重写受影响的模块。</div>
-    <div class="row"><label>课程 <select id="mCourse" onchange="fillLessons()"></select></label>
-      <label>课次 <select id="mLesson"></select></label></div>
-    <div class="row"><label>归属
-      <select id="mScope">
-        <option value="lesson">本课次</option>
-        <option value="course">全课程通用（术语表、大纲）</option>
-        <option value="shared">跨课次共用（上一讲的课件这讲接着用）</option>
-      </select></label>
-      <label id="mSharedWrap" style="display:none">适用的课次（可多选，Ctrl/⌘ 点选）<br><select id="mAppliesTo" multiple size="4"></select></label>
-    </div>
-    <div class="row"><input type="file" id="mFile" accept=".pptx,.ppt,.pdf">
-      <button onclick="upload()">上传并解析</button></div>
-    <pre id="mOut">（尚未上传）</pre>
-  </div>
-
-  <div id="status"></div>
-  <div class="panel"><h2>运行输出</h2><pre id="out">（尚未运行）</pre></div>
-</div>
-<script>
-const $ = id => document.getElementById(id)
-const key = 'course.admin.token'
-$('token').value = localStorage.getItem(key) || ''
-
-function save () { localStorage.setItem(key, $('token').value.trim()); load() }
-function headers () { return { 'x-course-token': $('token').value.trim(), 'content-type': 'application/json' } }
-
-async function load () {
-  $('status').innerHTML = '<div class="panel"><h2>状态</h2><div class="sub">加载中…</div></div>'
-  try {
-    const res = await fetch('/api/admin/status', { headers: headers() })
-    const data = await res.json()
-    if (!res.ok) { $('status').innerHTML = '<div class="panel"><h2>状态</h2><div class="warn">' + (data.error || res.status) + '</div></div>'; return }
-    $('status').innerHTML = render(data)
-    fillCourses(data)
-  } catch (e) {
-    $('status').innerHTML = '<div class="panel"><h2>状态</h2><div class="warn">' + e + '</div></div>'
-  }
-}
-
-function render (d) {
-  const stages = (d.ledger && d.ledger.stages || []).map(s => '<span class="pill">' + s.stage + ' ' + s.n + '</span>').join('') || '<span class="sub">账本为空</span>'
-  const tasks = (d.ledger && d.ledger.tasks || []).map(t =>
-    '<tr><td>' + esc(t.courseName) + '</td><td>' + esc(t.title) + '</td><td>' + t.stage + '</td><td>' + t.attempts + '</td><td>' + esc(t.lastError || '') + '</td></tr>').join('')
-  const deliveries = (d.ledger && d.ledger.deliveries || []).map(x =>
-    '<tr><td>' + esc(x.purpose) + '</td><td>' + x.status + '</td><td>' + x.attempts + '</td><td>' + esc(x.sent_at || '') + '</td></tr>').join('')
-  return '<div class="panel"><h2>账本</h2>' + stages +
-    '<table><tr><th>课程</th><th>课次</th><th>阶段</th><th>尝试</th><th>最近错误</th></tr>' + tasks + '</table></div>' +
-    '<div class="panel"><h2>通知投递</h2><table><tr><th>用途</th><th>状态</th><th>次数</th><th>发送时间</th></tr>' + deliveries + '</table></div>' +
-    '<div class="panel"><h2>站点</h2><div class="sub">已发布 ' + (d.site && d.site.count || 0) + ' 篇 · 生成于 ' + esc(d.site && d.site.generatedAt || '-') + '</div></div>'
-}
-
-function esc (v) { return String(v == null ? '' : v).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])) }
-
-// 课程与课次直接来自账本（发现过什么就有什么），所以上传时**不需要文件名约定**
-let ledgerTasks = []
-function fillCourses (data) {
-  ledgerTasks = (data.ledger && data.ledger.tasks) || []
-  const courses = [...new Set(ledgerTasks.map(t => t.courseName).filter(Boolean))]
-  const current = $('mCourse').value
-  $('mCourse').innerHTML = courses.map(c => '<option>' + esc(c) + '</option>').join('')
-  if (current && courses.includes(current)) $('mCourse').value = current
-  fillLessons()
-}
-function fillLessons () {
-  const course = $('mCourse').value
-  const lessons = ledgerTasks.filter(t => t.courseName === course).map(t => t.title).filter(Boolean)
-  $('mLesson').innerHTML = lessons.map(l => '<option>' + esc(l) + '</option>').join('')
-  $('mAppliesTo').innerHTML = lessons.map(l => '<option>' + esc(l) + '</option>').join('')
-}
-$('mScope').addEventListener('change', () => {
-  $('mSharedWrap').style.display = $('mScope').value === 'shared' ? '' : 'none'
-  $('mLesson').disabled = $('mScope').value === 'course'
-})
-
-async function upload () {
-  const file = $('mFile').files[0]
-  if (!file) { $('mOut').textContent = '先选一个 .pptx / .pdf 文件'; return }
-  const scope = $('mScope').value
-  const params = new URLSearchParams({
-    course: $('mCourse').value,
-    lesson: scope === 'course' ? '' : $('mLesson').value,
-    scope: scope === 'shared' ? 'lesson' : scope,
-    appliesTo: scope === 'shared' ? [...$('mAppliesTo').selectedOptions].map(o => o.value).join(',') : '',
-    name: file.name
-  })
-  $('mOut').textContent = '上传中…（' + file.name + '，' + Math.round(file.size / 1024) + ' KB）'
-  try {
-    const res = await fetch('/api/admin/materials?' + params.toString(), { method: 'PUT', headers: { 'x-course-token': $('token').value.trim() }, body: file })
-    const data = await res.json()
-    $('mOut').textContent = JSON.stringify(data, null, 2)
-  } catch (e) {
-    $('mOut').textContent = String(e)
-  }
-}
-
-async function run (action, extra) {
-  $('out').textContent = '运行中…（' + action + '）'
-  try {
-    const res = await fetch('/api/admin/run', { method: 'POST', headers: headers(), body: JSON.stringify(Object.assign({ action }, extra || {})) })
-    const data = await res.json()
-    $('out').textContent = JSON.stringify(data, null, 2)
-    load()
-  } catch (e) {
-    $('out').textContent = String(e)
-  }
-}
-
-load()
-</script>
-</body>
-</html>
-`
+// 页面在 admin-page.mjs 里：界面源码本来就长，混在 handler 里既难读也容易和转义打架
+export { ADMIN_HTML } from './admin-page.mjs'
