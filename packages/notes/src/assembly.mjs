@@ -778,11 +778,13 @@ export function buildFinalNoteMarkdown({ courseSpec = {}, lesson = {}, spliceDat
   if (timeline) parts.push('', timeline, '')
   parts.push('', renderKnowledgeLink(spliceData.knowledgeLink || {}, lesson), '', '***', '', renderMetaBlock(lesson.nodes || []))
 
-  return parts
+  // 最后一层归一：正文与接缝是两条来源（writer 与 splicer），流水线词可能从任何一条漏进来。
+  // 在合并之后统一过一遍，读者就绝不会看到"本节点"这种实现词。
+  return normalizePipelineWording(parts
     .filter((value, index, array) => value !== '' || array[index - 1] !== '')
     .join('\n')
     .replace(/\n{4,}/g, '\n\n\n')
-    .trim()
+    .trim())
 }
 
 /**
