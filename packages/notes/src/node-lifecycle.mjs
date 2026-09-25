@@ -261,7 +261,14 @@ export function groupWriteUnits(nodes = [], unitCount) {
 function mergeWriteUnit(group, index) {
   const first = group[0]
   const last = group.at(-1)
-  const moduleBriefs = group.map(node => ({
+  // 同一个大纲模块可能因体量被切成多段（多个 write node 共用一个 outlineNodeId）。
+  // 合并成一个写作单元时按大纲模块去重，否则拆分/拼装会把它当成两个模块、重复输出正文。
+  const seen = new Set()
+  const moduleBriefs = group.filter(node => {
+    if (seen.has(node.outlineNodeId)) return false
+    seen.add(node.outlineNodeId)
+    return true
+  }).map(node => ({
     outlineNodeId: node.outlineNodeId,
     title: node.title,
     lineRange: node.lineRange,
@@ -274,7 +281,7 @@ function mergeWriteUnit(group, index) {
     title: moduleBriefs.length === 1 ? first.title : moduleBriefs.map(item => item.title).join(' / '),
     kind: moduleBriefs.every(item => item.kind === moduleBriefs[0].kind) ? moduleBriefs[0].kind : 'content',
     outlineNodeId: first.outlineNodeId,
-    outlineNodeIds: group.map(node => node.outlineNodeId),
+    outlineNodeIds: moduleBriefs.map(item => item.outlineNodeId),
     moduleBriefs,
     lineRange: [first.lineRange[0], last.lineRange[1]],
     sourceText: group.map(node => node.sourceText).join('\n\n'),
@@ -429,9 +436,10 @@ export function splitWriteUnit(lesson, nodeId, {
 } = {}) {
   const node = (lesson.nodes || []).find(item => item.id === nodeId)
   if (!node) throw new Error(`节点不存在：${nodeId}`)
-  const ids = Array.isArray(node.outlineNodeIds) && node.outlineNodeIds.length
+  // 去重：大纲模块与写作节点不是一一对应（体量大时一个模块切成多段）
+  const ids = [...new Set(Array.isArray(node.outlineNodeIds) && node.outlineNodeIds.length
     ? node.outlineNodeIds
-    : [node.outlineNodeId]
+    : [node.outlineNodeId])]
   if (ids.length <= 1) return lesson
 
   const outlineById = new Map((lesson.outline || []).map(item => [item.id, item]))
