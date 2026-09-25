@@ -102,6 +102,9 @@ export async function runCli(argv = [], deps = {}) {
   const config = resolveWorkerConfig(env, { envFile: deps.envFile, ...(deps.configOverrides || {}) })
   const commands = createCommands({
     config,
+    // 环境与时钟都可注入：成本窗口判定依赖"现在几点"，测试不能跟着挂钟走。
+    env,
+    now: deps.now,
     acquire: deps.acquire ?? defaultAcquire,
     runPython: deps.runPython ?? defaultRunPython,
     which: deps.which ?? defaultWhich,

@@ -490,6 +490,21 @@ export async function executeCourseTask(task, options = {}) {
 
   if (['write-node', 'revise-node'].includes(task.type)) {
     const role = task.type === 'revise-node' ? 'revision' : 'writer'
+    // 篇幅预算：整节课一个目标字数，按模块数摊到每个模块。
+    // 不设预算时模型会一路写下去（实测一篇两小时的课写到 3.1 万字），
+    // 而"我的大纲太长"与成绩负相关——笔记该是提纲挈领，不是逐字实录。
+    const structure = task.node.writerBrief?.lessonStructure || []
+    const moduleCount = Math.max(1, structure.filter(item => (item.kind || 'content') === 'content').length || structure.length || 1)
+    const targetChars = Number(task.courseSpec?.targetChars || 0)
+    const perModule = targetChars > 0 ? Math.max(600, Math.round(targetChars / moduleCount)) : 0
+    const lengthBudget = perModule > 0
+      ? {
+        全课目标: `${targetChars} 字（共 ${moduleCount} 个正课模块）`,
+        本模块目标: `${perModule} 字`,
+        允许区间: `${Math.round(perModule * 0.75)}—${Math.round(perModule * 1.25)} 字`,
+        要求: '宁缺毋滥：写满要点即可，不要为凑字数重复、铺陈或把别节内容抄一遍；超出上限优先删冗余表述，不要删掉实质内容。'
+      }
+      : null
     const result = await callModel({
       config: modelConfig,
       role,
@@ -500,6 +515,7 @@ export async function executeCourseTask(task, options = {}) {
         lessonBlueprint: task.lessonBlueprint,
         writerBrief: {
           ...(task.node.writerBrief || {}),
+          ...(lengthBudget ? { lengthBudget } : {}),
           revisionRequests: task.node.revisionRequests || [],
           reviewerIssues: task.node.reviewerReports?.at?.(-1)?.value?.issues || []
         },

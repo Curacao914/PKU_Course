@@ -35,6 +35,9 @@ function harness(overrides = {}) {
   const ledger = openLedger(':memory:')
   const deps = {
     env: { ...SECRETS },
+    // 固定时钟：成本窗口按"现在几点"决定是否顺延，测试不能跟着挂钟走。
+    // 2026-09-25T00:30:00Z = 北京时间 08:30，在 09:00—12:00 峰段之前。
+    now: () => new Date('2026-09-25T00:30:00Z'),
     stdout: line => lines.push(String(line)),
     stderr: line => errors.push(String(line)),
     which: async command => {
@@ -76,6 +79,7 @@ const parse = line => JSON.parse(line)
 function fakeModel() {
   const calls = []
   let writerCount = 0
+  let revisionCount = 0
   const callModel = async ({ role }) => {
     calls.push(role)
     if (role === 'outline') {
@@ -100,6 +104,9 @@ function fakeModel() {
         decision: 'approve', coverage: 90, grounding: 90, logic: 90, detail: 90, sourceCoverage: 90,
         summary: '可靠', issues: []
       }, trace: { role } }
+    }
+    if (role === 'revision') {
+      return { parsed: { markdown: `修订后的第 ${++revisionCount} 段正文，补上了法条依据。` }, trace: { role } }
     }
     if (role === 'brief') {
       return { parsed: {
@@ -350,6 +357,64 @@ test('notes turns a transcript file into a completed note and a ledger stage', a
   const brief = JSON.parse(fs.readFileSync(summary.brief.path, 'utf8'))
   assert.ok(brief.briefing.length >= 60, '简报要有实质内容')
   assert.ok(brief.keyPoints.length >= 1, '简报要给出要点')
+})
+
+test('notes defers to the off-peak window instead of paying peak prices', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const transcriptPath = path.join(dir, 'raw-transcript.md')
+  fs.writeFileSync(transcriptPath, '[00:00:01 – 00:00:05] 内容')
+  const model = fakeModel()
+  // 北京时间 10:00：落在 09:00—12:00 峰段
+  const { deps, lines, ledger } = harness({ callModel: model.callModel, now: () => new Date('2026-09-25T02:00:00Z') })
+  ledger.discoverReplays([{ replay_key: 'replay-1', course_key: 'course-abc' }])
+  ledger.reportStage({ id: ledger.getTask('replay-1').id, stage: 'transcript_ready' })
+
+  const code = await runCli([
+    'notes', '--transcript', transcriptPath, '--course', '刑法分论', '--lesson', '第10-12节',
+    '--replay-key', 'replay-1', '--output-dir', path.join(dir, 'notes')
+  ], deps)
+
+  const payload = parse(lines.at(-1))
+  assert.equal(code, 0, '顺延是计划内的等待，不是失败')
+  assert.equal(payload.deferred, true)
+  assert.equal(payload.produced, false)
+  assert.equal(model.calls.length, 0, '峰段一次模型调用都不该发')
+  const task = ledger.getTask('replay-1')
+  assert.equal(task.stage, 'transcript_ready', '阶段不推进，等窗口开了再来')
+  assert.ok(task.next_attempt_at > '2026-09-25T02:00:00', '退避到低价窗口开始时间')
+})
+
+test('--revise rewrites only the named module and keeps the rest', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const transcriptPath = path.join(dir, 'raw-transcript.md')
+  fs.writeFileSync(transcriptPath, [
+    '# 刑法分论 · 第10-12节 · 原始课堂转录', '',
+    '[00:00:01 – 00:00:05] 第一句', '', '[00:00:06 – 00:00:10] 第二句'
+  ].join('\n'))
+  const outputDir = path.join(dir, 'notes')
+  const baseArgs = ['notes', '--transcript', transcriptPath, '--course', '刑法分论', '--lesson', '第10-12节', '--output-dir', outputDir]
+
+  const first = fakeModel()
+  const { deps, lines } = harness({ callModel: first.callModel })
+  assert.equal(await runCli(baseArgs, deps), 0, '第一次要跑完整流程')
+  const statePath = path.join(outputDir, 'lesson-state.json')
+  const stateBefore = JSON.parse(fs.readFileSync(statePath, 'utf8'))
+  assert.equal(stateBefore.lesson.nodes.length, 1)
+
+  // 第二次只重写被点名的模块
+  const second = fakeModel()
+  const code = await runCli([
+    ...baseArgs, '--revise', 'o1', '--request', '把法条依据补上'
+  ], { ...deps, callModel: second.callModel, stdout: line => lines.push(String(line)) })
+
+  const payload = parse(lines.at(-1))
+  assert.equal(code, 0)
+  assert.equal(payload.produced, true)
+  assert.ok(second.calls.includes('revision'), '走的是修订通道')
+  assert.ok(!second.calls.includes('outline'), '不重新切大纲')
+  const stateAfter = JSON.parse(fs.readFileSync(statePath, 'utf8'))
+  assert.equal(stateAfter.lesson.nodes.filter(node => node.revisionCount > 0).length, 1, '只有被点名的模块被重写')
+  assert.match(stateAfter.lesson.finalNote.markdown, /补上了法条依据/, '重新拼装后的成品包含修订内容')
 })
 
 test('notes stops at the outline gate in manual mode and records why', async () => {

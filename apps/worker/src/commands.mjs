@@ -4,7 +4,16 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { checkFreeSpace, createValidatedAcquisitionRuntime, formatBytes } from '@course/acquisition'
-import { callCourseModel, createInitialLesson, generateBrief, renderBriefMessage, runLessonNotes } from '@course/notes'
+import {
+  callCourseModel,
+  createInitialLesson,
+  generateBrief,
+  getCourseLlmWindowDecision,
+  normalizeCourseLlmSchedule,
+  renderBriefMessage,
+  requestNodeRevision,
+  runLessonNotes
+} from '@course/notes'
 import { createWechatSender, runDeliveryCycle } from '@course/notify'
 import { buildNoteRecord, readSiteIndex, writeSite } from '@course/publish'
 
@@ -46,8 +55,10 @@ export function createCommands(context) {
   const {
     config, acquire, runPython, which, openStore,
     callModel: injectedCallModel, sender: injectedSender, sleep = defaultSleep,
+    env = process.env, now,
     stdout, stderr
   } = context
+  const clockNow = () => (typeof now === 'function' ? now() : new Date())
 
   function defaultSleep(ms, signal) {
     return new Promise(resolve => {
@@ -240,8 +251,16 @@ export function createCommands(context) {
     // 每一步都把课次状态写成 JSON，崩了、超步数了、机器重启了都能从最近一步续跑；
     // 同时也是事后唯一能拿到的评审报告与节点草稿（笔记成品只保留最终稿）。
     const statePath = path.join(outputDir, 'lesson-state.json')
-    const resume = options.flags?.has('resume') && fs.existsSync(statePath)
-    const lesson = resume
+    // --revise：只重写指定模块，其余模块的既有草稿原样保留。
+    // 一节课的笔记动辄十几次模型调用，改一个模块却整篇重跑既慢又贵，
+    // 而且会把已经定稿的段落重新掷一次骰子。这里复用人工修订入口
+    // （requestNodeRevision），流水线只会重写被点名的模块。
+    const reviseTarget = String(options.options.revise || '').trim()
+    const resume = (Boolean(reviseTarget) || options.flags?.has('resume')) && fs.existsSync(statePath)
+    if (reviseTarget && !fs.existsSync(statePath)) {
+      throw new Error(`--revise 需要已有一次完整运行的中间状态：找不到 ${statePath}`)
+    }
+    let lesson = resume
       ? JSON.parse(fs.readFileSync(statePath, 'utf8')).lesson
       : createInitialLesson({
         key: replayKey || `lesson-${Date.now()}`,
@@ -249,6 +268,22 @@ export function createCommands(context) {
         transcript,
         blueprint: { mainLine: '' }
       })
+
+    if (reviseTarget) {
+      const request = String(options.options.request || '').trim()
+      if (!request) throw new Error('--revise 需要同时给 --request "<要改什么>"')
+      const wanted = reviseTarget.split(',').map(item => item.trim()).filter(Boolean)
+      const matched = (lesson.nodes || []).filter(node => {
+        const ids = [node.id, node.outlineNodeId, ...(node.outlineNodeIds || [])].filter(Boolean)
+        return ids.some(id => wanted.includes(id)) || wanted.some(item => String(node.title || '').includes(item))
+      })
+      if (!matched.length) {
+        const available = (lesson.nodes || []).map(node => `${node.id}${node.title ? `（${node.title}）` : ''}`).join('、')
+        throw new Error(`--revise 没匹配到模块：${reviseTarget}；可用的模块有：${available}`)
+      }
+      for (const node of matched) lesson = requestNodeRevision(lesson, node.id, request)
+      stderr(`只重写 ${matched.length} 个模块：${matched.map(node => node.id).join('、')}（其余模块的草稿保持不变）`)
+    }
     const saveState = (current, step) => {
       const payload = {
         schemaVersion: 1,
@@ -268,6 +303,9 @@ export function createCommands(context) {
       // 调大就是粗切，用于"切得细到底有没有必要"的对比实验。
       ...(options.options['node-split-chars'] ? { nodeSplitThreshold: Number(options.options['node-split-chars']) } : {}),
       ...(options.options['node-split-lines'] ? { nodeSplitLineThreshold: Number(options.options['node-split-lines']) } : {}),
+      // 篇幅预算：整节课的目标字数（默认 15000，两小时与三小时课都够用）。
+      // 不设预算时模型会一路写下去；调研里"大纲太长"与成绩负相关。
+      targetChars: Number(options.options['target-chars'] || 15000),
       // 写作单元数：决定"分几次模型调用写完"，不影响模块结构。
       // 1 = 一次写完（模型按模块标题分段），2/3 = 分几次；不传则按模块数各写一次。
       ...(options.options['write-units'] ? { writeUnits: Number(options.options['write-units']) } : {}),
@@ -282,6 +320,44 @@ export function createCommands(context) {
             : { nodeSplitThreshold: Number.MAX_SAFE_INTEGER, nodeSplitLineThreshold: Number.MAX_SAFE_INTEGER })
         }
         : {})
+    }
+
+    // 成本窗口：DeepSeek 有峰谷计价，写笔记（全是模型调用）安排在低价时段。
+    // 到点不能写时**顺延**而不是失败——这是计划内的等待，账本按窗口开始时间重试。
+    if (!options.options['ignore-cost-window']) {
+      const decision = getCourseLlmWindowDecision({
+        schedule: normalizeCourseLlmSchedule({}, env),
+        now: clockNow()
+      })
+      if (!decision.allowed) {
+        const nextAt = decision.nextAllowedAt
+        stderr(`当前处于高峰计价时段（${decision.activeWindow?.start}-${decision.activeWindow?.end} ${decision.timezone}），笔记写作顺延到 ${nextAt}`)
+        const deferredStore = openStore(config.ledgerPath)
+        try {
+          const deferredTask = replayKey ? deferredStore.getTask(replayKey) : null
+          if (deferredTask) {
+            deferredStore.reportStage({
+              id: deferredTask.id,
+              stage: deferredTask.stage,
+              message: '顺延到低价窗口',
+              nextAttemptAt: nextAt
+            })
+          }
+        } finally {
+          deferredStore.close()
+        }
+        emit({
+          course,
+          lesson: lessonTitle,
+          produced: false,
+          deferred: true,
+          reason: 'peak-price-window',
+          nextAllowedAt: nextAt,
+          nodeCount: 0,
+          finalChars: 0
+        }, options)
+        return 0
+      }
     }
 
     const store = openStore(config.ledgerPath)
@@ -686,6 +762,7 @@ export function createCommands(context) {
           // 这条链路里最贵的两步（写作、审查）都是模型调用，因此"跑一半停下"的代价
           // 由这两个旗标决定：步数上限要够走完最坏路径，中止后要能续跑。
           ...(options.options['max-steps'] ? { 'max-steps': options.options['max-steps'] } : {}),
+          ...(options.options['ignore-cost-window'] ? { 'ignore-cost-window': options.options['ignore-cost-window'] } : {}),
           ...(options.options['auto-approve-outline'] ? { 'auto-approve-outline': options.options['auto-approve-outline'] } : {})
         },
         publish: {
@@ -1033,12 +1110,14 @@ export const USAGE = `用法：course <命令> [选项]
              [--auto-approve-outline 0|1] [--max-steps <步数>] [--resume]
              [--concurrency <条数>] [--review-concurrency <条数>]
              [--node-split-chars <字数>] [--node-split-lines <行数>] [--outline-nodes <个数>]
-             [--write-units <次数>]
+             [--write-units <次数>] [--target-chars <字数>]
+             [--revise <模块 id 或标题>] [--request <修改要求>] [--ignore-cost-window 1]
                                            从转录稿生成单课笔记（大纲 → 节点 → 写作 → 审查 → 拼装 → 终审）
                                            每步把课次状态写入 <输出目录>/lesson-state.json；--resume 从该状态续跑
                                            默认不设步数上限；并发默认写 1 + 审 2（合计 3 条）
                                            模块结构由大纲决定（两小时课 5—8 个模块）；
-                                           --write-units 只决定分几次模型调用写完（1 = 一次写完）
+                                           --write-units 只决定分几次模型调用写完（1 = 一次写完）；
+                                           --revise 只重写指定模块（其余模块草稿保留），需配合 --request
   publish    --from <笔记目录> [--course <名称>] [--lesson <课次>] [--out <站点目录>] [--origin <域名>]
                                            把笔记发布到站点，内容变化时排入一条微信通知
   notify     [--probe] [--loop] [--max-items <条数>]
