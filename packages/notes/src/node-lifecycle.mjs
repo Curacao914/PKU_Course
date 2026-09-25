@@ -264,16 +264,27 @@ function mergeWriteUnit(group, index) {
   // 同一个大纲模块可能因体量被切成多段（多个 write node 共用一个 outlineNodeId）。
   // 合并成一个写作单元时按大纲模块去重，否则拆分/拼装会把它当成两个模块、重复输出正文。
   const seen = new Set()
-  const moduleBriefs = group.filter(node => {
+  const unique = group.filter(node => {
     if (seen.has(node.outlineNodeId)) return false
     seen.add(node.outlineNodeId)
     return true
-  }).map(node => ({
+  })
+  // 每个模块单独给字数预算：只给"整节课 15000"时，模型在写第 8 个模块时早就忘了总量，
+  // 逐模块把额度写在它自己的那一条上，才有约束力。
+  const onlyContent = unique.filter(node => (node.kind || 'content') === 'content')
+  const totalTarget = Number(first.writerBrief?.courseSpec?.targetChars || 0)
+  const perModule = totalTarget > 0 && onlyContent.length
+    ? Math.max(600, Math.round(totalTarget / onlyContent.length))
+    : 0
+  const moduleBriefs = unique.map(node => ({
     outlineNodeId: node.outlineNodeId,
     title: node.title,
     lineRange: node.lineRange,
     kind: node.kind || 'content',
-    goal: node.writerBrief?.currentNodeGoal || ''
+    goal: node.writerBrief?.currentNodeGoal || '',
+    ...(perModule && (node.kind || 'content') === 'content'
+      ? { budgetChars: `本模块约 ${perModule} 字（${Math.round(perModule * 0.85)}—${Math.round(perModule * 1.15)}）` }
+      : {})
   }))
   return {
     ...first,

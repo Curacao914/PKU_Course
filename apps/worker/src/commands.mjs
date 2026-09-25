@@ -44,6 +44,11 @@ function pruneRunHistory(runsDir, keep) {
   }
 }
 
+/** 成品正文字数（用于篇幅核对）。 */
+function summary0Chars(result) {
+  return String(result?.lesson?.finalNote?.markdown || '').length
+}
+
 /** 读 JSON 文件，坏了就返回 null（清理这类维护命令不该因为一个坏文件整轮失败）。 */
 function safeJsonFile(filePath) {
   try {
@@ -522,6 +527,13 @@ export function createCommands(context) {
         }
       }
 
+      // 篇幅如实核对（不做事后压缩——超了就说超了，让下一轮的要求更准）
+      const targetChars = courseSpec.targetChars || 15000
+      const overBudget = produced && summary0Chars(result) > Math.round(targetChars * 1.25)
+      if (overBudget) {
+        stderr(`警告：成品 ${summary0Chars(result)} 字，超过目标 ${targetChars} 字的 1.25 倍（不做事后压缩，如实记录）`)
+      }
+
       const metaCommentary = result.lesson.finalNote?.assembly?.metaCommentary?.count || 0
       if (metaCommentary) {
         stderr(`警告：成品笔记里有 ${metaCommentary} 处"写作过程"的话（本节点/写作目标/待补写…），不该出现在交付物里`)
@@ -532,6 +544,8 @@ export function createCommands(context) {
         lesson: lessonTitle,
         status: result.lesson.status,
         metaCommentary,
+        targetChars,
+        overBudget,
         stopReason: result.stopReason,
         idleReason: result.idleDetail?.reason || null,
         nodeCount: result.lesson.nodes.length,

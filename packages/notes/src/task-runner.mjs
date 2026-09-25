@@ -512,10 +512,14 @@ export async function executeCourseTask(task, options = {}) {
     const perModule = targetChars > 0 ? Math.max(600, Math.round(targetChars / moduleCount)) : 0
     const lengthBudget = perModule > 0
       ? {
-        全课目标: `${targetChars} 字（共 ${moduleCount} 个正课模块）`,
-        本模块目标: `${perModule} 字`,
-        允许区间: `${Math.round(perModule * 0.75)}—${Math.round(perModule * 1.25)} 字`,
-        要求: '宁缺毋滥：写满要点即可，不要为凑字数重复、铺陈或把别节内容抄一遍；超出上限优先删冗余表述，不要删掉实质内容。'
+        全课总量: `${targetChars} 字（${Math.round(targetChars * 0.9)}—${Math.round(targetChars * 1.1)} 字）`,
+        每模块额度: `${perModule} 字，见 moduleBriefs[].budgetChars`,
+        合计核对: `写完每个模块立刻核对它的额度；全部写完时总量应当落在 ${Math.round(targetChars * 0.9)}—${Math.round(targetChars * 1.1)} 字`,
+        要求: [
+          '宁缺毋滥：写满要点即可，不要为凑字数重复、铺陈或把别节内容抄一遍。',
+          '超出额度时先删铺垫与重复表述，不要删掉案例论证意义、法条要件与教师立场。',
+          '不要靠后面的模块补前面欠的账，也不要因为"内容多"就整体膨胀。'
+        ].join('')
       }
       : null
     const result = await callModel({
