@@ -403,9 +403,10 @@ export function createCommands(context) {
       targetChars: Number(options.options['target-chars'] || config.notes?.targetChars || 15000),
       // 写作单元数：决定"分几次模型调用写完"，不影响模块结构。
       // 1 = 一次写完（模型按模块标题分段），2/3 = 分几次；不传则按模块数各写一次。
-      ...(options.options['write-units'] || config.notes?.writeUnits
-        ? { writeUnits: Number(options.options['write-units'] || config.notes.writeUnits) }
-        : {}),
+      // 写作单元默认 1：一次调用写完整节课（模块结构由大纲决定，不受影响）。
+      // 切成多个单元时每个单元都会各自"收尾"，实测一节课被切成 11 个单元后成品写到 3.3 万字；
+      // 单次生成还有上下文连贯的好处。需要分次时用 --write-units 显式指定。
+      writeUnits: Number(options.options['write-units'] || config.notes?.writeUnits || 1),
       // 目标节点数：1 = 整节课一个节点一次写完，2/3 = 粗切。
       // 指定目标节点数时，默认关闭"按体量再切分"——否则大纲给一个节点、程序又把它
       // 按 12000 字阈值切成十几个，等于没粗切。要保留再切分就显式给 --node-split-*。
@@ -1674,7 +1675,7 @@ export const USAGE = `用法：course <命令> [选项]
              [--auto-approve-outline 0|1] [--max-steps <步数>] [--resume]
              [--concurrency <条数>] [--review-concurrency <条数>]
              [--node-split-chars <字数>] [--node-split-lines <行数>] [--outline-nodes <个数>]
-             [--write-units <次数>] [--target-chars <字数>]
+             [--write-units <次数>（默认 1：一次写完）] [--target-chars <字数>]
              [--revise <模块 id 或标题>] [--request <修改要求>] [--ignore-cost-window 1]
                                            从转录稿生成单课笔记（大纲 → 节点 → 写作 → 审查 → 拼装 → 终审）
                                            每步把课次状态写入 <输出目录>/lesson-state.json；--resume 从该状态续跑

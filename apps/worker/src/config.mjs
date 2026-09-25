@@ -67,6 +67,7 @@ export function resolveWorkerConfig(env = process.env, options = {}) {
     // 笔记阶段的可调参数：命令行显式传的值优先，其次是界面里改的 config.json
     notes: {
       targetChars: Number(runtime.targetChars || 0) || 0,
+      // 0 表示"未配置"，由命令侧回落到默认值 1（单次生成）
       writeUnits: Number(runtime.writeUnits || 0) || 0,
       concurrency: Number(runtime.concurrency || 0) || 0,
       reviewConcurrency: Number(runtime.reviewConcurrency || 0) || 0

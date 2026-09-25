@@ -45,6 +45,23 @@ export const SITE_CSS = `
   --rail-w: 236px;
   --measure: 38em;            /* 约 38 个汉字一行：西文 65ch 的等效体验 */
   --header-h: 52px;
+  --font-scale: 1;            /* 阅读字号倍率，由页面上的 A- / A+ 控制 */
+  --topbar-bg: rgba(255, 255, 255, .86);
+  --card-bg: #ffffff;
+}
+/* 深色：默认仍是浅色（浅色在小字号与正常视力下阅读表现更好），
+   深色是给夜间阅读的开关，选择记在本地。 */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #14171a; --bg-soft: #1b1f23; --bg-sunken: #22272c;
+  --ink: #e8eaed; --ink-soft: #c3c9d0; --muted: #8b939c;
+  --line: #2a2f34; --line-strong: #3a4046;
+  --accent: #79b8a8; --accent-ink: #9ccfc2; --accent-soft: #1d2b28;
+  --warn: #d9a05b; --warn-soft: #2a2318; --danger: #d97b7b; --danger-soft: #2b1c1c; --ok: #6dbb8e;
+  --topbar-bg: rgba(20, 23, 26, .88);
+  --card-bg: #1b1f23;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, .4);
+  --shadow-md: 0 10px 30px -18px rgba(0, 0, 0, .8);
 }
 * { box-sizing: border-box; }
 html { scroll-behavior: smooth; }
@@ -59,7 +76,7 @@ a:hover { color: var(--accent-ink); }
 ::selection { background: var(--accent-soft); }
 
 /* ── 顶部条：一条、薄、粘性；不与左栏目录争抢注意力 ── */
-.topbar { position: sticky; top: 0; z-index: 40; height: var(--header-h); background: rgba(255,255,255,.86);
+.topbar { position: sticky; top: 0; z-index: 40; height: var(--header-h); background: var(--topbar-bg);
   backdrop-filter: saturate(180%) blur(12px); border-bottom: 1px solid var(--line); }
 .topbar .inner { max-width: 1140px; margin: 0 auto; padding: 0 24px; height: 100%;
   display: flex; align-items: center; gap: 20px; }
@@ -91,6 +108,15 @@ a:hover { color: var(--accent-ink); }
   font-size: 13px; color: var(--muted); display: flex; flex-direction: column; gap: 8px; }
 .rail .rail-extra .prevnext { display: flex; flex-direction: column; gap: 6px; }
 .rail .rail-extra .prevnext a { color: var(--ink-soft); }
+/* 阅读控制：字号 / 主题 / 继续上次阅读。放在左栏底部，不抢正文注意力 */
+.rail-controls { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.rail-controls button { font: inherit; font-size: 13px; padding: 4px 9px; border-radius: 8px;
+  border: 1px solid var(--line-strong); background: var(--bg); color: var(--ink-soft); cursor: pointer; }
+.rail-controls button:hover { border-color: var(--accent); color: var(--accent-ink); }
+.resume { display: inline-flex; align-items: center; gap: 8px; margin: 0 0 20px; padding: 8px 14px;
+  border-radius: 999px; background: var(--accent-soft); border: 1px solid var(--line); color: var(--accent-ink);
+  font-family: var(--sans); font-size: 14px; cursor: pointer; }
+.resume:hover { border-color: var(--accent); }
 .rail-toggle { display: none; }
 @media (max-width: 980px) {
   .shell { grid-template-columns: minmax(0, 1fr); gap: 18px; padding: 22px 18px 96px; }
@@ -112,7 +138,7 @@ header.site h1 { margin: 8px 0 0; font-size: 32px; line-height: 1.25; font-weigh
   background: var(--bg-soft); border: 1px solid var(--line); color: var(--ink-soft); font-size: 13px; }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
 .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.danger { background: var(--danger); }
-article { font-family: var(--serif); font-size: 18px; line-height: 1.85; }
+article { font-family: var(--serif); font-size: calc(18px * var(--font-scale)); line-height: 1.85; }
 article h1, article h2, article h3, article h4 { font-family: var(--sans); letter-spacing: -.01em; }
 article h1 { font-size: 28px; margin: 0 0 8px; }
 article h2 { font-size: 21px; line-height: 1.35; margin: 44px 0 14px; padding-top: 14px;
@@ -174,7 +200,7 @@ details.note-meta { margin-top: 50px; font-family: var(--sans); color: var(--mut
 details.note-meta pre { background: var(--bg-soft); border-radius: var(--radius); padding: 12px 14px; overflow-x: auto; }
 
 /* ── 卡片（首页、课程页） ── */
-.card { display: block; padding: 20px 22px; margin: 12px 0; background: var(--bg);
+.card { display: block; padding: 20px 22px; margin: 12px 0; background: var(--card-bg);
   border: 1px solid var(--line); border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); }
 .card:hover { border-color: var(--line-strong); box-shadow: var(--shadow-md); }
 .card h3 { margin: 0 0 6px; font-size: 17px; color: var(--ink); }
@@ -426,6 +452,60 @@ const NOTE_SCRIPT = `<script>
   onScroll();
   if (top) top.addEventListener('click', function () { window.scrollTo({ top: 0, behavior: 'smooth' }) });
 
+  // ── 阅读控制：字号、深色、位置记忆 ──
+  var root = document.documentElement
+  var FONT_KEY = 'course.fontScale'
+  var THEME_KEY = 'course.theme'
+  var POS_KEY = 'course.readPos:' + location.pathname
+
+  function applyFont (scale) {
+    var value = Math.min(1.4, Math.max(0.85, scale || 1))
+    root.style.setProperty('--font-scale', String(value))
+    try { localStorage.setItem(FONT_KEY, String(value)) } catch (e) {}
+  }
+  function applyTheme (theme) {
+    var dark = theme === 'dark'
+    root.setAttribute('data-theme', dark ? 'dark' : 'light')
+    var toggle = document.getElementById('themeToggle')
+    if (toggle) toggle.textContent = dark ? '浅色' : '深色'
+    try { localStorage.setItem(THEME_KEY, dark ? 'dark' : 'light') } catch (e) {}
+  }
+  try {
+    applyFont(parseFloat(localStorage.getItem(FONT_KEY) || '1'))
+    applyTheme(localStorage.getItem(THEME_KEY) || 'light')
+  } catch (e) { applyFont(1); applyTheme('light') }
+
+  document.addEventListener('click', function (event) {
+    var btn = event.target.closest('[data-read]')
+    if (!btn) return
+    var action = btn.dataset.read
+    var current = parseFloat(root.style.getPropertyValue('--font-scale') || '1') || 1
+    if (action === 'font-up') applyFont(current + 0.1)
+    if (action === 'font-down') applyFont(current - 0.1)
+    if (action === 'theme') applyTheme(root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark')
+  })
+
+  // 位置记忆：记住读到哪一小节，回来时给一个"继续"入口
+  var resume = document.getElementById('resume')
+  var saved = null
+  try { saved = localStorage.getItem(POS_KEY) } catch (e) {}
+  if (resume && saved && links.has(saved)) {
+    var target = links.get(saved)
+    resume.hidden = false
+    resume.textContent = '继续上次阅读：' + target.textContent
+    resume.addEventListener('click', function () {
+      var node = document.getElementById(saved)
+      if (node) node.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    })
+  }
+  var lastSaved = ''
+  setInterval(function () {
+    var active = document.querySelector('.rail nav.toc a.active')
+    if (!active || active.hash.slice(1) === lastSaved) return
+    lastSaved = active.hash.slice(1)
+    try { localStorage.setItem(POS_KEY, lastSaved) } catch (e) {}
+  }, 1500)
+
   // 小节锚点：悬停显示 #，点一下把「页面地址 + 小节」复制到剪贴板
   headings.forEach(function (h) {
     var a = document.createElement('a');
@@ -474,7 +554,13 @@ export function renderNotePage(record, { siteOrigin = '', neighbours = {} } = {}
 
   const railExtra = [
     neighbours.previous ? `<div class="prevnext"><span>上一讲</span><a href="${escapeHtml(neighbours.previous.slug)}.html">${escapeHtml(neighbours.previous.lessonTitle)}</a></div>` : '',
-    neighbours.next ? `<div class="prevnext"><span>下一讲</span><a href="${escapeHtml(neighbours.next.slug)}.html">${escapeHtml(neighbours.next.lessonTitle)}</a></div>` : ''
+    neighbours.next ? `<div class="prevnext"><span>下一讲</span><a href="${escapeHtml(neighbours.next.slug)}.html">${escapeHtml(neighbours.next.lessonTitle)}</a></div>` : '',
+    // 读长文真正会用到的三个开关：字号、深浅、位置。都记在本地，不需要账号。
+    `<div class="rail-controls">
+      <button type="button" data-read="font-down" aria-label="缩小字号">A−</button>
+      <button type="button" data-read="font-up" aria-label="放大字号">A+</button>
+      <button type="button" data-read="theme" id="themeToggle">深色</button>
+    </div>`
   ].filter(Boolean).join('')
 
   return pageShell({
@@ -497,6 +583,8 @@ export function renderNotePage(record, { siteOrigin = '', neighbours = {} } = {}
       meta ? `<div class="meta">${meta}</div>` : '',
       '</header>',
       '<article>',
+      // 位置记忆：进来时给一个"继续上次阅读"的入口，点了才滚（自动滚会让人失去方位感）
+      '<button class="resume" id="resume" type="button" hidden></button>',
       record.brief?.briefing ? renderBriefBlock(record.brief) : '',
       renderMarkdown(record.markdown),
       '</article>',

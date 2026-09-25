@@ -93,6 +93,20 @@ test('the mermaid loader only ships on pages that actually contain a diagram', (
   assert.ok(withDiagram.includes('language-mermaid'), '渲染器仍输出原始代码块，供脚本接管')
 })
 
+test('the note page ships reading controls that work without an account', () => {
+  // 字号、深浅、位置记忆都只依赖浏览器本地存储——个人笔记站不该为这三件小事引入登录
+  const html = renderNotePage(record({ markdown: NOTE }))
+  assert.match(html, /data-read="font-up"/)
+  assert.match(html, /data-read="font-down"/)
+  assert.match(html, /data-read="theme"/)
+  assert.match(html, /id="resume"/, '位置记忆的入口要存在（有没有历史由脚本决定）')
+  assert.match(html, /course\.readPos:/, '位置按页面路径分别记录')
+  assert.match(html, /--font-scale/, '字号要真的驱动正文尺寸，而不是只改一个没人用的变量')
+  assert.match(html, /calc\(18px \* var\(--font-scale\)\)/)
+  assert.match(html, /:root\[data-theme="dark"\]/, '深色是一套完整的令牌覆盖，不是局部反色')
+  assert.match(html, /prefers-color-scheme|浅色/, '默认仍是浅色，深色是可选项')
+})
+
 test('the index groups by course and lists newest first', () => {
   const html = renderIndexPage([
     record({ lessonTitle: '第1-2节', publishedAt: '2026-09-01T00:00:00.000Z' }),
