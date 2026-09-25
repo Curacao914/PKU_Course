@@ -98,6 +98,7 @@ export {
   normalizeReviewReport,
   normalizedReviewDecision,
   planNodes,
+  pptForRange,
   recordNodeTaskFailure,
   requestNodeRevision,
   saveFinalNoteRevision,

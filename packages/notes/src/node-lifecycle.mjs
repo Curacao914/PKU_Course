@@ -145,7 +145,7 @@ function linesForRange(transcript, range = []) {
     .join('\n')
 }
 
-function pptForRange(pptText = [], range = []) {
+export function pptForRange(pptText = [], range = []) {
   const [start = 1, end = start] = range
   return (pptText || [])
     .flatMap(deck => deck.slides?.length ? deck.slides : [{ slideNumber: 1, text: deck.markdown }])

@@ -11,6 +11,7 @@ import {
   generateBrief,
   getCourseLlmWindowDecision,
   normalizeCourseLlmSchedule,
+  pptForRange,
   renderBriefMessage,
   requestNodeRevision,
   runLessonNotes
@@ -323,6 +324,20 @@ export function createCommands(context) {
       if (!matched.length) {
         const available = (lesson.nodes || []).map(node => `${node.id}${node.title ? `（${node.title}）` : ''}`).join('、')
         throw new Error(`--revise 没匹配到模块：${reviseTarget}；可用的模块有：${available}`)
+      }
+      // 补齐课件之后再重写时，把课件接进现有课次：否则"上课件改笔记"只是句空话。
+      // 节点按各自大纲条的 slideRange 取对应页（与首次写作同一套规则）。
+      if (decks.length) {
+        const outlineById = new Map((lesson.outline || []).map(item => [item.id, item]))
+        lesson = {
+          ...lesson,
+          pptText: decks,
+          nodes: (lesson.nodes || []).map(node => ({
+            ...node,
+            pptText: pptForRange(decks, outlineById.get(node.outlineNodeId)?.slideRange || [])
+          }))
+        }
+        stderr(`已把 ${decks.length} 份课件接入本次重写`)
       }
       for (const node of matched) lesson = requestNodeRevision(lesson, node.id, request)
       stderr(`只重写 ${matched.length} 个模块：${matched.map(node => node.id).join('、')}（其余模块的草稿保持不变）`)
