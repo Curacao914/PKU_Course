@@ -31,6 +31,10 @@ export function resolveWorkerConfig(env = process.env, options = {}) {
     scratchRoot,
     profileDir,
     mediaRoot: path.join(scratchRoot, 'replays'),
+    // 课件（PPT）归档与收件箱。教学网上没有课件，只能由用户上传；
+    // 收件箱是"拖文件进去"的入口，materials 命令按 课程__课次.pptx 命名归档。
+    materialsRoot: options.materialsRoot || env.COURSE_MATERIALS_DIR || path.join(scratchRoot, 'materials'),
+    inboxRoot: options.inboxRoot || env.COURSE_INBOX_DIR || path.join(scratchRoot, 'inbox'),
     ledgerPath: options.ledgerPath || env.COURSE_LEDGER_PATH || path.join(scratchRoot, 'ledger.sqlite'),
     chromePath: options.chromePath || env.COURSE_CHROME_PATH || '',
     python: options.python || env.COURSE_PYTHON || 'python3',

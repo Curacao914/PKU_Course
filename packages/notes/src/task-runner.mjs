@@ -135,6 +135,16 @@ export function validateSpliceData(value) {
  * 关键点：节点正文**不**提供给接缝模型——正文已逐一审查通过，接缝模型没有机会
  * 改写、压缩或重述它们。它只看到标题与"此处由程序机械拼接"的说明。
  */
+/** 课件摘要：给接缝模型做术语/ASR 对照用，每页一句、截断，不塞全文。 */
+export function summarizeDecks(pptText = []) {
+  const decks = Array.isArray(pptText) ? pptText : []
+  return decks.map(deck => [
+    `## 课件：${cleanText(deck?.name) || '未命名'}`,
+    ...(deck?.slides || []).slice(0, 80).map(slide =>
+      `第 ${slide.slideNumber} 页：${cleanText(slide.text).replace(/\n+/g, ' / ').slice(0, 200)}`)
+  ].join('\n')).join('\n\n')
+}
+
 export function splicePlaceholderContext(lesson = {}) {
   const outline = lesson.outline || []
   const byOutline = new Map(outline.map(node => [node.id, []]))
@@ -340,6 +350,8 @@ export async function executeCourseTask(task, options = {}) {
           })),
           instruction: [
             '只生成接缝段与体系层，不得改写或概括替代任何节点正文。',
+            // 系统层没有预算时会把整段解释塞进索引表格，成品直接翻倍（实测 7,460 字的复习层）。
+            `体系层与接缝段合计控制在 ${Number(task.courseSpec?.systemLayerChars || 2500)} 字以内：索引表格每格不超过 40 字、每张表不超过 12 行；章节总结 2—3 句；自测题 3—5 题、答案控制在 2 句以内。`,
             'sectionSummaries 与 sectionQuizzes 的键必须使用上述 outline id；threads[].sections 必须使用上述 outline id。',
             '知识地图用 Mermaid 的 flowchart：节点是本课的核心概念或环节，边表示"先有 A 才能理解 B"这样的依赖关系；不要写装饰性的话，不要用 sequenceDiagram。',
             '体系线索是本节要交付的重点：把散在各节里的同一条论证线串起来（例如"同一条主线在不同小节各推进一步"），3—5 条。',
@@ -356,7 +368,8 @@ export async function executeCourseTask(task, options = {}) {
           }))
         },
         sourceText: splicePlaceholderContext(task.lesson),
-        pptText: '',
+        // 课件摘要：术语与结构对照的依据。只给每页文字并截断，避免把接缝上下文挤掉。
+        pptText: summarizeDecks(task.lesson.pptText),
         schema: {
           courseOverview: { coreQuestions: ['string'], shouldBeAbleTo: ['string'], lectureThread: 'string' },
           systemLayer: {

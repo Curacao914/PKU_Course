@@ -38,8 +38,16 @@ function lessonFixture() {
       { id: 'o2', title: '二、罪数判断', rationale: '把前面的结论用到罪数问题上' }
     ],
     nodes: [
-      approvedNode('n1', 'o1', '共犯的成立需要共同故意与共同行为。'),
-      approvedNode('n2', 'o2', '罪数的判断以行为个数与法益侵害为基础。')
+      // 节点带元数据：索引表与复习层靠它建（没有元数据时复习层就该是空的，不是缺陷）
+      approvedNode('n1', 'o1', '共犯的成立需要共同故意与共同行为。', {
+        concepts: ['共同故意', '共同行为'],
+        statutes: ['《刑法》第25条'],
+        cases: ['甲、乙共同伤害案']
+      }),
+      approvedNode('n2', 'o2', '罪数的判断以行为个数与法益侵害为基础。', {
+        concepts: ['罪数'],
+        statutes: ['《刑法》第69条']
+      })
     ],
     finalNoteVersions: []
   }

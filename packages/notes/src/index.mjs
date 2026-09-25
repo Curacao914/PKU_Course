@@ -76,6 +76,7 @@ export {
   mergeAndCoverOutline,
   numberTranscript,
   splicePlaceholderContext,
+  summarizeDecks,
   transcriptLines,
   validateMarkdown,
   validateOutline,

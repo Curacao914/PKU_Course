@@ -481,6 +481,12 @@ export function renderPitfalls(systemLayer = {}) {
  * 复习时需要的不是"再读一遍全文"，而是"按名字找到它在哪、要点是什么"。
  * 模型没给说明时也要保留名字（索引本身就有价值），说明列留空而不是编造。
  */
+/** 表格单元格限长：不做限制时模型会把整段解释塞进表格，复习层就变成第二份正文。 */
+const cell = (value, max = 48) => {
+  const text = spliceString(value)
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text
+}
+
 export function renderIndexTables(indexTables = {}, lesson = {}) {
   const fallback = (type) => {
     const seen = new Set()
@@ -499,15 +505,15 @@ export function renderIndexTables(indexTables = {}, lesson = {}) {
   const sections = []
   if (concepts.length) {
     sections.push(['### 概念索引', '', '| 概念 | 出现位置 | 一句话解释 | 易混点 |', '|------|---------|-----------|--------|',
-      ...concepts.map(item => `| ${spliceString(item.term || item.name)} | ${spliceString(item.where || item.section)} | ${spliceString(item.definition)} | ${spliceString(item.confusion || item.pitfall)} |`)].join('\n'))
+      ...concepts.map(item => `| ${cell(item.term || item.name, 24)} | ${cell(item.where || item.section, 24)} | ${cell(item.definition)} | ${cell(item.confusion || item.pitfall)} |`)].join('\n'))
   }
   if (statutes.length) {
     sections.push(['### 法条索引', '', '| 法律·条号 | 核心规定 | 适用条件 | 与本课的关系 |', '|-----------|---------|---------|-------------|',
-      ...statutes.map(item => `| ${spliceString(item.name || item.provision)} | ${spliceString(item.rule || item.content)} | ${spliceString(item.condition)} | ${spliceString(item.relation)} |`)].join('\n'))
+      ...statutes.map(item => `| ${cell(item.name || item.provision, 30)} | ${cell(item.rule || item.content)} | ${cell(item.condition)} | ${cell(item.relation)} |`)].join('\n'))
   }
   if (cases.length) {
     sections.push(['### 案例索引', '', '| 案例 | 争点 | 结论与规则适用 | 老师的评价 |', '|------|------|---------------|-----------|',
-      ...cases.map(item => `| ${spliceString(item.name || item.case)} | ${spliceString(item.issue)} | ${spliceString(item.holding || item.rule)} | ${spliceString(item.teacherView || item.comment)} |`)].join('\n'))
+      ...cases.map(item => `| ${cell(item.name || item.case, 30)} | ${cell(item.issue)} | ${cell(item.holding || item.rule)} | ${cell(item.teacherView || item.comment)} |`)].join('\n'))
   }
   const corrections = (indexTables.asrCorrections || []).filter(Boolean)
   if (corrections.length) {
@@ -706,8 +712,9 @@ export function buildFinalNoteMarkdown({ courseSpec = {}, lesson = {}, spliceDat
   // 检索层：先给索引表，再给易错点与辨析。复习时按名字找，不用重读全文。
   const indexTables = renderIndexTables(spliceData.indexTables || {}, lesson)
   const pitfalls = renderPitfalls(systemLayer)
-  const quizOverview = renderQuizOverview(quizzes, lesson)
-  const reviewBlocks = [indexTables, pitfalls, quizOverview].filter(Boolean)
+  // 复习层不再重复渲染自测题：节末自测已经带了折叠答案，再汇总一遍等于把同一份内容
+  // 印两次（实测多出约 4000 字），而检索练习的位置本就该在节末。
+  const reviewBlocks = [indexTables, pitfalls].filter(Boolean)
   if (reviewBlocks.length) {
     parts.push('', '## 复习层', '', ...reviewBlocks.flatMap(block => [block, '']), '***')
   }

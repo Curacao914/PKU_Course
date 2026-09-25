@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { checkFreeSpace, createValidatedAcquisitionRuntime, formatBytes } from '@course/acquisition'
+import { addMaterial, listMaterials, parseInboxName, readDecks } from '@course/materials'
 import {
   callCourseModel,
   createInitialLesson,
@@ -260,12 +261,23 @@ export function createCommands(context) {
     if (reviseTarget && !fs.existsSync(statePath)) {
       throw new Error(`--revise 需要已有一次完整运行的中间状态：找不到 ${statePath}`)
     }
+    // 课件：教学网上没有课件，只能来自用户上传（materials 命令或管理台）。
+    // 有课件时它同时承担三件事：术语/ASR 对照、结构对照、笔记里"依据第几页"的可核对性。
+    // 注意：续跑时不覆盖已有课件的引用——重跑中途补传课件后，用 --revise 重写受影响模块。
+    const decks = readDecks({ root: config.materialsRoot, course, lesson: lessonTitle })
+    if (decks.length) {
+      stderr(`已载入 ${decks.length} 份课件（共 ${decks.reduce((total, deck) => total + deck.slides.length, 0)} 页）`)
+    } else if (!resume) {
+      stderr('本课次没有课件；补齐课件后可用 --revise 重写受影响的模块（不影响其余模块）')
+    }
+
     let lesson = resume
       ? JSON.parse(fs.readFileSync(statePath, 'utf8')).lesson
       : createInitialLesson({
         key: replayKey || `lesson-${Date.now()}`,
         title: lessonTitle,
         transcript,
+        pptText: decks,
         blueprint: { mainLine: '' }
       })
 
@@ -929,6 +941,84 @@ export function createCommands(context) {
     return report.passed ? 0 : 1
   }
 
+  /**
+   * 课件管理：收件箱归档、列出现有课件。
+   *
+   * 教学网上没有课件，课件只在用户手里，所以这条命令要能"随手补传"：
+   * 把文件丢进收件箱（或直接 --file）即可，命名约定 `课程__课次.pptx` 用来定归属。
+   */
+  async function materials(options) {
+    const root = config.materialsRoot
+    const inbox = config.inboxRoot
+
+    if (options.flags?.has('ingest')) {
+      fs.mkdirSync(inbox, { recursive: true })
+      const done = path.join(inbox, 'processed')
+      fs.mkdirSync(done, { recursive: true })
+      const files = fs.readdirSync(inbox).filter(name => {
+        const full = path.join(inbox, name)
+        return fs.statSync(full).isFile() && !name.startsWith('.')
+      })
+      const results = []
+      for (const name of files) {
+        const identity = parseInboxName(name)
+        if (!identity) {
+          results.push({ name, archived: false, reason: '命名不符合 课程__课次.扩展名' })
+          continue
+        }
+        try {
+          const { entry, deck } = await addMaterial({
+            root,
+            course: identity.course,
+            lesson: identity.lesson,
+            filePath: path.join(inbox, name),
+            name,
+            python: config.python
+          })
+          fs.renameSync(path.join(inbox, name), path.join(done, name))
+          results.push({ name, archived: true, course: identity.course, lesson: identity.lesson, slideCount: deck.slideCount, checksum: entry.checksum.slice(0, 12) })
+        } catch (error) {
+          results.push({ name, archived: false, reason: error instanceof Error ? error.message : String(error) })
+        }
+      }
+      emit({ inbox, archived: results.filter(item => item.archived).length, results }, options)
+      return results.some(item => !item.archived && item.reason && !item.reason.startsWith('命名')) ? 1 : 0
+    }
+
+    const file = options.options.file
+    if (file) {
+      const course = requireOption(options.options, 'course', 'materials')
+      const lesson = requireOption(options.options, 'lesson', 'materials')
+      const { entry, deck } = await addMaterial({
+        root, course, lesson,
+        filePath: path.resolve(file),
+        name: options.options.name || path.basename(file),
+        python: config.python
+      })
+      emit({ course, lesson, ...entry, slides: deck.slides.length }, options)
+      return 0
+    }
+
+    const course = options.options.course || ''
+    const lesson = options.options.lesson || ''
+    if (course && lesson) {
+      emit({ root, course, lesson, materials: listMaterials({ root, course, lesson }) }, options)
+      return 0
+    }
+    const courses = fs.existsSync(root) ? fs.readdirSync(root, { withFileTypes: true }).filter(item => item.isDirectory()).map(item => item.name) : []
+    emit({
+      root,
+      inbox,
+      courses: courses.map(name => ({
+        course: name,
+        lessons: fs.readdirSync(path.join(root, name), { withFileTypes: true })
+          .filter(item => item.isDirectory())
+          .map(item => ({ lesson: item.name, materials: listMaterials({ root, course: name, lesson: item.name }) }))
+      }))
+    }, options)
+    return 0
+  }
+
   async function status(options) {
     const snapshot = withLedger(store => ({
       path: store.path,
@@ -1118,6 +1208,11 @@ export const USAGE = `用法：course <命令> [选项]
                                            模块结构由大纲决定（两小时课 5—8 个模块）；
                                            --write-units 只决定分几次模型调用写完（1 = 一次写完）；
                                            --revise 只重写指定模块（其余模块草稿保留），需配合 --request
+  materials  --file <课件> --course <名称> --lesson <课次> [--name <文件名>]
+             [--course <名称> --lesson <课次>]        列出该课次已有课件
+             --ingest                                 归档收件箱里的 课程__课次.扩展名
+                                           教学网上没有课件：课件由用户上传，归档后作为
+                                           术语/ASR 对照与结构对照材料参与笔记写作
   publish    --from <笔记目录> [--course <名称>] [--lesson <课次>] [--out <站点目录>] [--origin <域名>]
                                            把笔记发布到站点，内容变化时排入一条微信通知
   notify     [--probe] [--loop] [--max-items <条数>]
