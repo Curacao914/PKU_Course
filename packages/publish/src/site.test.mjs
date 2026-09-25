@@ -5,11 +5,16 @@ import path from 'node:path'
 import test from 'node:test'
 
 import {
+  articleNumber,
   buildNoteRecord,
+  extractNoteMetadata,
   noteSlug,
+  parseStatute,
   readSiteIndex,
   renderIndexPage,
   renderNotePage,
+  renderSearchPage,
+  renderTermIndexPage,
   writeSite
 } from './site.mjs'
 
@@ -68,7 +73,7 @@ test('the note page renders content, toc and metadata without raw html', () => {
   const html = renderNotePage(record({ markdown: `${NOTE}\n\n<script>alert(1)</script>` }), { siteOrigin: 'https://course.law-tech.dev' })
   assert.match(html, /<title>第10-12节 共犯与罪数 · 课程笔记<\/title>/)
   assert.match(html, /<link rel="canonical" href="https:\/\/course.law-tech.dev\/notes\/刑法分论\/第10-12节-共犯与罪数">/)
-  assert.match(html, /<nav class="toc">/)
+  assert.match(html, /<nav class="toc" aria-label="本页目录">/)
   assert.match(html, /href="#课程概览"/)
   assert.match(html, /<h2 id="课程概览">课程概览<\/h2>/)
   assert.match(html, /共犯的成立需要共同故意与共同行为。/)
@@ -94,8 +99,8 @@ test('the index groups by course and lists newest first', () => {
     record({ lessonTitle: '第10-12节 共犯与罪数', publishedAt: '2026-09-25T00:00:00.000Z' }),
     record({ courseName: '国际法学', lessonTitle: '第3-4节', publishedAt: '2026-09-10T00:00:00.000Z' })
   ])
-  assert.match(html, /<h2>刑法分论<\/h2>/)
-  assert.match(html, /<h2>国际法学<\/h2>/)
+  assert.match(html, /<h2>刑法分论 · 2 讲<\/h2>/, '课程分组标题带课次数')
+  assert.match(html, /<h2>国际法学 · 1 讲<\/h2>/)
   assert.ok(html.indexOf('第10-12节 共犯与罪数') < html.indexOf('第1-2节'), '同一课程内新的在前')
   assert.match(html, /共 3 篇/)
 
@@ -110,10 +115,18 @@ test('writeSite lays out the whole site and can be regenerated from scratch', ()
   assert.deepEqual(first.written.sort(), [
     'index.html',
     'notes.json',
-    'notes/刑法分论/第10-12节-共犯与罪数.html'
+    'notes/刑法分论/第10-12节-共犯与罪数.html',
+    'concepts/index.html',
+    'statutes/index.html',
+    'cases/index.html',
+    'search/index.html'
   ].sort())
   assert.ok(fs.existsSync(path.join(dir, 'index.html')))
   assert.ok(fs.existsSync(path.join(dir, 'notes/刑法分论/第10-12节-共犯与罪数.html')))
+  // 索引页与搜索页是"复习时的入口"，不是附加装饰：它们必须真的被写出来
+  for (const page of ['concepts', 'statutes', 'cases', 'search']) {
+    assert.ok(fs.existsSync(path.join(dir, page, 'index.html')), `${page}/index.html 应当生成`)
+  }
 
   const index = readSiteIndex(dir)
   assert.equal(index.count, 1)
@@ -124,6 +137,46 @@ test('writeSite lays out the whole site and can be regenerated from scratch', ()
   const second = writeSite({ records: [], outputDir: dir })
   assert.equal(second.count, 0)
   assert.equal(readSiteIndex(dir).count, 0)
+})
+
+test('concept, statute and case indexes link back to the notes that mention them', () => {
+  const withMeta = record({
+    markdown: [
+      '# 第10-12节 共犯与罪数',
+      '',
+      '## 课程概览',
+      '',
+      '正文。',
+      '',
+      '<details><summary>📑 笔记元数据（用于跨课整合）</summary>',
+      '<pre><code>',
+      'META: CONCEPT: 共同故意',
+      'META: CONCEPT: 罪数',
+      'META: PROVISION: 刑法第25条',
+      'META: PROVISION: 刑法第69条',
+      'META: CASE: 甲乙共同伤害案',
+      '</code></pre>',
+      '</details>'
+    ].join('\n')
+  })
+  assert.deepEqual(withMeta.metadata.concepts, ['共同故意', '罪数'])
+  assert.deepEqual(extractNoteMetadata('META: CONCEPT: 甲\nMETA: PROVISION: 乙法第3条').statutes, ['乙法第3条'])
+  assert.ok(withMeta.readMinutes >= 1)
+
+  const concepts = renderTermIndexPage({ title: '概念索引', kind: 'concepts', notes: [withMeta] })
+  assert.match(concepts, /共同故意/)
+  assert.match(concepts, /href="\/notes\/刑法分论\/第10-12节-共犯与罪数\.html"/, '索引条目要能点回原笔记')
+
+  const statutes = renderTermIndexPage({ title: '法条索引', kind: 'statutes', notes: [withMeta] })
+  assert.match(statutes, /刑法第25条/)
+  assert.equal(parseStatute('《刑法》第25条').law, '刑法')
+  assert.equal(parseStatute('《刑法》第25条').article, '25')
+  assert.ok(articleNumber('二十五') > articleNumber('十'), '条号要能比大小（中文数字）')
+  assert.ok(articleNumber('69') > articleNumber('二十五'))
+
+  const search = renderSearchPage()
+  assert.match(search, /id="q"/)
+  assert.match(search, /fetch\('\/api\/notes'\)/, '搜索是纯客户端的：直接读站点索引')
 })
 
 test('a corrupt index is reported rather than silently treated as empty', () => {

@@ -596,7 +596,7 @@ test('publish pushes the briefing, not a truncated note', async () => {
   }))
 
   const siteDir = path.join(dir, 'site')
-  const { deps, lines, ledger } = harness()
+  const { deps, lines, ledger, errors } = harness()
   ledger.discoverReplays([{ replay_key: 'replay-1', course_key: 'course-abc' }])
   ledger.reportStage({ id: ledger.getTask('replay-1').id, stage: 'notes_ready' })
 
@@ -604,7 +604,7 @@ test('publish pushes the briefing, not a truncated note', async () => {
     'publish', '--from', notesDir, '--out', siteDir,
     '--replay-key', 'replay-1', '--origin', 'https://course.law-tech.dev'
   ], deps)
-  assert.equal(code, 0)
+  assert.equal(code, 0, 'stderr: ' + errors.join(' | '))
 
   const queued = ledger.claimDelivery({ workerId: 'relay-1' })
   assert.match(queued.body_text, /本节从数据评价的宏观维度讲到变量的测量水平/, '消息正文应当是简报')
