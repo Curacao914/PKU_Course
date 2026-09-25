@@ -509,7 +509,12 @@ export async function executeCourseTask(task, options = {}) {
     const structure = task.node.writerBrief?.lessonStructure || []
     const moduleCount = Math.max(1, structure.filter(item => (item.kind || 'content') === 'content').length || structure.length || 1)
     const targetChars = Number(task.courseSpec?.targetChars || 0)
-    const perModule = targetChars > 0 ? Math.max(600, Math.round(targetChars / moduleCount)) : 0
+    // 预算是"整篇笔记"的预算，不是"正文"的预算。
+    // 体系层、索引表、节末自测、时间轴、元数据这些结构件本身要占 6—8k 字（实测），
+    // 按总目标给正文额度，成品才会落在目标附近；否则正文写满预算、结构再叠上去必然超标。
+    const apparatusReserve = targetChars > 0 ? Math.min(Math.round(targetChars * 0.45), 7000) : 0
+    const bodyBudget = Math.max(3000, targetChars - apparatusReserve)
+    const perModule = targetChars > 0 ? Math.max(500, Math.round(bodyBudget / moduleCount)) : 0
     const lengthBudget = perModule > 0
       ? {
         全课总量: `${targetChars} 字（${Math.round(targetChars * 0.9)}—${Math.round(targetChars * 1.1)} 字）`,

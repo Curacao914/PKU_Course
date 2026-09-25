@@ -273,8 +273,12 @@ function mergeWriteUnit(group, index) {
   // 逐模块把额度写在它自己的那一条上，才有约束力。
   const onlyContent = unique.filter(node => (node.kind || 'content') === 'content')
   const totalTarget = Number(first.writerBrief?.courseSpec?.targetChars || 0)
+  // 与 task-runner 同一口径：预算是整篇笔记的，先给体系层/索引/自测等结构件留额度，
+  // 剩下的才是正文的——否则正文写满、结构再叠上去必然超标。
+  const apparatusReserve = totalTarget > 0 ? Math.min(Math.round(totalTarget * 0.45), 7000) : 0
+  const bodyBudget = Math.max(3000, totalTarget - apparatusReserve)
   const perModule = totalTarget > 0 && onlyContent.length
-    ? Math.max(600, Math.round(totalTarget / onlyContent.length))
+    ? Math.max(500, Math.round(bodyBudget / onlyContent.length))
     : 0
   const moduleBriefs = unique.map(node => ({
     outlineNodeId: node.outlineNodeId,
