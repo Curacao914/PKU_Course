@@ -352,12 +352,15 @@ export function createCommands(context) {
           stderr(`已把写作单元 ${node.id} 拆成 ${ids.length} 个模块，只重写 ${targeted.join('、')}`)
           const splitTarget = (lesson.nodes || []).find(item =>
             item.splitFrom === node.id && targeted.includes(item.outlineNodeId))
-          if (splitTarget) lesson = requestNodeRevision(lesson, splitTarget.id, request)
+          if (splitTarget) {
+            stderr(`只重写模块 ${splitTarget.outlineNodeId}（${splitTarget.title}）；同一单元其余 ${ids.length - 1} 个模块原样保留`)
+            lesson = requestNodeRevision(lesson, splitTarget.id, request)
+          }
           continue
         }
         lesson = requestNodeRevision(lesson, node.id, request)
       }
-      stderr(`只重写 ${matched.length} 个模块：${matched.map(node => node.id).join('、')}（其余模块的草稿保持不变）`)
+      stderr(`只重写 ${matched.length} 个模块：${matched.map(node => node.title || node.id).join('、')}（其余模块的草稿保持不变）`)
     }
     const saveState = (current, step) => {
       const payload = {
