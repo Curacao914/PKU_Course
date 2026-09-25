@@ -218,6 +218,73 @@ export function parseInboxName(fileName) {
   return { course, lesson: scopeRaw, scope: 'lesson', extension }
 }
 
+/**
+ * 从文件名猜归属——**只在有把握时给答案**。
+ *
+ * 严格的 `课程__课次.pptx` 命名对用户太麻烦（尤其是从微信/邮箱下载下来的文件名）。
+ * 这里改用"跟账本里已有的课程与课次对一下"：
+ *   · 文件名里出现某门课程的名字 → 课程确定；
+ *   · 再在里面找课次：完整标题、日期（2026-09-30 / 09-30）、或"第N-M节"；
+ *   · 课程与课次都确定才返回 canAutoAssign，否则只报"匹配到了什么"，由人确认。
+ * 猜错的代价是笔记用错课件，比让人点一下贵得多，所以这里宁可返回不确定。
+ */
+export function guessMaterialIdentity(fileName, { courses = [], lessons = [] } = {}) {
+  const raw = path.basename(String(fileName || ''))
+  const base = raw.replace(/\.[A-Za-z0-9]+$/, '')
+  const compact = base.replace(/[\s_\-—·、,，()（）\[\]【】]+/g, '')
+
+  // 课程匹配：允许简称（"实证分析" 对 "法律实证分析"）。
+  // 用最长公共子串而不是"包含"：用户从微信下载的文件名常把课程名截短。
+  const longestCommon = (left, right) => {
+    let best = 0
+    for (let start = 0; start < left.length; start += 1) {
+      for (let length = best + 1; start + length <= left.length; length += 1) {
+        if (right.includes(left.slice(start, start + length))) best = length
+        else break
+      }
+    }
+    return best
+  }
+  const course = courses.find(name => {
+    const key = String(name || '').replace(/\s+/g, '')
+    if (!key || !compact) return false
+    if (compact.includes(key) || key.includes(compact)) return true
+    return longestCommon(key, compact) >= Math.max(3, Math.ceil(key.length / 2))
+  }) || null
+
+  const candidates = lessons.filter(item => !course || !item.course || item.course === course)
+  const lesson = candidates.find(item => {
+    const title = String(item.lesson || item.title || '').replace(/\s+/g, '')
+    if (!title) return false
+    if (compact.includes(title) || title.includes(compact)) return true
+    // 日期：2026-09-30 / 20260930 / 09-30
+    const date = title.match(/(\d{4})-(\d{2})-(\d{2})/)
+    if (date) {
+      const [, year, month, day] = date
+      const forms = [`${year}-${month}-${day}`, `${year}${month}${day}`, `${month}-${day}`, `${month}${day}`]
+      if (forms.some(form => compact.includes(form.replace(/-/g, '')) || compact.includes(form))) return true
+    }
+    // 节次：第5-6节 / 第56节
+    const period = title.match(/第(\d+)-(\d+)节/)
+    if (period) {
+      const forms = [`第${period[1]}-${period[2]}节`, `第${period[1]}${period[2]}节`, `${period[1]}-${period[2]}节`]
+      if (forms.some(form => compact.includes(form.replace(/-/g, '')) || compact.includes(form))) return true
+    }
+    return false
+  }) || null
+
+  return {
+    file: raw,
+    course,
+    lesson: lesson ? (lesson.lesson || lesson.title || '') : '',
+    replayKey: lesson?.replayKey || '',
+    canAutoAssign: Boolean(course && lesson),
+    reason: !course ? '文件名里认不出课程'
+      : !lesson ? `认出了课程「${course}」，但认不出是哪个课次`
+        : `认出了 ${course} · ${lesson.lesson || lesson.title}`
+  }
+}
+
 /** 归属不明的文件先放这里，等人在管理台指定，不做模糊猜测。 */
 export function unassignedDir(root) {
   return path.join(path.resolve(root), '_unassigned')

@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { checkFreeSpace, createValidatedAcquisitionRuntime, formatBytes } from '@course/acquisition'
-import { addMaterial, listMaterials, parseInboxName, readDecks, unassignedDir } from '@course/materials'
+import { addMaterial, guessMaterialIdentity, listMaterials, parseInboxName, readDecks, unassignedDir } from '@course/materials'
 
 import {
   LOW_BALANCE_THRESHOLD_CNY,
@@ -1212,14 +1212,30 @@ export function createCommands(context) {
         const full = path.join(inbox, name)
         return fs.statSync(full).isFile() && !name.startsWith('.')
       })
+      // 账本里已知的课程与课次：用来从文件名猜归属（不必再死记命名规则）
+      const known = withLedger(store => store.listTasks({ limit: 500 }).map(task => ({
+        course: task.course_name,
+        lesson: task.title,
+        replayKey: task.replay_key
+      })))
+      const knownCourses = [...new Set(known.map(item => item.course).filter(Boolean))]
+
       const results = []
       for (const name of files) {
-        const identity = parseInboxName(name)
-        // 归属不明就**不猜**：停到 _unassigned 并报出来，让人在管理台指定。
+        // 先看严格命名（课程__课次 / 课程__ALL），没有再按账本里的课程课次去认
+        const strict = parseInboxName(name)
+        const guess = strict ? null : guessMaterialIdentity(name, { courses: knownCourses, lessons: known })
+        const identity = strict || (guess?.canAutoAssign
+          ? { course: guess.course, lesson: guess.lesson, scope: 'lesson', extension: path.extname(name) }
+          : null)
+        // 认不出来就**不猜**：停到 _unassigned 并说明认到了什么，让人在管理台指定。
         // 猜错的代价是笔记用错课件，比多一步人工贵得多。
         if (!identity) {
           fs.renameSync(path.join(inbox, name), path.join(parked, name))
-          results.push({ name, archived: false, parked: true, reason: '文件名没有 课程__课次（或 课程__ALL）前缀，已停到 _unassigned 等你指定' })
+          results.push({
+            name, archived: false, parked: true,
+            reason: guess ? guess.reason : '文件名里既没有 课程__课次 也没有能认出的课程与课次，已停到 _unassigned'
+          })
           continue
         }
         try {
@@ -1601,12 +1617,14 @@ export const USAGE = `用法：course <命令> [选项]
   materials  --file <课件> --course <名称> --lesson <课次> [--name <文件名>]
              [--course-scope] [--applies-to <课次,课次>] [--replay-key <键>]
              [--course <名称> --lesson <课次>] [--replay-key <键>]   列出该课次会用到的课件
-             --ingest                                 归档收件箱里的 课程__课次.扩展名
+             --ingest                                 归档收件箱里的文件（认得出课程与课次就归档，
+                                           认不出停到 _unassigned；不必记命名规则）
                                            教学网上没有课件：课件由用户上传。归属三种：
                                            本课次（默认）／--course-scope 全课程通用／
                                            --applies-to 跨课次共用（上一讲的 PPT 这讲接着用）。
-                                           命名不合 课程__课次（或 课程__ALL）的进 _unassigned，
-                                           不猜归属，等你在管理台指定
+                                           认不出归属的进 _unassigned，不猜，等你在管理台指定。
+                                           （更省事的方式是直接在管理台上传：那里从账本
+                                           列出课程与课次，选一下就行，文件名随便叫）
   balance    [--threshold <元>]                   查两个付费 API 的余额（DeepSeek 官方接口；
                                            阿里云余额需账号 AK/SK，见 docs/07）
   publish    --from <笔记目录> [--course <名称>] [--lesson <课次>] [--out <站点目录>] [--origin <域名>]

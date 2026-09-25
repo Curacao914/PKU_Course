@@ -8,6 +8,7 @@ import test from 'node:test'
 import {
   addMaterial,
   extractSlides,
+  guessMaterialIdentity,
   listMaterials,
   materialDir,
   normalizeDeck,
@@ -56,6 +57,31 @@ test('parseInboxName reads the course__lesson convention', () => {
     '课程__ALL 表示全课程通用（例如术语表、课程大纲）'
   )
   assert.equal(parseInboxName('随便一个名字.pptx'), null, '命名不合约定就不猜归属')
+})
+
+test('file names are matched against the known courses and lessons', () => {
+  const known = {
+    courses: ['法律实证分析', '刑事执行法'],
+    lessons: [
+      { course: '法律实证分析', lesson: '2026-09-23第1-2节', replayKey: 'r1' },
+      { course: '法律实证分析', lesson: '2026-09-30第3-4节', replayKey: 'r2' }
+    ]
+  }
+  // 从微信/邮箱下载下来的那种文件名：只有日期与节次
+  const byDate = guessMaterialIdentity('法律实证分析 2026-09-30 第3-4节.pptx', known)
+  assert.equal(byDate.canAutoAssign, true)
+  assert.equal(byDate.replayKey, 'r2')
+
+  const loose = guessMaterialIdentity('实证分析_09-30_课件.pptx', known)
+  assert.equal(loose.canAutoAssign, true, '只写月-日也能认出来')
+
+  const courseOnly = guessMaterialIdentity('法律实证分析 课件打包.zip', known)
+  assert.equal(courseOnly.canAutoAssign, false, '认得出课程但认不出课次时不自动归档')
+  assert.match(courseOnly.reason, /认不出是哪个课次/)
+
+  const nothing = guessMaterialIdentity('课件.pptx', known)
+  assert.equal(nothing.canAutoAssign, false)
+  assert.match(nothing.reason, /认不出课程/)
 })
 
 test('a lesson loads course-wide decks plus its own, and only the shared ones it declares', async () => {

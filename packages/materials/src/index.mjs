@@ -3,6 +3,7 @@ export {
   addMaterial,
   courseMaterialDir,
   extractSlides,
+  guessMaterialIdentity,
   listMaterials,
   materialDir,
   normalizeDeck,
