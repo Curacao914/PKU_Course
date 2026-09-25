@@ -1471,13 +1471,30 @@ export function createCommands(context) {
     return 0
   }
 
-  /** 人工恢复：把停下不动的课次放回可领取状态。 */
+  /**
+   * 人工恢复：把停下不动的课次放回可领取状态。
+   *
+   * 阶段不能"就地留着"：needs_attention 是终态，原地重置等于没恢复。
+   * 没显式给 --stage 时按**已有产物**推断该回到哪一步——媒体在就回 downloaded，
+   * 转录稿在就回 transcript_ready，笔记在就回 notes_ready。已经做过的活不重做。
+   */
+  function inferResumeStage(task = {}) {
+    const artifacts = task.artifacts || {}
+    if (artifacts.notePath) return 'notes_ready'
+    if (artifacts.transcriptPath) return 'transcript_ready'
+    if (artifacts.mediaPath) return 'downloaded'
+    return 'discovered'
+  }
+
   async function retry(options) {
     const replayKey = requireOption(options.options, 'replay-key', 'retry')
-    const stage = options.options.stage || ''
+    const explicit = options.options.stage || ''
+    const current = withLedger(store => store.getTask(replayKey))
+    if (!current) throw new Error(`账本里没有这个课次：${replayKey}`)
+    const stage = explicit || inferResumeStage(current)
     const task = withLedger(store => store.resetTask({ replayKey, stage }))
-    stderr(`已重置 ${replayKey}：阶段 ${task.stage}，失败计数归零，下一轮 cycle 会重新领取`)
-    emit({ replayKey, stage: task.stage, attempts: task.attempts }, options)
+    stderr(`已重置 ${replayKey}：${current.stage} → ${task.stage}（按已有产物推断），失败计数归零，下一轮 cycle 会重新领取`)
+    emit({ replayKey, from: current.stage, stage: task.stage, attempts: task.attempts }, options)
     return 0
   }
 
@@ -1678,8 +1695,9 @@ export const USAGE = `用法：course <命令> [选项]
   notify     [--probe] [--loop] [--max-items <条数>] [--retry-failed]
                                            把账本里排队的通知发到微信；--probe 只验证通道；
                                            --retry-failed 把发送失败的通知放回队列重发
-  retry      --replay-key <键> [--stage <阶段>]    人工恢复：清空失败计数并等待重新领取
-                                           （阶段默认不变，也可显式退回某个阶段）
+  retry      --replay-key <键> [--stage <阶段>]    人工恢复：清空失败计数并等待重新领取。
+                                           不给 --stage 时按已有产物推断回到哪一步
+                                           （媒体在→downloaded，转录稿在→transcript_ready）
   backup     [--keep <份数>]                     把账本与站点库做一致性快照（默认留 7 份）
   prune      [--apply] [--keep-originals]         清理原件：纯文本（转录稿/课件文字/笔记）
                                            永久保留；视频、音频、PPT 原文件只在转换成功
