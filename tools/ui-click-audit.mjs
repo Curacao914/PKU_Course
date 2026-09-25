@@ -178,8 +178,16 @@ async function auditAdmin(page, site, calls, dialogs, failures) {
   await page.waitForSelector('#tab-overview .card', { timeout: 10000 })
   if (await page.locator('text=需要登录').count()) throw new Error('管理台没登录上（fixture 或令牌有问题）')
 
-  for (const tab of ['overview', 'courses', 'notes', 'settings']) {
+  const tabNames = ['overview', 'courses', 'notes', 'settings']
+  for (const tab of tabNames) {
     await page.click('.tabs button[data-tab="' + tab + '"]')
+    // 切页也是"点了要有反应"的一份：选中态与内容区显隐都要跟着动
+    const selected = await page.getAttribute('.tabs button[data-tab="' + tab + '"]', 'aria-selected')
+    const visible = await page.isVisible('#tab-' + tab)
+    const others = await Promise.all(tabNames.filter(name => name !== tab).map(name => page.isVisible('#tab-' + name)))
+    if (selected !== 'true' || !visible || others.some(Boolean)) {
+      failures.push('管理台 tab · ' + tab + '：切换后选中态或显示状态不对')
+    }
     const acts = await page.$$eval('#tab-' + tab + ' [data-act]', nodes => [...new Set(nodes.map(node => node.dataset.act))])
     for (const act of acts) {
       const selector = '#tab-' + tab + ' [data-act="' + act + '"]'
@@ -225,6 +233,18 @@ async function auditAdmin(page, site, calls, dialogs, failures) {
       else if (expected && !toast.text.includes(expected)) failures.push('管理台 ' + tab + ' · ' + act + '：提示是「' + toast.text + '」，预期包含「' + expected + '」')
       else if (!expected && /失败|还没接上|没成功/.test(toast.text)) failures.push('管理台 ' + tab + ' · ' + act + '：' + toast.text)
     }
+  }
+
+  // 「去处理」这类页内跳转：点了要切到对应 tab
+  await page.click('.tabs button[data-tab="overview"]')
+  const jump = await page.$('#tab-overview [data-go]')
+  if (jump) {
+    const target = await jump.getAttribute('data-go')
+    await jump.click()
+    await page.waitForTimeout(150)
+    const on = await page.getAttribute('.tabs button[data-tab="' + target + '"]', 'aria-selected')
+    if (on !== 'true') failures.push('管理台 · 「去处理」链接没有切到 ' + target)
+    else console.log('  [概览] 去处理链接 →  切到 ' + target + ' 区')
   }
 
   console.log('管理台按钮（' + results.length + ' 个）')
