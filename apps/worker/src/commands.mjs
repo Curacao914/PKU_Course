@@ -750,7 +750,28 @@ export function createCommands(context) {
     const quiet = { ...options, quiet: true }
     const summary = {
       workerId, startedAt: new Date().toISOString(), discovered: null, disk: null,
-      tasks: [], notification: null, errors: [], providerIssues: [], lowBalance: null, needsAttention: []
+      tasks: [], notification: null, errors: [], providerIssues: [], lowBalance: null,
+      needsAttention: [], asrBlocked: null
+    }
+
+    // 转录通道是否因付费/凭据问题停摆：用它拦住后续下载（转录本身仍会重试）。
+    // 转录跑不动时继续下载只会把盘塞满，而盘满影响的是整机。
+    const asrBlocked = (() => {
+      const store = openStore(config.ledgerPath)
+      try {
+        const blocked = store.listTasks({ limit: 200 })
+          .filter(task => task.last_error && ['downloaded', 'transcribing', 'transcript_ready'].includes(task.stage))
+          .map(task => ({ task, issue: classifyProviderIssue(task.last_error) }))
+          .filter(item => item.issue && item.issue.provider === 'aliyun')
+        return blocked[0] || null
+      } catch {
+        return null
+      } finally {
+        store.close()
+      }
+    })()
+    if (asrBlocked) {
+      stderr(`转录通道受阻（${asrBlocked.issue.title}）：本轮不再下载新课，转录仍会重试`)
     }
 
     // 先把磁盘看清：空间不足时连扫描都不必做，但仍要把已排队的通知发出去
@@ -827,6 +848,18 @@ export function createCommands(context) {
       if (!task) break
 
       const command = stageCommands[task.stage]
+
+      // 转录侧的付费故障（欠费/额度/密钥）没解决之前，不再开新的下载：
+      // 转录跑不动，下载下来的媒体只会躺在盘上——14 节课每节 1—2G，很快把盘吃满，
+      // 而盘满了整机都受影响（swap 与数据同盘）。转录本身仍会重试。
+      if (command === 'download' && asrBlocked) {
+        summary.tasks.push({
+          replayKey: task.replay_key, stage: task.stage, action: 'skip', ok: false,
+          note: `转录通道未恢复（${asrBlocked.issue.title}），先不下载新课件以免堆满磁盘`
+        })
+        continue
+      }
+
       if (!command) {
         // 可领取却没有对应命令，说明阶段映射与账本脱节——这类问题必须浮出来，
         // 不能静默跳过并让整轮看起来成功。
@@ -1017,6 +1050,10 @@ export function createCommands(context) {
     } catch (error) {
       summary.errors.push({ step: 'provider-notice', message: error instanceof Error ? error.message : String(error) })
     }
+
+    summary.asrBlocked = asrBlocked
+      ? { category: asrBlocked.issue.category, title: asrBlocked.issue.title, replayKey: asrBlocked.task.replay_key }
+      : null
 
     summary.finishedAt = new Date().toISOString()
     summary.exitCode = summary.errors.length || summary.tasks.some(task => task.ok === false) ? 1 : 0
