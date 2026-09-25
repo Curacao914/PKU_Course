@@ -12,6 +12,7 @@ import {
   parseStatute,
   readSiteIndex,
   renderIndexPage,
+  renderFeed,
   renderNotePage,
   renderSearchPage,
   renderTermIndexPage,
@@ -133,7 +134,8 @@ test('writeSite lays out the whole site and can be regenerated from scratch', ()
     'concepts/index.html',
     'statutes/index.html',
     'cases/index.html',
-    'search/index.html'
+    'search/index.html',
+    'feed.xml'
   ].sort())
   assert.ok(fs.existsSync(path.join(dir, 'index.html')))
   assert.ok(fs.existsSync(path.join(dir, 'notes/刑法分论/第10-12节-共犯与罪数.html')))
@@ -151,6 +153,16 @@ test('writeSite lays out the whole site and can be regenerated from scratch', ()
   const second = writeSite({ records: [], outputDir: dir })
   assert.equal(second.count, 0)
   assert.equal(readSiteIndex(dir).count, 0)
+})
+
+test('the feed lists the newest notes first and points at their pages', () => {
+  const feed = renderFeed([
+    record({ lessonTitle: '第1-2节', publishedAt: '2026-09-01T00:00:00.000Z' }),
+    record({ lessonTitle: '第10-12节 共犯与罪数', publishedAt: '2026-09-25T00:00:00.000Z' })
+  ], { siteOrigin: 'https://course.law-tech.dev' })
+  assert.match(feed, /^<\?xml version="1.0" encoding="UTF-8"\?>/)
+  assert.match(feed, /<link>https:\/\/course\.law-tech\.dev\/notes\//)
+  assert.ok(feed.indexOf('第10-12节 共犯与罪数') < feed.indexOf('第1-2节'), '新的在前')
 })
 
 test('concept, statute and case indexes link back to the notes that mention them', () => {

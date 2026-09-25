@@ -370,6 +370,7 @@ function pageShell({ title, description, body, canonical = '', scripts = '', lay
 <meta name="description" content="${escapeHtml(description)}">
 <meta name="color-scheme" content="light">
 ${canonical ? `<link rel="canonical" href="${escapeHtml(canonical)}">` : ''}
+<link rel="alternate" type="application/rss+xml" title="课程笔记" href="/feed.xml">
 <style>${SITE_CSS}</style>
 </head>
 <body>
@@ -803,6 +804,43 @@ export function renderIndexPage(records, { siteOrigin = '' } = {}) {
  * 每次都是全量重写：笔记数量以百计，全量写比增量同步简单得多，也不会出现
  * "删掉的笔记还挂在索引里"这类状态漂移。返回写入的文件清单便于核对。
  */
+/**
+ * RSS：有新笔记时不用自己来刷。
+ *
+ * 个人站点最容易做、也最实用的一项"推送之外的推送"——它不需要任何第三方服务，
+ * 读者（包括未来的自己）用任意阅读器订阅即可。只输出摘要，正文留在站上。
+ */
+export function renderFeed(records = [], { siteOrigin = '', siteName = SITE_NAME, now = new Date() } = {}) {
+  const base = String(siteOrigin || '').replace(/\/+$/, '')
+  const esc = value => String(value ?? '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+  const items = [...records]
+    .sort((left, right) => String(right.publishedAt).localeCompare(String(left.publishedAt)))
+    .slice(0, 50)
+    .map(record => [
+      '    <item>',
+      `      <title>${esc(`${record.courseName ? `${record.courseName} · ` : ''}${record.lessonTitle}`)}</title>`,
+      `      <link>${esc(`${base}/${record.slug}.html`)}</link>`,
+      `      <guid isPermaLink="true">${esc(`${base}/${record.slug}.html`)}</guid>`,
+      `      <pubDate>${new Date(record.publishedAt || now).toUTCString()}</pubDate>`,
+      `      <description>${esc(record.summary || '')}</description>`,
+      '    </item>'
+    ].join('\n')).join('\n')
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<rss version="2.0">',
+    '  <channel>',
+    `    <title>${esc(siteName)}</title>`,
+    `    <link>${esc(base)}/</link>`,
+    `    <description>课堂录音自动转录、按知识体系整理的法学课程笔记</description>`,
+    `    <lastBuildDate>${now.toUTCString()}</lastBuildDate>`,
+    items,
+    '  </channel>',
+    '</rss>',
+    ''
+  ].filter(Boolean).join('\n')
+}
+
 export function writeSite({ records = [], outputDir, siteOrigin = '' } = {}) {
   if (!outputDir) throw new Error('写站点需要 outputDir')
   const root = path.resolve(outputDir)
@@ -845,6 +883,7 @@ export function writeSite({ records = [], outputDir, siteOrigin = '' } = {}) {
     description: '课堂上讲过的案例，以及它出现在哪些课次。'
   }))
   write('search/index.html', renderSearchPage({ siteOrigin }))
+  write('feed.xml', renderFeed(sorted, { siteOrigin }))
   write('notes.json', `${JSON.stringify({
     siteName: SITE_NAME,
     generatedAt: new Date().toISOString(),
