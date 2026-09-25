@@ -102,5 +102,6 @@ export {
   recordNodeTaskFailure,
   requestNodeRevision,
   saveFinalNoteRevision,
-  saveNodeDraft
+  saveNodeDraft,
+  splitWriteUnit
 } from './node-lifecycle.mjs'

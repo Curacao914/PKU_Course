@@ -14,7 +14,8 @@ import {
   pptForRange,
   renderBriefMessage,
   requestNodeRevision,
-  runLessonNotes
+  runLessonNotes,
+  splitWriteUnit
 } from '@course/notes'
 import { createWechatSender, runDeliveryCycle } from '@course/notify'
 import { buildNoteRecord, readSiteIndex, writeSite } from '@course/publish'
@@ -339,7 +340,23 @@ export function createCommands(context) {
         }
         stderr(`已把 ${decks.length} 份课件接入本次重写`)
       }
-      for (const node of matched) lesson = requestNodeRevision(lesson, node.id, request)
+      for (const node of matched) {
+        const ids = Array.isArray(node.outlineNodeIds) && node.outlineNodeIds.length
+          ? node.outlineNodeIds
+          : [node.outlineNodeId]
+        const targeted = wanted.filter(item => ids.includes(item) || String(node.title || '').includes(item))
+        // 点名的是"一个写作单元里的某个模块"：先把单元拆成模块节点，只让被点名的模块重写，
+        // 其余模块原样放行。否则一次写完 8 个模块的课，改一个模块就得重写整节 1 万字。
+        if (ids.length > 1 && targeted.length && targeted.length < ids.length) {
+          lesson = splitWriteUnit(lesson, node.id, { keepPending: targeted })
+          stderr(`已把写作单元 ${node.id} 拆成 ${ids.length} 个模块，只重写 ${targeted.join('、')}`)
+          const splitTarget = (lesson.nodes || []).find(item =>
+            item.splitFrom === node.id && targeted.includes(item.outlineNodeId))
+          if (splitTarget) lesson = requestNodeRevision(lesson, splitTarget.id, request)
+          continue
+        }
+        lesson = requestNodeRevision(lesson, node.id, request)
+      }
       stderr(`只重写 ${matched.length} 个模块：${matched.map(node => node.id).join('、')}（其余模块的草稿保持不变）`)
     }
     const saveState = (current, step) => {

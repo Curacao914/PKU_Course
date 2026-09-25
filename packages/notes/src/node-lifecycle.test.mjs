@@ -13,7 +13,8 @@ import {
   planNodes,
   recordNodeTaskFailure,
   requestNodeRevision,
-  saveNodeDraft
+  saveNodeDraft,
+  splitWriteUnit
 } from './node-lifecycle.mjs'
 
 const node = (id, over = {}) => ({
@@ -264,6 +265,42 @@ test('write units group modules without changing the module plan', () => {
   const two = planNodes({ lesson, outline, courseSpec: { ...spec, writeUnits: 2 } })
   assert.equal(two.length, 2)
   assert.deepEqual(two.map(node => node.outlineNodeIds.length), [2, 1], '按顺序连续分组，不跳模块')
+})
+
+test('a multi-module write unit can be split so one module is rewritten alone', () => {
+  // 「一次写完 8 个模块」省调用，但改一个模块不该重写整节：拆分后只让被点名的模块回到待修订。
+  const lesson = {
+    transcript: transcript(40),
+    pptText: [],
+    outline: [
+      { id: 'o1', title: '共犯的成立', lineRange: [1, 20] },
+      { id: 'o2', title: '罪数判断', lineRange: [21, 40] }
+    ],
+    nodes: [{
+      id: 'u1',
+      outlineNodeId: 'o1',
+      outlineNodeIds: ['o1', 'o2'],
+      moduleBriefs: [{ outlineNodeId: 'o1', title: '共犯的成立' }, { outlineNodeId: 'o2', title: '罪数判断' }],
+      status: 'node_approved',
+      draft: '### 共犯的成立\n\n共犯需要共同故意。\n\n### 罪数判断\n\n罪数按行为个数判断。',
+      versions: [{}],
+      reviewerReports: [{}],
+      revisionCount: 0,
+      revisionRequests: []
+    }]
+  }
+
+  const split = splitWriteUnit(lesson, 'u1', { keepPending: ['o2'] })
+  assert.equal(split.nodes.length, 2, '一个单元拆成两个模块节点')
+  const [first, second] = split.nodes
+  assert.equal(first.outlineNodeId, 'o1')
+  assert.equal(second.outlineNodeId, 'o2')
+  assert.equal(first.status, 'node_approved', '没被点名的模块原样放行')
+  assert.match(first.approvalReason, /拆分自同一写作单元/)
+  assert.equal(second.status, 'node_pending', '被点名的模块回到待处理，由调用方提出修订')
+  assert.match(first.draft, /共犯需要共同故意/, '正文按模块正确切分')
+  assert.match(second.draft, /罪数按行为个数判断/)
+  assert.ok(first.sourceText.includes('第 1 行') && second.sourceText.includes('第 40 行'), '各模块拿到自己那段转录')
 })
 
 test('an unchanged revision still counts toward the revision cap', () => {

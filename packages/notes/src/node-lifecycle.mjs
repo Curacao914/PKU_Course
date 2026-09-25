@@ -1,5 +1,8 @@
 import { cleanText, transcriptLines } from '@course/core'
 
+// assembly 只依赖 @course/core，不反向依赖本模块，因此这里引用它不会成环。
+import { nodeBodyPieces } from './assembly.mjs'
+
 /**
  * 节点生命周期：从大纲切分节点，到每个节点通过审查。
  *
@@ -408,6 +411,71 @@ export function applyNodeReview(lesson, nodeId, report = {}, { courseSpec = {}, 
       }, node.revisionRequests, { source: 'reviewer' }, at)
     }
   })
+}
+
+/**
+ * 把一个"覆盖多个模块的写作单元"拆成模块节点。
+ *
+ * 为什么需要：写作单元可以一次写完 8 个模块（省调用、上下文连贯），但用户要改的
+ * 往往只是其中一个模块。不能因为"当初是一次写完的"就逼他重写整节 1 万字。
+ * 拆分时：每个模块拿到自己那一段正文（nodeBodyPieces 按模块标题切），
+ * 未被点名的模块**原样放行**（内容没动过，是同一批评审覆盖过的），
+ * 被点名的模块回到待修订状态。
+ */
+export function splitWriteUnit(lesson, nodeId, {
+  keepPending = [],
+  reason = '拆分自同一写作单元，正文未改动',
+  at
+} = {}) {
+  const node = (lesson.nodes || []).find(item => item.id === nodeId)
+  if (!node) throw new Error(`节点不存在：${nodeId}`)
+  const ids = Array.isArray(node.outlineNodeIds) && node.outlineNodeIds.length
+    ? node.outlineNodeIds
+    : [node.outlineNodeId]
+  if (ids.length <= 1) return lesson
+
+  const outlineById = new Map((lesson.outline || []).map(item => [item.id, item]))
+  const pieces = nodeBodyPieces(node)
+  const lines = transcriptLines(lesson.transcript || '')
+  const modules = ids.map((outlineId, index) => {
+    const outlineNode = outlineById.get(outlineId) || {}
+    const [start, end] = outlineNode.lineRange || []
+    const sourceText = start && end ? lines.slice(start - 1, end).join('\n') : node.sourceText
+    return {
+      ...node,
+      id: `${node.id}--${outlineId}`,
+      title: outlineNode.title || node.title,
+      outlineNodeId: outlineId,
+      outlineNodeIds: [outlineId],
+      moduleBriefs: [{
+        outlineNodeId: outlineId,
+        title: outlineNode.title || node.title,
+        lineRange: outlineNode.lineRange,
+        kind: node.kind || 'content',
+        goal: node.moduleBriefs?.[index]?.goal || outlineNode.rationale || ''
+      }],
+      sourceText,
+      pptText: pptForRange(lesson.pptText || [], outlineNode.slideRange || []),
+      draft: pieces.get(outlineId) || '',
+      versions: [{ version: 1, at: nowIso(at), value: pieces.get(outlineId) || '', source: 'split' }],
+      reviewerReports: [],
+      revisionCount: 0,
+      revisionRequests: [],
+      status: 'node_pending',
+      splitFrom: node.id,
+      updatedAt: nowIso(at)
+    }
+  })
+
+  let next = { ...lesson, nodes: [...(lesson.nodes || []).filter(item => item.id !== nodeId), ...modules] }
+  // 未被点名的模块直接放行：正文来自同一份已通过审查的草稿，重新审查纯属重复付费。
+  // 用人工放行入口（要求写明理由），而不是伪造一份审查报告。
+  const pending = new Set(keepPending)
+  for (const module of modules) {
+    if (pending.has(module.outlineNodeId)) continue
+    next = approveNodeHuman(next, module.id, reason, { at })
+  }
+  return next
 }
 
 export function requestNodeRevision(lesson, nodeId, request = '', { at } = {}) {
