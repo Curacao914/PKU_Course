@@ -101,6 +101,8 @@ a:hover { color: var(--accent-ink); }
 .rail nav.toc ol { list-style: none; margin: 0; padding: 0; font-size: 14px; line-height: 1.5; }
 .rail nav.toc li { margin: 0; }
 .rail nav.toc li.lv3 { padding-left: 14px; }
+.rail nav.toc li.lv4 { padding-left: 28px; font-size: 13.5px; }
+.rail nav.toc li.lv4 a { color: var(--muted); }
 .rail nav.toc a { display: block; padding: 5px 10px; color: var(--ink-soft); border-radius: 8px; }
 .rail nav.toc a:hover { background: var(--bg-soft); color: var(--ink); }
 .rail nav.toc a.active { color: var(--accent-ink); background: var(--accent-soft); font-weight: 600; }
@@ -541,7 +543,7 @@ function renderBriefBlock(brief = {}) {
 export function renderNotePage(record, { siteOrigin = '', neighbours = {} } = {}) {
   const headings = record.headings || []
   const tocList = headings.length
-    ? `<ol>${headings.map(heading => `<li class="${heading.level === 3 ? 'lv3' : 'lv2'}"><a href="#${escapeHtml(heading.id)}">${escapeHtml(heading.text)}</a></li>`).join('')}</ol>`
+    ? `<ol>${headings.map(heading => `<li class="lv${heading.level}"><a href="#${escapeHtml(heading.id)}">${escapeHtml(heading.text)}</a></li>`).join('')}</ol>`
     : '<p class="search-hint">这篇笔记没有分节标题。</p>'
   const toc = `<nav class="toc" aria-label="本页目录"><h2>本页目录</h2>${tocList}</nav>`
   const readMinutes = record.readMinutes || estimateReadMinutes(record.markdown)

@@ -93,6 +93,19 @@ function analyze(file) {
   const missing = Object.entries(structure).filter(([, value]) => !value).map(([key]) => key)
   if (missing.length) add('info', 'structure', `缺少小节：${missing.join('、')}`)
 
+  // 6.5) 呈现质量：长段落与标题层级——"读得下去"的两个硬指标
+  const paragraphs = markdown.split(/\n\s*\n/).filter(block => !/^[#>|\-*\d]/.test(block.trim()) && block.trim())
+  const longParagraphs = paragraphs.filter(block => block.replace(/\s/g, '').length > 300)
+  if (longParagraphs.length) {
+    add('warn', 'long-paragraphs', `${longParagraphs.length} 个段落超过 300 字（最长 ${Math.max(...longParagraphs.map(p => p.replace(/\s/g, '').length))} 字）：大段文字是长文阅读的主要障碍`)
+  }
+  const levels = lines.map(text => text.match(/^(#{2,4})\s/)).filter(Boolean).map(match => match[1].length)
+  const skipped = levels.some((level, index) => index > 0 && level - levels[index - 1] > 1)
+  if (skipped) add('warn', 'heading-skip', '标题层级出现跳级（例如 h2 直接到 h4），目录会失去层次感')
+  if (levels.length && !levels.includes(4) && levels.includes(3)) {
+    add('info', 'flat-headings', '只有 h2/h3 一层半：模块内部没有小节标题，目录会比较平')
+  }
+
   // 7) 图示与表格
   const diagrams = (markdown.match(MERMAID_BLOCK) || []).length
   if (!diagrams) add('warn', 'no-knowledge-map', '没有任何 Mermaid 图：体系层缺了"知识地图"')
@@ -126,11 +139,14 @@ function analyze(file) {
 
   const errors = issues.filter(issue => issue.severity === 'error').length
   const warnings = issues.filter(issue => issue.severity === 'warn').length
+  const maxParagraphChars = paragraphs.length ? Math.max(...paragraphs.map(p => p.replace(/\s/g, '').length)) : 0
   return {
     file: path.resolve(file),
     chars: markdown.length,
     sections: sectionStarts.length,
     diagrams,
+    maxParagraphChars,
+    paragraphs: paragraphs.length,
     tableRows: tables,
     listItems: lists,
     teacherMarkers,
@@ -148,7 +164,7 @@ if (asJson) {
 } else {
   for (const report of reports) {
     process.stdout.write(`\n=== ${path.basename(report.file)} ===\n`)
-    process.stdout.write(`字数 ${report.chars} · 小节 ${report.sections} · 图示 ${report.diagrams} · 表格行 ${report.tableRows} · 列表项 ${report.listItems} · 教师态度标记 ${report.teacherMarkers}\n`)
+    process.stdout.write(`字数 ${report.chars} · 小节 ${report.sections} · 段落 ${report.paragraphs}（最长 ${report.maxParagraphChars} 字） · 图示 ${report.diagrams} · 表格行 ${report.tableRows} · 列表项 ${report.listItems} · 教师态度标记 ${report.teacherMarkers}\n`)
     process.stdout.write(`结构：${Object.entries(report.structure).map(([key, value]) => `${key}${value ? '✓' : '✗'}`).join(' ')}\n`)
     if (!report.issues.length) process.stdout.write('未发现问题\n')
     for (const issue of report.issues) {

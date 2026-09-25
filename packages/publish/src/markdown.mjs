@@ -221,11 +221,16 @@ export function summarizeMarkdown(markdown, limit = 150) {
   return text.length > limit ? `${text.slice(0, limit)}…` : text
 }
 
-/** 从 Markdown 抽标题，用于目录与页面标题。 */
+/**
+ * 从 Markdown 抽标题，用于目录与页面标题。
+ *
+ * 收到 h4：模块分节是 h3，模块内部的小节是 h4——目录要显示到这一级才有"分级"，
+ * 否则读者看到的是几十个平铺的标题。
+ */
 export function extractHeadings(markdown) {
   const headings = []
   for (const line of String(markdown ?? '').split('\n')) {
-    const match = line.match(/^(#{2,3})\s+(.*)$/)
+    const match = line.match(/^(#{2,4})\s+(.*)$/)
     if (match) headings.push({ level: match[1].length, text: match[2].trim(), id: slugify(match[2]) })
   }
   return headings

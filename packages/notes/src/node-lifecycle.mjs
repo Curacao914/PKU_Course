@@ -289,13 +289,14 @@ function mergeWriteUnit(group, index) {
     writerBrief: {
       ...(first.writerBrief || {}),
       moduleBriefs,
-      writeContract: moduleBriefs.length > 1
-        ? [
-          `本单元包含 ${moduleBriefs.length} 个知识模块，必须全部写完，顺序与 moduleBriefs 一致。`,
-          '每个模块以「### 模块标题」开头，标题与 moduleBriefs[].title 完全一致（程序按它对号入座）。',
-          '模块内部用「一、」「（一）」「1.」这类中式层级，不要再输出 Markdown 标题。'
-        ].join('')
-        : ''
+      writeContract: [
+        moduleBriefs.length > 1
+          ? `本次要一次写完 ${moduleBriefs.length} 个知识模块，顺序与 moduleBriefs 一致，一个都不能少。`
+          : '只写 moduleBriefs 里的这一个知识模块。',
+        '每个模块以「### 模块标题」开头，标题与 moduleBriefs[].title 完全一致（程序按它对号入座）。',
+        '模块内部需要分层时用「#### 小标题」——这是正文里唯一允许的 Markdown 标题，读者端目录会显示这一级；更细的层次用「（一）」「1.」或加粗。',
+        '单段不超过 300 字；三条以上并列内容用列表；对比与辨析用表格；每个模块至少一处列表或表格。'
+      ].join('\n')
     }
   }
 }
