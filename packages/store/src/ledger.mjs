@@ -139,13 +139,22 @@ export function openLedger(databasePath = ':memory:', options = {}) {
       return transaction(() => {
         let inserted = 0
         let existing = 0
+        // 新增了哪几条也要报出来：发现新课要提醒用户上传课件，光有计数不够用。
+        const created = []
         for (const replay of replays) {
           const replayKey = String(replay.replay_key || replay.replayKey || '').trim()
           const courseKey = String(replay.course_key || replay.courseKey || '').trim()
           if (!replayKey || !courseKey) throw new Error('登记回放需要 replay_key 与 course_key')
           const before = statements.findByReplayKey.get(replayKey)
           if (before) existing += 1
-          else inserted += 1
+          else {
+            inserted += 1
+            created.push({
+              replayKey,
+              courseName: String(replay.course_name || replay.courseName || ''),
+              title: String(replay.title || '')
+            })
+          }
           statements.insertTask.run(
             replayKey,
             courseKey,
@@ -159,7 +168,7 @@ export function openLedger(databasePath = ':memory:', options = {}) {
             at
           )
         }
-        return { inserted, existing }
+        return { inserted, existing, created }
       })
     },
 

@@ -21,8 +21,13 @@ function ledger() {
 
 test('discoverReplays is idempotent and never resets progress', () => {
   const db = ledger()
-  assert.deepEqual(db.discoverReplays([REPLAY]), { inserted: 1, existing: 0 })
-  assert.deepEqual(db.discoverReplays([REPLAY]), { inserted: 0, existing: 1 })
+  // created 报出"新增了哪几条"：发现新课要据此提醒用户上传课件，光有计数不够用
+  assert.deepEqual(db.discoverReplays([REPLAY]), {
+    inserted: 1,
+    existing: 0,
+    created: [{ replayKey: 'replay-abc', courseName: '刑法分论', title: '2026-05-27第10-12节' }]
+  })
+  assert.deepEqual(db.discoverReplays([REPLAY]), { inserted: 0, existing: 1, created: [] })
 
   const task = db.getTask('replay-abc')
   db.reportStage({ id: task.id, stage: 'downloaded', message: '媒体就绪' })

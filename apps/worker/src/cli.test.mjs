@@ -78,10 +78,13 @@ const parse = line => JSON.parse(line)
 /** 与 pipeline 测试同构的假模型：按角色分发。 */
 function fakeModel() {
   const calls = []
+  const payloads = []
   let writerCount = 0
   let revisionCount = 0
-  const callModel = async ({ role }) => {
+  const callModel = async payload => {
+    const { role } = payload
     calls.push(role)
+    payloads.push(payload)
     if (role === 'outline') {
       return { parsed: {
         mainLine: '主线',
@@ -117,7 +120,7 @@ function fakeModel() {
     }
     throw new Error(`未预期的角色：${role}`)
   }
-  return { callModel, calls }
+  return { callModel, calls, payloads }
 }
 
 test('help prints usage without touching dependencies', async () => {
@@ -181,10 +184,14 @@ test('discover flattens recordings and forwards the filters', async () => {
 test('discover records replays into the ledger idempotently', async () => {
   const { deps, lines } = harness()
   assert.equal(await runCli(['discover'], deps), 0)
-  assert.deepEqual(parse(lines.at(-1)).recorded, { inserted: 1, existing: 0 })
+  assert.deepEqual(parse(lines.at(-1)).recorded, {
+    inserted: 1,
+    existing: 0,
+    created: [{ replayKey: 'replay-1', courseName: '刑法分论', title: '2026-05-27第10-12节' }]
+  })
 
   assert.equal(await runCli(['discover'], deps), 0)
-  assert.deepEqual(parse(lines.at(-1)).recorded, { inserted: 0, existing: 1 }, '重复发现不得重复登记')
+  assert.deepEqual(parse(lines.at(-1)).recorded, { inserted: 0, existing: 1, created: [] }, '重复发现不得重复登记')
 })
 
 test('status reports stage counts and task rows', async () => {
@@ -357,6 +364,39 @@ test('notes turns a transcript file into a completed note and a ledger stage', a
   const brief = JSON.parse(fs.readFileSync(summary.brief.path, 'utf8'))
   assert.ok(brief.briefing.length >= 60, '简报要有实质内容')
   assert.ok(brief.keyPoints.length >= 1, '简报要给出要点')
+})
+
+test('materials archives a deck and notes uses it as writing material', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const archive = path.join(dir, 'materials')
+  const deckPath = path.join(dir, '第4讲.json')
+  fs.writeFileSync(deckPath, JSON.stringify({
+    slides: [{ slideNumber: 1, text: '第四讲 变量测量水平' }, { slideNumber: 2, text: '定类 定序 定距 定比' }]
+  }))
+
+  const model = fakeModel()
+  const { deps, lines } = harness({ callModel: model.callModel, configOverrides: { materialsRoot: archive } })
+
+  const archived = await runCli(['materials', '--file', deckPath, '--course', '刑法分论', '--lesson', '第10-12节'], deps)
+  assert.equal(archived, 0)
+  assert.equal(parse(lines.at(-1)).slideCount, 2)
+
+  const listed = await runCli(['materials', '--course', '刑法分论', '--lesson', '第10-12节'], deps)
+  assert.equal(listed, 0)
+  assert.equal(parse(lines.at(-1)).materials.length, 1)
+
+  // 笔记流程必须真的把课件带进提示词，否则"课件参与写作"只是文档里的一句话
+  const transcriptPath = path.join(dir, 'raw-transcript.md')
+  fs.writeFileSync(transcriptPath, '[00:00:01 – 00:00:05] 内容')
+  await runCli([
+    'notes', '--transcript', transcriptPath, '--course', '刑法分论', '--lesson', '第10-12节',
+    '--output-dir', path.join(dir, 'notes')
+  ], deps)
+
+  const outlineCall = model.payloads.find(payload => payload.role === 'outline')
+  assert.ok(outlineCall, '大纲调用应当发生')
+  assert.match(outlineCall.prompt.user, /变量测量水平/, '课件文字必须出现在大纲材料里')
+  assert.match(outlineCall.prompt.user, /PptAndSupplementSource/)
 })
 
 test('notes defers to the off-peak window instead of paying peak prices', async () => {

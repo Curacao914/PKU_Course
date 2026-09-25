@@ -215,6 +215,36 @@ export function createCommands(context) {
       }))
     )
     const recorded = withLedger(store => store.discoverReplays(flattened))
+
+    // 发现新课就提醒一件具体的事：这一节还没有课件。
+    // 教学网上没有课件，课件只在用户手里，而它对笔记质量影响很大（术语对齐、结构对照、
+    // 笔记里"依据第几页"）。提醒去重（每课次一条），用户回"无课件"就不再打扰。
+    const missingMaterials = (recorded.created || []).filter(item => !options.options['no-materials-notice'])
+      .filter(item => listMaterials({ root: config.materialsRoot, course: item.courseName, lesson: item.title }).length === 0)
+    if (missingMaterials.length) {
+      const store = openStore(config.ledgerPath)
+      try {
+        const list = missingMaterials
+          .map(item => `· ${item.courseName} · ${item.title}`)
+          .join('\n')
+        store.enqueueDelivery({
+          dedupeKey: `materials-needed:${missingMaterials.map(item => item.replayKey).join(',')}`,
+          purpose: 'materials-needed',
+          bodyText: [
+            `发现 ${missingMaterials.length} 节新课，但它们还没有课件：`,
+            list,
+            '',
+            '传一份 PPT（或 PDF）能让笔记对准课件结构、修正语音识别听错的专业词，',
+            '笔记里也能标"依据第几页"。没有课件我照样会写，只是少一层对照。',
+            '上传入口：https://course.law-tech.dev/admin'
+          ].join('\n'),
+          objectUrl: 'https://course.law-tech.dev/admin'
+        })
+      } finally {
+        store.close()
+      }
+    }
+
     if (options.options.out) {
       fs.mkdirSync(path.dirname(path.resolve(options.options.out)), { recursive: true })
       fs.writeFileSync(path.resolve(options.options.out), `${JSON.stringify({ ...result, flattened }, null, 2)}\n`)
@@ -224,6 +254,7 @@ export function createCommands(context) {
       courses: result.courses.length,
       replays: flattened.length,
       recorded,
+      missingMaterials: missingMaterials.map(item => `${item.courseName}·${item.title}`),
       recordings: flattened
     }, options)
     return flattened.length > 0 ? 0 : 1
@@ -1181,7 +1212,7 @@ export function createCommands(context) {
     }
   }
 
-  return { doctor, discover, download, transcribe, notes, publish, notify, cycle, verify, status }
+  return { doctor, discover, download, transcribe, notes, materials, publish, notify, cycle, verify, status }
 }
 
 export const USAGE = `用法：course <命令> [选项]
@@ -1190,7 +1221,7 @@ export const USAGE = `用法：course <命令> [选项]
   doctor                                   检查依赖与凭据是否齐备
   status     [--stage <阶段>] [--limit <条数>]
                                            查看账本：各阶段任务数与任务明细
-  discover   [--course <名称>] [--course-key <键>] [--out <文件>]
+  discover   [--course <名称>] [--course-key <键>] [--out <文件>] [--no-materials-notice]
                                            登录教学网，列出本学期课程与课堂实录
   download   --course-key <键> --replay-key <键> [--course <名称>] [--title <标题>]
                                            下载一条回放的媒体（HLS 分片 → MP4）
