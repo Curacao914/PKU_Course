@@ -303,12 +303,37 @@ const quizAnswer = item => typeof item === 'string' ? '' : spliceString(item?.an
  * 放在节末而不是节首：节前的事实性问题会让读者把阅读变成"找答案"，反而损害对
  * 无关内容的加工（调研 §5.2）。答案折叠是必须的——检索的前提是先自己回忆再看答案。
  */
+/** 接缝层的字数上限：提示词里已经声明过这些额度，这里做确定性执行。
+ *  模型不给面子时，成品不该被接缝段撑成两倍长——正文才是笔记。 */
+export const SPLICE_LIMITS = Object.freeze({
+  quizzesPerSection: 3,
+  answerChars: 80,
+  summaryChars: 110,
+  indexRows: 8,
+  groundworkItems: 4,
+  appendixTopics: 5,
+  appendixTerms: 10,
+  // 索引表格子：这是"查得到"而不是"读得完"的地方，一句话足够
+  termCell: 20,
+  nameCell: 26,
+  textCell: 34
+})
+
+/** 超过上限就截断（保留完整句子优先，实在不行加省略号）。 */
+const clamp = (value, max) => {
+  const text = spliceString(value)
+  if (text.length <= max) return text
+  const cut = text.slice(0, max)
+  const stop = Math.max(cut.lastIndexOf('。'), cut.lastIndexOf('；'), cut.lastIndexOf('，'))
+  return `${stop > max * 0.5 ? cut.slice(0, stop + 1) : cut}…`
+}
+
 export function renderQuiz(items = []) {
-  const list = (Array.isArray(items) ? items : []).filter(Boolean).slice(0, 5)
+  const list = (Array.isArray(items) ? items : []).filter(Boolean).slice(0, SPLICE_LIMITS.quizzesPerSection)
   if (!list.length) return ''
   const lines = ['**自测**（合上笔记，先自己写出来，再看答案）', '']
   list.forEach((item, index) => lines.push(`${index + 1}. ${quizQuestion(item)}`))
-  const answers = list.map((item, index) => [index + 1, quizAnswer(item)]).filter(([, text]) => text)
+  const answers = list.map((item, index) => [index + 1, clamp(quizAnswer(item), SPLICE_LIMITS.answerChars)]).filter(([, text]) => text)
   if (answers.length) {
     lines.push('', '<details><summary>参考答案</summary>', '')
     answers.forEach(([number, text]) => lines.push(`${number}. ${text}`))
@@ -318,7 +343,8 @@ export function renderQuiz(items = []) {
 }
 
 export function renderKnowledgeLink(value = {}, lesson = {}) {
-  const groundwork = Array.isArray(value.laysGroundworkFor) ? value.laysGroundworkFor.filter(Boolean) : []
+  const groundwork = (Array.isArray(value.laysGroundworkFor) ? value.laysGroundworkFor.filter(Boolean) : [])
+    .slice(0, SPLICE_LIMITS.groundworkItems)
   const inferred = (lesson.outline || [])
     .flatMap(node => node.concepts || [])
     .slice(0, 3)
@@ -338,8 +364,8 @@ export function renderKnowledgeLink(value = {}, lesson = {}) {
 }
 
 export function renderAppendix(value = {}) {
-  const terms = Array.isArray(value.terms) ? value.terms.filter(Boolean) : []
-  const topics = Array.isArray(value.topics) ? value.topics.filter(Boolean) : []
+  const terms = (Array.isArray(value.terms) ? value.terms.filter(Boolean) : []).slice(0, SPLICE_LIMITS.appendixTerms)
+  const topics = (Array.isArray(value.topics) ? value.topics.filter(Boolean) : []).slice(0, SPLICE_LIMITS.appendixTopics)
   if (!terms.length && !topics.length) return ''
   const lines = ['## 附录：补充与发散', '', '> 以下内容为课堂补充材料和发散性讨论，不影响课程主线。']
   if (terms.length) {
@@ -482,12 +508,13 @@ export function renderPitfalls(systemLayer = {}) {
  * 模型没给说明时也要保留名字（索引本身就有价值），说明列留空而不是编造。
  */
 /** 表格单元格限长：不做限制时模型会把整段解释塞进表格，复习层就变成第二份正文。 */
-const cell = (value, max = 48) => {
+const cell = (value, max = SPLICE_LIMITS.textCell) => {
   const text = spliceString(value)
   return text.length > max ? `${text.slice(0, max - 1)}…` : text
 }
 
 export function renderIndexTables(indexTables = {}, lesson = {}) {
+  const LIMIT = SPLICE_LIMITS.indexRows
   const fallback = (type) => {
     const seen = new Set()
     return (lesson.nodes || [])
@@ -505,15 +532,15 @@ export function renderIndexTables(indexTables = {}, lesson = {}) {
   const sections = []
   if (concepts.length) {
     sections.push(['### 概念索引', '', '| 概念 | 出现位置 | 一句话解释 | 易混点 |', '|------|---------|-----------|--------|',
-      ...concepts.map(item => `| ${cell(item.term || item.name, 24)} | ${cell(item.where || item.section, 24)} | ${cell(item.definition)} | ${cell(item.confusion || item.pitfall)} |`)].join('\n'))
+      ...concepts.slice(0, LIMIT).map(item => `| ${cell(item.term || item.name, SPLICE_LIMITS.termCell)} | ${cell(item.where || item.section, SPLICE_LIMITS.termCell)} | ${cell(item.definition)} | ${cell(item.confusion || item.pitfall)} |`)].join('\n'))
   }
   if (statutes.length) {
     sections.push(['### 法条索引', '', '| 法律·条号 | 核心规定 | 适用条件 | 与本课的关系 |', '|-----------|---------|---------|-------------|',
-      ...statutes.map(item => `| ${cell(item.name || item.provision, 30)} | ${cell(item.rule || item.content)} | ${cell(item.condition)} | ${cell(item.relation)} |`)].join('\n'))
+      ...statutes.slice(0, LIMIT).map(item => `| ${cell(item.name || item.provision, SPLICE_LIMITS.nameCell)} | ${cell(item.rule || item.content)} | ${cell(item.condition)} | ${cell(item.relation)} |`)].join('\n'))
   }
   if (cases.length) {
     sections.push(['### 案例索引', '', '| 案例 | 争点 | 结论与规则适用 | 老师的评价 |', '|------|------|---------------|-----------|',
-      ...cases.map(item => `| ${cell(item.name || item.case, 30)} | ${cell(item.issue)} | ${cell(item.holding || item.rule)} | ${cell(item.teacherView || item.comment)} |`)].join('\n'))
+      ...cases.slice(0, LIMIT).map(item => `| ${cell(item.name || item.case, SPLICE_LIMITS.nameCell)} | ${cell(item.issue)} | ${cell(item.holding || item.rule)} | ${cell(item.teacherView || item.comment)} |`)].join('\n'))
   }
   const corrections = (indexTables.asrCorrections || []).filter(Boolean)
   if (corrections.length) {
@@ -691,7 +718,7 @@ export function buildFinalNoteMarkdown({ courseSpec = {}, lesson = {}, spliceDat
   contentOutline.forEach((outlineNode, index) => {
     const title = outlineTopic(outlineNode)
     parts.push('', `### ${chineseIndex(index)}、${title}`, '')
-    const summary = spliceString(summaries[outlineNode.id], outlineNode.rationale || '')
+    const summary = clamp(summaries[outlineNode.id] || outlineNode.rationale || '', SPLICE_LIMITS.summaryChars)
     if (summary) parts.push(summary, '')
     ;(byOutline.get(outlineNode.id) || []).forEach(text => parts.push(text, ''))
     const quiz = renderQuiz(quizzes[outlineNode.id])
