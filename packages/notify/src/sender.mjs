@@ -27,6 +27,9 @@ export function deliveryLinkLabel(purpose = '') {
   if (purpose === 'course-brief') return '打开课程简报'
   if (purpose === 'course-note') return '打开课程笔记'
   if (purpose === 'daily-schedule') return '打开今日工作台'
+  if (purpose === 'new-lesson') return '打开管理台传课件'
+  if (purpose === 'provider-issue') return '去处理'
+  if (purpose === 'balance-warning') return '去充值'
   return '打开课程笔记'
 }
 

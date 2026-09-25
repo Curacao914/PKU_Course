@@ -5,6 +5,14 @@ import path from 'node:path'
 
 import { checkFreeSpace, createValidatedAcquisitionRuntime, formatBytes } from '@course/acquisition'
 import { addMaterial, listMaterials, parseInboxName, readDecks } from '@course/materials'
+
+import {
+  LOW_BALANCE_THRESHOLD_CNY,
+  classifyProviderIssue,
+  fetchAliyunBalance,
+  fetchDeepseekBalance,
+  renderBalanceWarning
+} from './billing.mjs'
 import {
   callCourseModel,
   createInitialLesson,
@@ -221,24 +229,24 @@ export function createCommands(context) {
     // 发现新课就提醒一件具体的事：这一节还没有课件。
     // 教学网上没有课件，课件只在用户手里，而它对笔记质量影响很大（术语对齐、结构对照、
     // 笔记里"依据第几页"）。提醒去重（每课次一条），用户回"无课件"就不再打扰。
-    const missingMaterials = (recorded.created || []).filter(item => !options.options['no-materials-notice'])
-      .filter(item => listMaterials({ root: config.materialsRoot, course: item.courseName, lesson: item.title }).length === 0)
-    if (missingMaterials.length) {
+    const created = (recorded.created || []).filter(() => !options.options['no-materials-notice'])
+    const missingMaterials = created.filter(item =>
+      listMaterials({ root: config.materialsRoot, course: item.courseName, lesson: item.title }).length === 0)
+    if (created.length) {
       const store = openStore(config.ledgerPath)
       try {
-        const list = missingMaterials
-          .map(item => `· ${item.courseName} · ${item.title}`)
-          .join('\n')
+        // 一条短消息：发现了什么、要不要你动手、去哪儿动手。
         store.enqueueDelivery({
-          dedupeKey: `materials-needed:${missingMaterials.map(item => item.replayKey).join(',')}`,
-          purpose: 'materials-needed',
+          dedupeKey: `new-lesson:${created.map(item => item.replayKey).sort().join(',')}`,
+          purpose: 'new-lesson',
           bodyText: [
-            `发现 ${missingMaterials.length} 节新课，但它们还没有课件：`,
-            list,
+            `【新课】${created.length} 节：${created.map(item => `${item.courseName} · ${item.title}`).join('；')}`,
             '',
-            '传一份 PPT（或 PDF）能让笔记对准课件结构、修正语音识别听错的专业词，',
-            '笔记里也能标"依据第几页"。没有课件我照样会写，只是少一层对照。',
-            '上传入口：https://course.law-tech.dev/admin'
+            missingMaterials.length
+              ? `其中 ${missingMaterials.length} 节还没有课件——有的话传一份，笔记会更准（术语对齐、结构对照）。`
+              : '课件都在，接下来自动下载、转写、写笔记。',
+            '写笔记排在低价时段，其余阶段随时进行。',
+            '上传课件：https://course.law-tech.dev/admin'
           ].join('\n'),
           objectUrl: 'https://course.law-tech.dev/admin'
         })
@@ -729,10 +737,14 @@ export function createCommands(context) {
    * 因此中断、部分失败、重复运行都是安全的。
    */
   async function cycle(options) {
+    const providerIssues = []
     const workerId = options.options['worker-id'] || `cycle:${os.hostname()}`
     const maxTasks = Number(options.options['max-tasks'] || 5)
     const quiet = { ...options, quiet: true }
-    const summary = { workerId, startedAt: new Date().toISOString(), discovered: null, disk: null, tasks: [], notification: null, errors: [] }
+    const summary = {
+      workerId, startedAt: new Date().toISOString(), discovered: null, disk: null,
+      tasks: [], notification: null, errors: [], providerIssues: [], lowBalance: null
+    }
 
     // 先把磁盘看清：空间不足时连扫描都不必做，但仍要把已排队的通知发出去
     const space = checkFreeSpace({ path: config.scratchRoot, minFreeBytes: config.minFreeBytes })
@@ -878,9 +890,15 @@ export function createCommands(context) {
               : publish(commandOptions))
         summary.tasks.push({ replayKey: task.replay_key, stage: task.stage, action: command, ok: code === 0 })
       } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        // 付费类故障（欠费/额度/密钥）要能被识别出来并单独提醒：它们需要用户动手，
+        // 沉在日志里等于没发生——用户只会看到"转写又失败了"。
+        const issue = classifyProviderIssue(message)
+        if (issue && !providerIssues.some(item => item.category === issue.category)) providerIssues.push(issue)
         summary.tasks.push({
           replayKey: task.replay_key, stage: task.stage, action: command, ok: false,
-          error: error instanceof Error ? error.message : String(error)
+          error: message,
+          ...(issue ? { providerIssue: issue.category } : {})
         })
       }
     }
@@ -907,6 +925,50 @@ export function createCommands(context) {
       }
     } catch (error) {
       summary.errors.push({ step: 'notify', message: error instanceof Error ? error.message : String(error) })
+    }
+
+    // 付费故障与低余额：排一条可行动的提醒（按天去重，不重复轰炸）
+    try {
+      const store = openStore(config.ledgerPath)
+      try {
+        const day = new Date().toISOString().slice(0, 10)
+        for (const issue of providerIssues) {
+          store.enqueueDelivery({
+            dedupeKey: `provider-issue:${issue.category}:${day}`,
+            purpose: 'provider-issue',
+            bodyText: [
+              `【需要处理】${issue.title}`,
+              '',
+              issue.hint,
+              issue.rechargeUrl ? `处理入口：${issue.rechargeUrl}` : '',
+              '',
+              `原始信息：${issue.detail}`
+            ].filter(Boolean).join('\n'),
+            objectUrl: issue.rechargeUrl || ''
+          })
+        }
+        summary.providerIssues = providerIssues.map(item => item.category)
+
+        // 余额检查：低于阈值也提醒一次（DeepSeek 有官方接口，查一次很便宜）
+        try {
+          const balance = await fetchDeepseekBalance({ apiKey: config.ai.apiKey })
+          if (Number(balance.total) < LOW_BALANCE_THRESHOLD_CNY) {
+            store.enqueueDelivery({
+              dedupeKey: `balance:deepseek:${day}`,
+              purpose: 'balance-warning',
+              bodyText: renderBalanceWarning({ provider: 'deepseek', total: balance.total }),
+              objectUrl: balance.rechargeUrl
+            })
+            summary.lowBalance = { provider: 'deepseek', total: balance.total }
+          }
+        } catch {
+          // 余额查不到不该让整轮失败
+        }
+      } finally {
+        store.close()
+      }
+    } catch (error) {
+      summary.errors.push({ step: 'provider-notice', message: error instanceof Error ? error.message : String(error) })
     }
 
     summary.finishedAt = new Date().toISOString()
@@ -1005,6 +1067,36 @@ export function createCommands(context) {
     }
     emit(report, options)
     return report.passed ? 0 : 1
+  }
+
+  /**
+   * 两个付费 API 的余额。
+   *
+   * 付费故障必须可行动：欠费导致的转写失败，用户要能一眼看出"是哪家、去哪儿充"。
+   * DeepSeek 有官方接口（现有 key 即可）；阿里云余额属账号维度，要账号 AK/SK。
+   */
+  async function balance(options) {
+    const threshold = Number(options.options.threshold || LOW_BALANCE_THRESHOLD_CNY)
+    const balances = []
+    try {
+      balances.push(await fetchDeepseekBalance({ apiKey: config.ai.apiKey }))
+    } catch (error) {
+      balances.push({ provider: 'deepseek', error: error instanceof Error ? error.message : String(error) })
+    }
+    try {
+      balances.push(await fetchAliyunBalance({
+        accessKeyId: env.ALIYUN_ACCESS_KEY_ID || '',
+        accessKeySecret: env.ALIYUN_ACCESS_KEY_SECRET || ''
+      }))
+    } catch (error) {
+      balances.push({ provider: 'aliyun', error: error instanceof Error ? error.message : String(error) })
+    }
+    const low = balances.filter(item => {
+      if (item.error || item.configured === false) return false
+      return Number(item.total ?? item.available ?? 0) < threshold
+    })
+    emit({ threshold, balances, low: low.map(item => item.provider) }, options)
+    return 0
   }
 
   /**
@@ -1247,7 +1339,7 @@ export function createCommands(context) {
     }
   }
 
-  return { doctor, discover, download, transcribe, notes, materials, publish, notify, cycle, verify, status }
+  return { doctor, discover, download, transcribe, notes, materials, balance, publish, notify, cycle, verify, status }
 }
 
 export const USAGE = `用法：course <命令> [选项]
@@ -1279,6 +1371,8 @@ export const USAGE = `用法：course <命令> [选项]
              --ingest                                 归档收件箱里的 课程__课次.扩展名
                                            教学网上没有课件：课件由用户上传，归档后作为
                                            术语/ASR 对照与结构对照材料参与笔记写作
+  balance    [--threshold <元>]                   查两个付费 API 的余额（DeepSeek 官方接口；
+                                           阿里云余额需账号 AK/SK，见 docs/07）
   publish    --from <笔记目录> [--course <名称>] [--lesson <课次>] [--out <站点目录>] [--origin <域名>]
                                            把笔记发布到站点，内容变化时排入一条微信通知
   notify     [--probe] [--loop] [--max-items <条数>]
