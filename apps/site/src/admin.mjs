@@ -595,7 +595,10 @@ export function createAdminHandler({
         // 单片的硬上限：切分逻辑用 1MB，这里留 8 倍余量，防止有人拿它当无限制上传用
         bytes = await readBinary(req, 8 * 1024 * 1024)
       } catch (error) {
+        // 先把话说清楚再断开：直接 destroy 会让 nginx 把这次请求报成 502，
+        // 用户看到的是"网关错误"，而真正的原因是这一片太大了。
         sendJson(res, 413, { ok: false, error: 'chunk_too_large', message: error.message })
+        setImmediate(() => { try { req.destroy() } catch {} })
         return true
       }
       const dir = path.join(scratchRoot, 'tmp', 'uploads', uploadId)
@@ -857,6 +860,14 @@ export function createAdminHandler({
     /** @returns {boolean} 是否已处理该请求 */
     async handle(req, res, pathname, url, { adminToken } = {}) {
       if (pathname === '/admin' || pathname === '/admin/') {
+        // 控制台必须走直连域名：它触发的动作最长要跑十几分钟，走 Cloudflare 会被
+        // 100 秒上限掐断；上传几十兆课件时，直连也是唯一跑得动的路。
+        const host = String(req.headers.host || '').split(':')[0]
+        if (host === 'course.law-tech.dev' || host === 'cf.law-tech.dev') {
+          res.writeHead(302, { location: 'https://admin.law-tech.dev/admin', 'cache-control': 'no-store' })
+          res.end()
+          return true
+        }
         const body = Buffer.from(ADMIN_HTML)
         res.writeHead(200, {
           'content-type': 'text/html; charset=utf-8',
