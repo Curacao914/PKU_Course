@@ -1,4 +1,0 @@
-# 听悟 URL 转录备用流程依赖
-# 仅在使用 optional/tingwu/ 目录下的脚本时需要
-
-aliyun-python-sdk-core>=2.13.0

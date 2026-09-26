@@ -1,7 +1,0 @@
-# 好课工作流主流程依赖
-# 安装：pip install -r requirements.txt
-
-python-pptx>=0.6.21    # PPT 文件解析（extract_ppt.py / extract_slides.py）
-zai-sdk>=0.2.0         # 智谱 GLM-OCR 调用（ocr_ppt.py，仅在纯图 PPT 时使用）
-
-# 备用流程（听悟 URL 转录）依赖另见：optional/tingwu/requirements.txt
