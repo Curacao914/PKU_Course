@@ -124,6 +124,49 @@ test('a deck can be uploaded from the browser without any filename convention', 
   assert.equal(empty.body.error, 'empty_body')
 })
 
+test('a large deck can be uploaded in chunks, because the tunnel drops big bodies', async () => {
+  // 实测：20MB 的 PUT 经 Cloudflare 隧道传到 12MB 时被掐断，服务端一个字节都没落盘。
+  // 课件动辄二三十兆，所以必须分片：每片几百 KB，单个请求又快又小。
+  const { handler, scratchRoot } = fixture()
+  const deck = Buffer.from(JSON.stringify({ slides: [{ slideNumber: 1, text: '第一页' }] }))
+  const half = Math.ceil(deck.length / 2)
+  const uploadId = 'utest123456'
+
+  const first = await call(handler, { method: 'PUT', url: `/api/admin/materials/chunk?uploadId=${uploadId}&index=0`, body: deck.subarray(0, half) })
+  assert.equal(first.res.state.status, 200)
+  assert.equal(first.body.received, 1)
+  const second = await call(handler, { method: 'PUT', url: `/api/admin/materials/chunk?uploadId=${uploadId}&index=1`, body: deck.subarray(half) })
+  assert.equal(second.body.received, 2)
+
+  const committed = await call(handler, {
+    method: 'POST', url: '/api/admin/materials/commit',
+    // 夹具用 JSON 课件（与单次上传那条测试一致）：内容随便，路径与合并逻辑才是被测对象
+    body: JSON.stringify({ uploadId, course: '刑法分论', lesson: '第10-12节', scope: 'lesson', name: '老师发的课件.json' })
+  })
+  assert.equal(committed.res.state.status, 200)
+  assert.equal(committed.body.ok, true)
+  assert.equal(committed.body.slideCount, 1)
+  assert.equal(committed.body.chunks, 2)
+  const archived = path.join(scratchRoot, 'materials', '刑法分论', '第10-12节', '老师发的课件.json')
+  assert.ok(fs.existsSync(archived), '合并后的文件要落到归档目录')
+  assert.equal(fs.readFileSync(archived).length, deck.length, '合并结果必须与原件逐字节一致')
+  assert.ok(!fs.existsSync(path.join(scratchRoot, 'tmp', 'uploads', uploadId)), '提交后临时分片要清掉')
+})
+
+test('chunked upload rejects a traversal-shaped upload id and empty commits', async () => {
+  const { handler } = fixture()
+  const bad = await call(handler, { method: 'PUT', url: '/api/admin/materials/chunk?uploadId=../../etc&index=0', body: Buffer.from('x') })
+  assert.equal(bad.res.state.status, 400)
+  assert.equal(bad.body.error, 'bad_upload_id')
+
+  const none = await call(handler, {
+    method: 'POST', url: '/api/admin/materials/commit',
+    body: JSON.stringify({ uploadId: 'nothinghere1', course: '刑法分论', lesson: '第10-12节', name: 'x.pptx' })
+  })
+  assert.equal(none.res.state.status, 400)
+  assert.equal(none.body.error, 'no_chunks')
+})
+
 test('uploading requires the admin token', async () => {
   const { handler } = fixture()
   const res = await call(handler, {

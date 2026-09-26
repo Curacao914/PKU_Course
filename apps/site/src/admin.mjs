@@ -568,6 +568,110 @@ export function createAdminHandler({
      * 服务端不需要解析 multipart，也就没有多一个解析器的攻击面。
      * 归属由前端的选择器给出（课程 + 课次 + 作用域），因此**不需要文件名约定**。
      */
+    /**
+     * 分片上传。
+     *
+     * 为什么需要：Cloudflare 隧道对大请求体会中途掐断——实测 20MB 的 PUT 传到 12MB
+     * 时连接被关（客户端只看到「上传失败」，服务端一个字节都没落盘）。用户上传的
+     * PPT 动辄二三十兆，所以大文件必须切小走：每个分片几百 KB，单个请求又快又小，
+     * 隧道的限制就碰不到了。
+     *
+     * 两段式：PUT .../chunk 落分片 → POST .../commit 合并并归档。
+     * 分片只写在 scratchRoot/tmp/uploads/<id>/ 下，id 走白名单字符集，杜绝路径穿越。
+     */
+    if (pathname === `${ADMIN_PREFIX}materials/chunk` && req.method === 'PUT') {
+      const uploadId = String(url.searchParams.get('uploadId') || '')
+      const index = Number(url.searchParams.get('index'))
+      if (!/^[A-Za-z0-9_-]{6,64}$/.test(uploadId)) {
+        sendJson(res, 400, { ok: false, error: 'bad_upload_id' })
+        return true
+      }
+      if (!Number.isInteger(index) || index < 0 || index > 4000) {
+        sendJson(res, 400, { ok: false, error: 'bad_chunk_index' })
+        return true
+      }
+      let bytes
+      try {
+        // 单片的硬上限：切分逻辑用 1MB，这里留 8 倍余量，防止有人拿它当无限制上传用
+        bytes = await readBinary(req, 8 * 1024 * 1024)
+      } catch (error) {
+        sendJson(res, 413, { ok: false, error: 'chunk_too_large', message: error.message })
+        return true
+      }
+      const dir = path.join(scratchRoot, 'tmp', 'uploads', uploadId)
+      fs.mkdirSync(dir, { recursive: true })
+      fs.writeFileSync(path.join(dir, `${String(index).padStart(5, '0')}.part`), bytes)
+      const received = fs.readdirSync(dir).filter(name => name.endsWith('.part')).length
+      sendJson(res, 200, { ok: true, uploadId, index, bytes: bytes.length, received })
+      return true
+    }
+
+    if (pathname === `${ADMIN_PREFIX}materials/commit` && req.method === 'POST') {
+      let payload = {}
+      try {
+        payload = safeJson(await readBody(req, 256 * 1024)) || {}
+      } catch (error) {
+        sendJson(res, 400, { ok: false, error: 'bad_body', message: error.message })
+        return true
+      }
+      const uploadId = String(payload.uploadId || '')
+      const course = String(payload.course || '').trim()
+      const lesson = String(payload.lesson || '').trim()
+      const scope = String(payload.scope || 'lesson').trim()
+      const name = safeMaterialName(payload.name || 'slides.pptx')
+      if (!/^[A-Za-z0-9_-]{6,64}$/.test(uploadId)) {
+        sendJson(res, 400, { ok: false, error: 'bad_upload_id' })
+        return true
+      }
+      if (!course || (scope !== 'course' && !lesson)) {
+        sendJson(res, 400, { ok: false, error: 'missing_target', message: '分片齐了但没说清这份课件属于哪节课' })
+        return true
+      }
+      const dir = path.join(scratchRoot, 'tmp', 'uploads', uploadId)
+      const parts = fs.existsSync(dir)
+        ? fs.readdirSync(dir).filter(item => item.endsWith('.part')).sort()
+        : []
+      if (!parts.length) {
+        sendJson(res, 400, { ok: false, error: 'no_chunks', message: '没有收到任何分片' })
+        return true
+      }
+      const tempDir = path.join(scratchRoot, 'tmp')
+      fs.mkdirSync(tempDir, { recursive: true })
+      const tempPath = path.join(tempDir, `upload-${Date.now()}-${name}`)
+      try {
+        fs.writeFileSync(tempPath, Buffer.alloc(0))
+        for (const part of parts) {
+          fs.appendFileSync(tempPath, fs.readFileSync(path.join(dir, part)))
+        }
+        const result = await addMaterial({
+          root: materialsRoot,
+          course,
+          lesson: scope === 'course' ? '' : lesson,
+          scope,
+          appliesTo: Array.isArray(payload.appliesTo) ? payload.appliesTo : [],
+          filePath: tempPath,
+          name
+        })
+        sendJson(res, 200, {
+          ok: true,
+          course,
+          lesson: scope === 'course' ? '（全课程通用）' : lesson,
+          scope,
+          name: result.entry.name,
+          slideCount: result.deck.slideCount,
+          bytes: result.entry.bytes,
+          chunks: parts.length,
+          checksum: result.entry.checksum.slice(0, 12)
+        })
+      } catch (error) {
+        sendJson(res, 500, { ok: false, error: 'material_failed', message: error instanceof Error ? error.message : String(error) })
+      } finally {
+        fs.rmSync(tempPath, { force: true })
+        fs.rmSync(dir, { recursive: true, force: true })
+      }
+      return true
+    }
+
     if (pathname === `${ADMIN_PREFIX}materials` && (req.method === 'PUT' || req.method === 'POST')) {
       const course = String(url.searchParams.get('course') || '').trim()
       const lesson = String(url.searchParams.get('lesson') || '').trim()

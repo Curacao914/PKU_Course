@@ -614,7 +614,24 @@ async function doAction (action, extra, btn) {
   load()
 }
 
-/** 上传课件：选好文件就直接传，不需要再点一次按钮。 */
+/**
+ * 上传课件：选好文件就直接传，不需要再点一次按钮。
+ *
+ * 大文件走**分片**：Cloudflare 隧道会把大的请求体中途掐断（实测 20MB 传到 12MB
+ * 就被关掉，服务端一个字节都没落盘），而课件动辄二三十兆。切成 1MB 一片之后
+ * 每个请求都又小又快，顺便还能报进度——用户至少知道"正在传第几片"。
+ */
+var CHUNK_SIZE = 1024 * 1024
+
+async function putChunk (uploadId, index, blob, key) {
+  var res = await fetch('/api/admin/materials/chunk?uploadId=' + encodeURIComponent(uploadId) + '&index=' + index, {
+    method: 'PUT', headers: headers(false), body: blob
+  })
+  var data = await res.json()
+  if (!res.ok || !data.ok) throw new Error(data.message || data.error || ('分片 ' + index + ' 失败'))
+  return data
+}
+
 async function uploadDeck (key, file, btn) {
   var task = taskByKey(key)
   if (!task || !task.courseName) { toast('找不到这条课次的课程名，先刷新页面', 'error'); return }
@@ -624,13 +641,33 @@ async function uploadDeck (key, file, btn) {
   }
   if (!file) { toast('先选一个 .pptx / .ppt / .pdf 文件', 'error'); return }
   var restore = busyButton(btn, '上传中…')
-  state.uploads[key] = '上传中…（' + file.name + '）'
+  var sizeMb = (file.size / 1048576).toFixed(1)
+  state.uploads[key] = '上传中…（' + file.name + ' · ' + sizeMb + 'MB）'
   setStatus(key, state.uploads[key])
-  var params = new URLSearchParams({ course: task.courseName, lesson: task.title, scope: 'lesson', name: file.name })
   toast('上传并解析：' + file.name, 'info')
   try {
-    var res = await fetch('/api/admin/materials?' + params.toString(), { method: 'PUT', headers: headers(false), body: file })
-    var data = await res.json()
+    var data
+    if (file.size > 2 * CHUNK_SIZE) {
+      var uploadId = 'u' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10)
+      var total = Math.ceil(file.size / CHUNK_SIZE)
+      for (var index = 0; index < total; index += 1) {
+        var percent = Math.round((index / total) * 100)
+        state.uploads[key] = '上传中 ' + percent + '%（' + file.name + ' · ' + sizeMb + 'MB · 第 ' + (index + 1) + '/' + total + ' 片）'
+        setStatus(key, state.uploads[key])
+        await putChunk(uploadId, index, file.slice(index * CHUNK_SIZE, (index + 1) * CHUNK_SIZE), key)
+      }
+      state.uploads[key] = '解析中…（' + file.name + '）'
+      setStatus(key, state.uploads[key])
+      var res = await fetch('/api/admin/materials/commit', {
+        method: 'POST', headers: headers(true),
+        body: JSON.stringify({ uploadId: uploadId, course: task.courseName, lesson: task.title, scope: 'lesson', name: file.name })
+      })
+      data = await res.json()
+    } else {
+      var params = new URLSearchParams({ course: task.courseName, lesson: task.title, scope: 'lesson', name: file.name })
+      var single = await fetch('/api/admin/materials?' + params.toString(), { method: 'PUT', headers: headers(false), body: file })
+      data = await single.json()
+    }
     out(JSON.stringify(data, null, 2))
     if (data.ok) {
       var when = new Date().toTimeString().slice(0, 5)
@@ -641,7 +678,7 @@ async function uploadDeck (key, file, btn) {
       toast('上传失败：' + (data.message || data.error), 'error')
     }
   } catch (error) {
-    state.uploads[key] = '失败：' + error
+    state.uploads[key] = '失败：' + error + '（可重试；仍失败就把文件放进服务器收件箱再跑一次归档）'
     toast('上传失败：' + error, 'error')
   } finally {
     restore()
