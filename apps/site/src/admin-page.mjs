@@ -368,7 +368,8 @@ function renderOverview () {
         return '<div class="todo"><div class="t"><b>' + esc(item.title) + '</b><span>' + esc(item.note) + '</span></div>' +
           '<button class="act" data-go="' + item.tab + '">' + esc(item.label) + '</button></div>'
       }).join('')
-    : '<h1>都处理完了</h1><p class="lede">没有需要你动手的事。定时任务会继续按阶段推进，有新笔记会推到你微信。</p>' +
+    : '<h1>都处理完了</h1><p class="lede">没有需要你动手的事。' +
+      (counts.waiting ? '队列里还有 ' + counts.waiting + ' 节，会按阶段自己往下跑（写笔记排在低价时段），跑完推到你微信。' : '有新笔记会推到你微信。') + '</p>' +
       '<div class="empty-ok"><span class="pill ok"><span class="dot"></span>一切正常</span></div>'
 
   var spend = s.spend || { asrCny: 0, notesCny: 0, totalCny: 0 }
