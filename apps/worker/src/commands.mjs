@@ -37,6 +37,15 @@ import {
 } from '@course/notify'
 import { buildNoteRecord, readSiteIndex, writeSite } from '@course/publish'
 
+import {
+  collectDigest,
+  digestSubject,
+  previousDateKey,
+  renderDigestHtml,
+  renderDigestText,
+  sendResendEmail
+} from './digest.mjs'
+
 /**
  * 只保留最近 N 次运行摘要。
  *
@@ -1793,10 +1802,65 @@ export function createCommands(context) {
     }
   }
 
+
+  /**
+   * 每日邮件日报。
+   *
+   * 用户的要求很具体：「每天早上 7 点告诉我前一天更新了哪些课程；没有更新就不发」，
+   * 且「邮件的内容呈现要求更高」——所以正文只有表格与列表，没有长段摘要。
+   * 它不依赖微信通道：那条路要用户先给机器人发消息，日报不该被一起拖死。
+   */
+  async function digest(options) {
+    const date = options.options.date || previousDateKey(clockNow(), config.digest.timeZone)
+    const store = openStore(config.ledgerPath)
+    let tasks = []
+    try {
+      tasks = store.listTasks({ limit: 200 }).map(task => ({
+        courseName: task.course_name,
+        title: task.title,
+        stage: task.stage,
+        attempts: task.attempts,
+        lastError: task.last_error,
+        updatedAt: task.updated_at
+      }))
+      if (options.flags.has('retry-failed')) store.reviveFailedDeliveries()
+    } finally {
+      store.close()
+    }
+    let index = {}
+    try { index = readSiteIndex(config.siteRoot) } catch { index = {} }
+
+    const report = collectDigest({ date, index, tasks, timeZone: config.digest.timeZone })
+    const html = renderDigestHtml(report, { siteOrigin: config.notify.publicUrl })
+    const text = renderDigestText(report, { siteOrigin: config.notify.publicUrl })
+    const subject = digestSubject(report)
+
+    if (options.flags.has('dry-run')) {
+      emit({ dryRun: true, subject, to: config.digest.to ? 'set' : 'missing', ...report, html, text }, options)
+      return 0
+    }
+    if (!report.hasNews && !options.flags.has('force')) {
+      emit({ skipped: true, reason: '昨天没有更新', date, subject }, options)
+      stderr('昨天没有更新，按约定不发邮件。')
+      return 0
+    }
+    const to = options.options.to || config.digest.to
+    const result = await sendResendEmail({
+      apiKey: config.digest.resendApiKey,
+      from: config.digest.from,
+      to,
+      subject,
+      html,
+      text
+    })
+    emit({ sent: true, id: result.id, to: to ? 'set' : 'missing', subject, date, published: report.published.length }, options)
+    return 0
+  }
+
   // 键名必须与 CLI 命令名一致：'admin-passwd' 带连字符，不能用标识符简写
   return {
     doctor, discover, download, transcribe, notes, materials, balance, publish,
-    notify, cycle, verify, status, retry, prune, backup,
+    notify, cycle, verify, status, retry, prune, backup, digest,
     'admin-passwd': adminPassword
   }
 }
@@ -1852,6 +1916,10 @@ export const USAGE = `用法：course <命令> [选项]
   retry      --replay-key <键> [--stage <阶段>]    人工恢复：清空失败计数并等待重新领取。
                                            不给 --stage 时按已有产物推断回到哪一步
                                            （媒体在→downloaded，转录稿在→transcript_ready）
+  digest     [--date <YYYY-MM-DD>] [--to <邮箱>] [--dry-run] [--force]
+                                           每日邮件日报：前一天新发布/更新的课次、需要处理的
+                                           课次。**没有更新就不发**（--force 可强制）。
+                                           走 Resend；与微信通道相互独立
   backup     [--keep <份数>]                     把账本与站点库做一致性快照（默认留 7 份）
   prune      [--apply] [--keep-originals]         清理原件：纯文本（转录稿/课件文字/笔记）
                                            永久保留；视频、音频、PPT 原文件只在转换成功

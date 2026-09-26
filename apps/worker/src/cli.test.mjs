@@ -663,6 +663,51 @@ test('publish --no-notify updates the site without queueing another push', async
   assert.ok(fs.existsSync(path.join(siteDir, 'notes/刑法分论/第10-12节.html')), '站点照样要更新')
 })
 
+test('the daily digest lists what changed yesterday and stays silent when nothing did', async () => {
+  const { collectDigest, digestSubject, renderDigestHtml, renderDigestText, sendResendEmail } = await import('./digest.mjs')
+  const index = { notes: [
+    { courseName: '商法概论', lessonTitle: '2026-09-20第2-4节', slug: 'notes/商法概论/2026-09-20第2-4节', markdown: 'x'.repeat(18000), readMinutes: 45,
+      publishedAt: '2026-09-25T23:43:00.000Z', brief: { briefing: '本讲从为什么要有企业推进到为什么要有公司。', keyPoints: ['交易成本', '有限责任', '刺破面纱'] } },
+    { courseName: '刑事执行法', lessonTitle: '旧课', slug: 'notes/x', markdown: 'x', publishedAt: '2026-09-20T00:00:00.000Z' }
+  ] }
+  const tasks = [
+    { courseName: '普通法专题', title: '2026-09-24第7-9节', stage: 'discovered', updatedAt: '2026-09-25T23:31:00.000Z' },
+    { courseName: '刑事执行法', title: '2026-09-14第5-6节', stage: 'published', updatedAt: '2026-09-25T11:35:00.000Z' },
+    { courseName: '国际刑法学', title: '2026-09-23第10-12节', stage: 'needs_attention', attempts: 5, lastError: '模型连续返回空结果', updatedAt: '2026-09-26T01:00:00.000Z' }
+  ]
+  // 北京时间 2026-09-26 的「昨天」= 09-25（UTC 的 09-25 16:00 之后也算 09-26，按东八区算）
+  const report = collectDigest({ date: '2026-09-26', index, tasks, timeZone: 'Asia/Shanghai' })
+  assert.equal(report.published.length, 1, '只算昨天发布的（09-25T23:43Z = 北京时间 09-26 07:43）')
+  assert.equal(report.hasNews, true)
+  assert.match(digestSubject(report), /1 篇新笔记/)
+  assert.equal(report.problems.length, 1)
+  assert.equal(report.waiting, 1)
+
+  const html = renderDigestHtml(report)
+  assert.match(html, /<table/, '邮件正文用表格，不写长段摘要')
+  assert.match(html, /商法概论/)
+  assert.match(html, /交易成本/, '三条要点要列出来')
+  assert.ok(!/本讲从为什么要有企业推进到为什么要有公司。.*本讲从为什么要有企业推进到为什么要有公司。/s.test(html))
+  const text = renderDigestText(report)
+  assert.match(text, /课程笔记日报 · 2026-09-26/)
+
+  const quiet = collectDigest({ date: '2026-09-01', index, tasks, timeZone: 'Asia/Shanghai' })
+  assert.equal(quiet.hasNews, false)
+  assert.match(digestSubject(quiet), /无更新/)
+
+  // 发信：不真的联网，只核对请求体
+  const calls = []
+  const fakeFetch = async (url, options) => { calls.push({ url, options }); return { ok: true, status: 200, text: async () => '{"id":"abc"}' } }
+  const sent = await sendResendEmail({ apiKey: 're_test', from: 'course@law-tech.dev', to: 'me@example.com', subject: 'x', html: '<p>x</p>', text: 'x', fetchImpl: fakeFetch })
+  assert.equal(sent.id, 'abc')
+  assert.equal(calls[0].url, 'https://api.resend.com/emails')
+  assert.match(calls[0].options.headers.authorization, /Bearer re_test/)
+  assert.match(calls[0].options.body, /course@law-tech\.dev/)
+  await assert.rejects(() => sendResendEmail({ from: 'a@b.c', to: 'x@y.z', subject: 's' }), /RESEND_API_KEY/)
+  await assert.rejects(() => sendResendEmail({ apiKey: 'k', from: '', to: 'x@y.z', subject: 's' }), /发件人/)
+  await assert.rejects(() => sendResendEmail({ apiKey: 'k', from: 'a@b.c', to: '', subject: 's' }), /收件人/)
+})
+
 test('publish refuses a directory without a notes run summary', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
   const { deps, errors } = harness()

@@ -53,6 +53,8 @@ export function resolveWorkerConfig(env = process.env, options = {}) {
     materialsRoot: options.materialsRoot || env.COURSE_MATERIALS_DIR || path.join(scratchRoot, 'materials'),
     inboxRoot: options.inboxRoot || env.COURSE_INBOX_DIR || path.join(scratchRoot, 'inbox'),
     ledgerPath: options.ledgerPath || env.COURSE_LEDGER_PATH || path.join(scratchRoot, 'ledger.sqlite'),
+    // 站点目录：日报要从发布库（library.json 边上那份 notes.json）读"昨天发布了什么"
+    siteRoot: options.siteRoot || env.COURSE_SITE_ROOT || path.join(scratchRoot, 'site'),
     chromePath: options.chromePath || env.COURSE_CHROME_PATH || '',
     python: options.python || env.COURSE_PYTHON || 'python3',
     ffmpeg: env.COURSE_FFMPEG || 'ffmpeg',
@@ -112,6 +114,13 @@ export function resolveWorkerConfig(env = process.env, options = {}) {
         url: runtime.notifyFallbackUrl || env.COURSE_NOTIFY_FALLBACK_URL || '',
         key: runtime.notifyFallbackKey || env.SERVERCHAN_SENDKEY || env.PUSHPLUS_TOKEN || ''
       }
+    },
+    // 每日邮件日报（Resend）。与微信通道相互独立：微信那条要用户先来信，日报不该被拖死。
+    digest: {
+      resendApiKey: env.RESEND_API_KEY || '',
+      from: env.COURSE_DIGEST_FROM || 'course@law-tech.dev',
+      to: env.COURSE_DIGEST_TO || '',
+      timeZone: env.COURSE_DIGEST_TIME_ZONE || 'Asia/Shanghai'
     },
     asr: {
       entry: ASR_WORKER_ENTRY,
