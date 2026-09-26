@@ -272,6 +272,43 @@ node apps/worker/bin/course.mjs publish --rebuild     # 只读发布库重建站
 
 手动运行走的是与定时任务**完全相同**的 CLI 入口，不存在两套行为。
 
+## 网络架构（2026-09-27 定型）：读走边缘缓存，写走直连
+
+实测把这条链路的瓶颈量清楚了：
+
+| 路径 | 速度 |
+|---|---|
+| 服务器 → 国内镜像（同区域） | 151 MB/s |
+| Mac → 服务器（SSH 上传方向） | 10 MB/s |
+| 服务器 → Mac（下载方向） | 0.16–0.5 MB/s |
+| 经 Cloudflare 隧道（两个方向都被它压） | 0.12–0.25 MB/s |
+
+结论：这台上海的机器**入带宽很快、出带宽被压到 ~4 Mbps**；隧道最近的边缘在洛杉矶，
+所以**读者下载**这一侧最慢。于是把两条路分开：
+
+```
+course.law-tech.dev  → Cloudflare（橙云）+ 隧道 + 缓存规则   ← 读者：命中边缘，不回源
+admin.law-tech.dev   → A 记录直连 124.222.111.108:443        ← 管理台与上传：国内直连
+cf.law-tech.dev      → Cloudflare（橙云）+ 隧道               ← 兜底入口
+```
+
+| 组件 | 位置 | 说明 |
+|---|---|---|
+| nginx（系统服务，enabled） | `/etc/nginx/sites-available/course` | 443 TLS → 反代 `127.0.0.1:3100`；`client_max_body_size 256m`；`proxy_read_timeout 1800s`（管理台「跑一轮」要跑十几分钟） |
+| 证书 | `/etc/letsencrypt/live/course.law-tech.dev/` | Let's Encrypt，DNS-01（Cloudflare 插件），certbot.timer 自动续期；覆盖 `course.` 与 `admin.` 两个域名 |
+| Cloudflare API Token | `/root/.secrets/cloudflare.ini`（0600） | 权限：Zone DNS Edit + Zone Cache Rules Edit |
+| 缓存规则 | Cloudflare → Caching → Cache Rules | `course.law-tech.dev` 下的 `/notes/ /concepts/ /statutes/ /cases/ /courses/ /search/ /assets/` 与 `/`、`/feed.xml`、`/notes.json` 设为可缓存，Edge TTL 1 天 |
+
+**控制台必须走 `https://admin.law-tech.dev/admin`**：它触发的动作最长十几分钟，走 Cloudflare 会被
+100 秒上限掐断；上传几十兆课件也只有直连跑得动。站点服务器会把 `course.law-tech.dev/admin`
+**302 跳转**到直连域名，所以从任何入口点进来都会落到快的路上。
+
+**实测**（2026-09-27）：20MB 课件分片上传 **16 秒（~1.25 MB/s）**，同一份文件走隧道时是 90 KB/s——快 14 倍；
+服务器自身测试同一份文件 2 秒（~10 MB/s）。
+
+出带宽的 4 Mbps 是**实例规格**决定的：要读者侧更快，只能在腾讯云控制台升公网带宽（要花钱）；
+免费的办法就是上面那条缓存规则——静态站命中边缘后不再回源。
+
 ## 待建（后续步骤）
 
 - 微信出站消除会话窗口依赖（等 Control UI 批准设备）。
