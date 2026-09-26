@@ -385,6 +385,30 @@ test('the console page is served without a token so the user can enter one', asy
   assert.ok(!res.state.body.includes(TOKEN), '页面里不得内嵌令牌')
 })
 
+test('the todo list only asks for courseware that would still change the outcome', async () => {
+  // 已经发布、或已经写完笔记的课次，再提示「缺课件」纯属噪音——第一屏的待办一旦掺水就没人看了。
+  const { handler, scratchRoot } = fixture()
+  const outputDir = path.join(scratchRoot, 'replays', 'replay-1', 'output')
+  fs.mkdirSync(outputDir, { recursive: true })
+  const transcriptPath = path.join(outputDir, 'transcript.txt')
+  fs.writeFileSync(transcriptPath, '正文')
+
+  const store = openLedger(path.join(scratchRoot, 'ledger.sqlite'))
+  const claim = store.claimTask({ replayKey: 'replay-1', workerId: 'test' })
+  store.reportStage({ id: claim.task.id, stage: 'transcript_ready', message: '转录完成', data: { artifacts: { transcriptPath } } })
+  store.close()
+
+  const waiting = await call(handler, { url: '/api/admin/status' })
+  assert.deepEqual(waiting.body.todos.missingMaterials.map(item => item.replayKey), ['replay-1'], '待写笔记的课次才提示补课件')
+
+  const store2 = openLedger(path.join(scratchRoot, 'ledger.sqlite'))
+  store2.reportStage({ id: store2.getTask('replay-1').id, stage: 'published', message: '已发布' })
+  store2.close()
+
+  const done = await call(handler, { url: '/api/admin/status' })
+  assert.deepEqual(done.body.todos.missingMaterials, [], '发布之后就不该再催课件了')
+})
+
 test('each lesson reports what it cost, split into transcription and note writing', async () => {
   // 用户问过「转文字和写笔记各花多少钱」。这个数字来自真实用量：
   // 转写用账单口径的语音秒数，笔记用状态文件里每次模型调用的 usage。

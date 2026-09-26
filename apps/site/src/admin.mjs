@@ -362,9 +362,11 @@ export function createAdminHandler({
         })
         continue
       }
-      // 已经有转录稿但还没课件：说明马上要写笔记了，这时补课件最有用
-      const hasTranscript = Boolean(task.artifactsPath || task.hasTranscript)
-      if (hasTranscript && !task.materials.length) {
+      // 已经有转录稿但还没课件：说明马上要写笔记了，这时补课件最有用。
+      // **只对还没写笔记的课次提这件事**：已经发布/已写完的课次再提示"缺课件"是噪音，
+      // 第一屏的待办一旦掺水，用户就不会再看它了。
+      const waitingForNotes = task.stage === 'transcript_ready'
+      if (waitingForNotes && !task.materials.length) {
         todos.missingMaterials.push({ replayKey: task.replayKey, courseName: task.courseName, title: task.title })
       }
     }
