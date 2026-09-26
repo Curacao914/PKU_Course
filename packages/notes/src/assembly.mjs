@@ -108,8 +108,23 @@ function stripRawMeta(markdown = '') {
     .trim())
 }
 
+/**
+ * 四级及以下标题改成加粗行。
+ *
+ * 对齐 haoke/newhaoke 那套（用户明确说"看起来舒服"的）成品格式：
+ * 目录只列到「一、话题」这一级，小节「（一）…」是**加粗正文行**而不是标题。
+ * 好处是左栏目录短、层级浅，扫一眼就知道这节课讲了几件事；而标题层级再往下分
+ * （我们之前到 h4）会让目录变成一棵树，读者反而看不出结构。
+ */
+export function boldBodyHeadings(markdown = '') {
+  return String(markdown ?? '').split('\n').map(line => {
+    const match = line.match(/^(#{4,6})\s+(.+?)\s*#*\s*$/)
+    return match ? `**${match[2]}**` : line
+  }).join('\n')
+}
+
 export function stripMetaBlock(markdown = '') {
-  return demoteBodyHeadings(stripRawMeta(markdown))
+  return boldBodyHeadings(demoteBodyHeadings(stripRawMeta(markdown)))
 }
 
 /** 标题比较用的归一：去掉井号、中式序号与空白，只留文字。 */
@@ -393,8 +408,14 @@ export function renderAppendix(value = {}) {
 }
 
 // ---------------------------------------------------------------- 体系层
-// 笔记要"先给体系、再进细节"：顶部四件套（位置/知识地图/体系线索/核心问题·目标）
-// 让读者在 30 秒内建立框架，正文与索引表再承担细节与检索。
+//
+// 顶部的体系信息由 renderCourseOverview 一个块承担（核心问题 / 应当能够 / 课程脉络），
+// 位置与铺垫交给结尾的 renderKnowledgeLink。下面这几个渲染器是**第一版的分件版本**
+// （位置、地图、体系线索、核心问题、学习目标各占一个 h2），现在只有知识地图还在用；
+// 保留它们是为了不破坏既有测试与将来"想把某一块单独拿出去"的可能，别误以为漏调用了。
+//
+// 同理 renderPitfalls / renderIndexTables 已退出成品流程：索引交给站点的
+// 概念/法条/案例索引页，易错点交给正文里的 ⚠️ 易混提醒。
 
 const MERMAID_START = /^\s*(flowchart|graph|timeline|mindmap|sequenceDiagram|classDiagram|stateDiagram(-v2)?)\b/
 
@@ -430,13 +451,16 @@ export function renderKnowledgeMap(systemLayer = {}, lesson = {}) {
     mermaid = lines.join('\n')
   }
 
+  // 收进折叠块：地图是"想看一眼结构时"才展开的东西，常驻第一屏只会把概览挤下去
   return [
-    '## 知识地图',
+    '<details><summary>知识地图</summary>',
     '',
     '```mermaid',
     mermaid,
     '```',
-    caption ? `\n> ${caption}` : ''
+    caption ? `\n> ${caption}` : '',
+    '',
+    '</details>'
   ].filter(Boolean).join('\n')
 }
 
@@ -707,21 +731,25 @@ export function buildFinalNoteMarkdown({ courseSpec = {}, lesson = {}, spliceDat
   const first = (lesson.outline || [])[0]?.lineRange || []
   const last = (lesson.outline || []).at(-1)?.lineRange || []
   const provenance = first[0] && last[1] ? `转录 L${first[0]}–L${last[1]}` : ''
-  // 分层：先体系（在哪/是什么/怎么串起来/带什么问题读），再细节（分节正文），最后检索层（索引与自测）。
+  /**
+   * 顶部分层对齐 haoke/newhaoke 的成品格式（用户明确说那套"读起来舒服"）：
+   *
+   *   # 课次标题
+   *   ## 课程概览
+   *   ### 本课要回答的核心问题 / ### 本课你应当能够 / ### 课程脉络
+   *
+   * 以前这里是五个并列的 h2（本课在课程中的位置 / 知识地图 / 体系线索 / 核心问题 /
+   * 学习目标），读者还没读到正文就先翻过五屏装置；位置与铺垫在结尾的「知识连接」
+   * 已经讲过一遍，属于重复。现在合成一个概览块，地图收进折叠。
+   */
   const parts = [
     `# ${lesson.title}`,
     '',
     `> ${[`课程：${courseSpec.courseName || ''}`, courseSpec.teacher, provenance].filter(Boolean).join(' · ')}`,
     '',
-    renderPositionInCourse({ ...systemLayer, lectureThread: overview.lectureThread }, lesson),
+    renderCourseOverview(overview, lesson),
     '',
     renderKnowledgeMap(systemLayer, lesson),
-    '',
-    renderThreads(systemLayer, lesson),
-    '',
-    renderCoreQuestions(overview, lesson),
-    '',
-    renderLearningObjectives(overview, lesson),
     '',
     '***'
   ]
@@ -747,22 +775,18 @@ export function buildFinalNoteMarkdown({ courseSpec = {}, lesson = {}, spliceDat
     parts.push('***')
   }
 
+  // 正文之后只留两块：附录（发散与术语）与知识连接。
+  //
+  // 「复习层」（概念/法条/案例索引表 + 易错点汇总表）整块取消：索引表与站点的
+  // 概念/法条/案例页完全重复（那三页本来就是干这个的），易错点则由正文里的
+  // ⚠️ 易混提醒就地承担——读者读到哪儿就提醒到哪儿，比攒到文末再列一遍有用。
+  // 这一块实测占 3—5k 字，正是用户说的"读完正文还要再翻两屏表格"。
   const methods = renderMethods(spliceData.methods || [])
   if (methods) parts.push('', methods, '', '***')
 
-  // 检索层：先给索引表，再给易错点与辨析。复习时按名字找，不用重读全文。
-  const indexTables = renderIndexTables(spliceData.indexTables || {}, lesson)
-  const pitfalls = renderPitfalls(systemLayer)
-  // 复习层不再重复渲染自测题：节末自测已经带了折叠答案，再汇总一遍等于把同一份内容
-  // 印两次（实测多出约 4000 字），而检索练习的位置本就该在节末。
-  const reviewBlocks = [indexTables, pitfalls].filter(Boolean)
-  if (reviewBlocks.length) {
-    parts.push('', '## 复习层', '', ...reviewBlocks.flatMap(block => [block, '']), '***')
-  }
-
   // 课间事务与课堂发散不进正文：它们打断主线，但也不该丢——统一放到附录。
   if (asideOutline.length) {
-    parts.push('', '## 附录：课堂事务与发散', '')
+    parts.push('', '## 附录：补充与发散', '')
     asideOutline.forEach(outlineNode => {
       const kindLabel = KIND_LABEL[sectionKind(lesson, outlineNode)] || '课堂补充'
       parts.push(`### ${outlineTopic(outlineNode)}（${kindLabel}）`, '')

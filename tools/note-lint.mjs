@@ -76,22 +76,37 @@ function analyze(file) {
 
   // 6) 结构缺件
   const has = pattern => pattern.test(markdown)
+  // 结构口径对齐 haoke/newhaoke 的成品格式（用户说那套"读起来舒服"）：
+  // 顶部只有「课程概览」一个块（三个固定子节），正文按「一、话题」分节，
+  // 小节标题是加粗行而不是标题，末尾是附录与知识连接。
   const structure = {
-    体系位置: has(/本课在课程中的位置/),
-    知识地图: has(/^##\s*知识地图/m),
-    体系线索: has(/^##\s*体系线索/m),
-    核心问题: has(/核心问题/),
-    学习目标: has(/学习目标|应当能够/),
+    课程概览: has(/^##\s*课程概览/m),
+    核心问题: has(/^###\s*本课要回答的核心问题/m),
+    应当能够: has(/^###\s*本课你应当能够/m),
+    课程脉络: has(/^###\s*课程脉络/m),
     分节正文: has(/^###\s*[一二三四五六七八九十]+、/m),
-    复习层: has(/^##\s*复习层/m),
-    索引表: has(/概念索引|法条索引|案例索引/),
+    小节加粗: has(/^\*\*[（(][一二三四五六七八九十]+[）)]/m),
     自测: has(/自测|练习|思考题/),
-    知识连接: has(/知识连接|课程关联|与其他/),
+    知识连接: has(/知识连接/),
     附录: has(/附录/),
     元数据: has(/笔记元数据/)
   }
   const missing = Object.entries(structure).filter(([, value]) => !value).map(([key]) => key)
   if (missing.length) add('info', 'structure', `缺少小节：${missing.join('、')}`)
+
+  // 三类就地提示：读到哪儿提醒到哪儿，比攒到文末再列一遍有用
+  const cues = {
+    老师强调: (markdown.match(/^>\s*老师强调/gm) || []).length,
+    易混提醒: (markdown.match(/^>\s*(⚠️\s*)?\*\*易混提醒\*\*/gm) || []).length,
+    理解难点: (markdown.match(/^>\s*(💡\s*)?\*\*理解难点\*\*/gm) || []).length
+  }
+  if (!cues.老师强调 && !cues.易混提醒 && !cues.理解难点) {
+    add('warn', 'no-inline-cues', '正文里没有任何「老师强调 / ⚠️ 易混提醒 / 💡 理解难点」引用块：这些提示应当随正文就地出现')
+  }
+
+  // 小节标题不该再用四级标题：目录只到「一、话题」这一级才看得出结构
+  const bodyHeadings = (markdown.match(/^#{4,6}\s/mg) || []).length
+  if (bodyHeadings) add('warn', 'deep-headings', `正文里还有 ${bodyHeadings} 处四级及以下标题：小节标题应当是加粗行`)
 
   // 6.5) 呈现质量：长段落与标题层级——"读得下去"的两个硬指标
   const paragraphs = markdown.split(/\n\s*\n/).filter(block => !/^[#>|\-*\d]/.test(block.trim()) && block.trim())
@@ -102,9 +117,8 @@ function analyze(file) {
   const levels = lines.map(text => text.match(/^(#{2,4})\s/)).filter(Boolean).map(match => match[1].length)
   const skipped = levels.some((level, index) => index > 0 && level - levels[index - 1] > 1)
   if (skipped) add('warn', 'heading-skip', '标题层级出现跳级（例如 h2 直接到 h4），目录会失去层次感')
-  if (levels.length && !levels.includes(4) && levels.includes(3)) {
-    add('info', 'flat-headings', '只有 h2/h3 一层半：模块内部没有小节标题，目录会比较平')
-  }
+  // 目录只列到 h3 是**有意的**（对齐好课格式）：小节用加粗行承载，不算"目录太浅"
+
 
   // 7) 图示与表格
   const diagrams = (markdown.match(MERMAID_BLOCK) || []).length
