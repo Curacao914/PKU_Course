@@ -65,16 +65,18 @@ for (const [name, width, height] of [['desktop', 1180, 900], ['mobile', 420, 900
   await page.route('**/api/admin/balance', route => route.fulfill({ status: 200, contentType: 'application/json',
     body: JSON.stringify({ ok: true, threshold: 5, balances: [{ provider: 'deepseek', total: 6.7, rechargeUrl: 'https://platform.deepseek.com/top_up' }, { provider: 'aliyun', total: 11.62, rechargeUrl: 'https://bailian.console.aliyun.com/' }] }) }))
   await page.goto(site.url + '/admin', { waitUntil: 'domcontentloaded' })
-  await page.waitForSelector('#tab-overview .card')
-  await page.waitForTimeout(400)
-  const tabs = ['overview', 'courses', 'notes', 'settings']
-  for (const tab of tabs) {
-    await page.click('.seg button[data-tab="' + tab + '"]')
-    if (tab === 'courses' || tab === 'notes') await page.$$eval('main details', nodes => nodes.forEach(n => { n.open = true }))
-    await page.waitForTimeout(250)
-    await page.screenshot({ path: path.join(shots, name + '-' + tab + '.png'), fullPage: false })
+const tabs = ['overview', 'courses', 'settings']
+for (const tab of tabs) {
+  await page.click('.seg button[data-tab="' + tab + '"]')
+  // 课程区是分栏：要选中课程与课次，详情面板才有东西可看
+  if (tab === 'courses') {
+    await page.click('#courses .item[data-act="pick-course"]')
+    await page.click('#lessons .item[data-act="pick-lesson"]:not([data-value="__multi__"])')
   }
-  await page.close()
+  if (tab === 'settings') await page.$$eval('#tab-settings details', nodes => nodes.forEach(node => { node.open = true }))
+  await page.waitForTimeout(300)
+  await page.screenshot({ path: path.join(shots, name + '-' + tab + '.png'), fullPage: false })
+}
 }
 await browser.close()
 site.server.closeAllConnections?.()
