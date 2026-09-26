@@ -103,7 +103,15 @@ export function resolveWorkerConfig(env = process.env, options = {}) {
       target: env.COURSE_WECHAT_TARGET || env.LAW_TECH_WECHAT_TARGET || '',
       publicUrl: env.COURSE_PUBLIC_URL || 'https://course.law-tech.dev',
       pollSeconds: Number(env.COURSE_NOTIFY_POLL_SECONDS || 30),
-      maxAttempts: Number(runtime.notifyMaxAttempts || env.COURSE_NOTIFY_MAX_ATTEMPTS || 3)
+      maxAttempts: Number(runtime.notifyMaxAttempts || env.COURSE_NOTIFY_MAX_ATTEMPTS || 3),
+      // 备用通道：微信机器人要求用户最近给它发过消息，这条依赖不能转嫁给用户。
+      // 主通道判定为"会话已过期"时直接改走备用，而不是先试一次再补救。
+      // 界面上配的写在 config.json（runtime）里，优先于环境变量
+      fallback: {
+        kind: runtime.notifyFallback || env.COURSE_NOTIFY_FALLBACK || '',
+        url: runtime.notifyFallbackUrl || env.COURSE_NOTIFY_FALLBACK_URL || '',
+        key: runtime.notifyFallbackKey || env.SERVERCHAN_SENDKEY || env.PUSHPLUS_TOKEN || ''
+      }
     },
     asr: {
       entry: ASR_WORKER_ENTRY,
@@ -159,7 +167,10 @@ export function describeConfig(config) {
       openclawStateDir: config.notify.openclawStateDir || (config.notify.openclawHome ? '(跟随 HOME)' : '(未设置)'),
       target: config.notify.target ? 'set' : 'missing',
       publicUrl: config.notify.publicUrl,
-      pollSeconds: config.notify.pollSeconds
+      pollSeconds: config.notify.pollSeconds,
+      fallback: config.notify.fallback?.kind
+        ? config.notify.fallback.kind + (config.notify.fallback.url || config.notify.fallback.key ? '（已配置）' : '（缺地址/密钥）')
+        : 'missing'
     },
     ai: {
       baseUrl: config.ai.baseUrl,

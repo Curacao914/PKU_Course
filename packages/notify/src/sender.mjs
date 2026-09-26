@@ -192,3 +192,129 @@ export async function runDeliveryCycle({
     failed: results.filter(item => item.status === 'failed').length
   }
 }
+/**
+ * 备用推送通道。
+ *
+ * 为什么必须有：微信机器人这条通道**要求用户最近给机器人发过消息**——平台在每次来信时
+ * 发一个 context_token，出站要原样带上。没有它，接口照样返回 messageId，看起来「发送成功」，
+ * 微信端却收不到（实测：2026-09-26 之前发出的 21 条全部如此）。用户明确说「不要依赖我先给机器人发消息」，
+ * 所以补一条不依赖会话的通道，主通道不可用时自动改走它。
+ *
+ * 各家都吃 HTTP，因此这里只做「把一段文字发出去」这一件事，不引任何 SDK：
+ *   wecom / dingtalk  群机器人 webhook：{ msgtype: 'text', text: { content } }
+ *   feishu            群机器人 webhook：{ msg_type: 'text', content: { text } }
+ *   bark              GET <url>/<标题>/<正文>（iOS 推送）
+ *   serverchan        POST https://sctapi.ftqq.com/<SendKey>.send（表单 title/desp）
+ *   pushplus          POST https://www.pushplus.plus/send（JSON token/title/content）
+ *   generic           自建接口：POST JSON { text }
+ *
+ * 正文里的 Markdown 链接在这些通道里不一定能点，所以统一把 [文字](url) 展成「文字 url」。
+ */
+export function plainTextForChannel(message = '') {
+  return String(message || '')
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '$1 $2')
+    .trim()
+}
+
+function firstLine(text = '', limit = 40) {
+  const line = String(text || '').split('\n').map(item => item.trim()).filter(Boolean)[0] || '课程笔记'
+  return line.length > limit ? line.slice(0, limit) + '…' : line
+}
+
+/** 每个通道导出成一个 { kind, send(message) } 的发送器；send 失败就抛错。 */
+export function createFallbackSender({ kind, url = '', sendKey = '', token = '', fetchImpl = fetch, timeoutMs = 15_000 } = {}) {
+  const type = String(kind || '').trim().toLowerCase()
+  if (!type) throw new Error('备用通道需要 COURSE_NOTIFY_FALLBACK')
+
+  async function request(target, options = {}) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      const response = await fetchImpl(target, { ...options, signal: controller.signal })
+      const text = await response.text()
+      if (!response.ok) throw new Error(type + ' HTTP ' + response.status + '：' + text.slice(0, 200))
+      return text
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+  const postJson = (target, body) => request(target, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+
+  return {
+    kind: type,
+    configured: Boolean(
+      (type === 'serverchan' && sendKey) ||
+      (type === 'pushplus' && token) ||
+      (['wecom', 'dingtalk', 'feishu', 'bark', 'generic'].includes(type) && url)
+    ),
+
+    async send(message) {
+      const text = plainTextForChannel(message)
+      if (type === 'wecom' || type === 'dingtalk') {
+        return { externalId: type + ':', stdout: await postJson(url, { msgtype: 'text', text: { content: text } }) }
+      }
+      if (type === 'feishu') {
+        return { externalId: 'feishu:', stdout: await postJson(url, { msg_type: 'text', content: { text } }) }
+      }
+      if (type === 'bark') {
+        const base = String(url).replace(/\/+$/, '')
+        const text2 = await request(base + '/' + encodeURIComponent(firstLine(text)) + '/' + encodeURIComponent(text))
+        return { externalId: 'bark:', stdout: text2 }
+      }
+      if (type === 'serverchan') {
+        const body = await request('https://sctapi.ftqq.com/' + encodeURIComponent(sendKey) + '.send', {
+          method: 'POST',
+          headers: { 'content-type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ title: firstLine(text), desp: text }).toString()
+        })
+        let parsed = null
+        try { parsed = JSON.parse(body) } catch {}
+        if (parsed && Number(parsed.code) !== 0) throw new Error('serverchan：' + (parsed.message || body.slice(0, 120)))
+        return { externalId: 'serverchan:', stdout: body }
+      }
+      if (type === 'pushplus') {
+        const body = await postJson('https://www.pushplus.plus/send', { token, title: firstLine(text), content: text, template: 'txt' })
+        let parsed = null
+        try { parsed = JSON.parse(body) } catch {}
+        if (parsed && Number(parsed.code) !== 200) throw new Error('pushplus：' + (parsed.msg || body.slice(0, 120)))
+        return { externalId: 'pushplus:', stdout: body }
+      }
+      return { externalId: 'webhook:', stdout: await postJson(url, { text }) }
+    }
+  }
+}
+
+/**
+ * 一条通知该走哪个通道。
+ *
+ * 规则很简单，但必须显式写下来：**主通道知道自己发不出去时，不要再试一次才改走备用**——
+ * 那会留下一批「接口说成功、用户没收到」的假记录（之前 21 条消息的处境）。
+ */
+export function chooseChannel({ primaryUsable = true, fallback = null } = {}) {
+  if (!primaryUsable && fallback && fallback.configured) return { channel: 'fallback', reason: '主通道会话不可用' }
+  return { channel: 'primary', reason: '' }
+}
+
+/** 带备用的发送器：主通道不可用（或发送失败）时改走备用，返回值里标明走的哪条。 */
+export function createResilientSender({ primary, fallback = null, primaryUsable = async () => true, onFallback = () => {} } = {}) {
+  if (!primary) throw new Error('需要一个主通道')
+  return {
+    async send(message) {
+      const usable = fallback && fallback.configured ? await primaryUsable() : true
+      const decision = chooseChannel({ primaryUsable: usable, fallback })
+      if (decision.channel === 'fallback') {
+        onFallback(decision.reason)
+        return { ...(await fallback.send(message)), channel: fallback.kind }
+      }
+      try {
+        return { ...(await primary.send(message)), channel: 'wechat' }
+      } catch (error) {
+        if (!fallback || !fallback.configured) throw error
+        onFallback('主通道发送失败：' + (error instanceof Error ? error.message : String(error)))
+        return { ...(await fallback.send(message)), channel: fallback.kind }
+      }
+    },
+    probe: () => primary.probe()
+  }
+}
+

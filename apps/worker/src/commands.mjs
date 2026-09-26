@@ -27,7 +27,14 @@ import {
   runLessonNotes,
   splitWriteUnit
 } from '@course/notes'
-import { createWechatSender, runDeliveryCycle } from '@course/notify'
+import {
+  WECHAT_SESSION_MAX_AGE_MINUTES,
+  createFallbackSender,
+  createResilientSender,
+  createWechatSender,
+  runDeliveryCycle,
+  wechatSessionState
+} from '@course/notify'
 import { buildNoteRecord, readSiteIndex, writeSite } from '@course/publish'
 
 /**
@@ -737,13 +744,47 @@ export function createCommands(context) {
    */
   async function notify(options) {
     const target = config.notify.target
-    if (!target) throw new Error('缺少推送目标：请在 ~/.course-worker/env 设置 COURSE_WECHAT_TARGET')
+    const fallbackConfig = config.notify.fallback || {}
+    if (!target && !fallbackConfig.kind) {
+      throw new Error('缺少推送目标：请设置 COURSE_WECHAT_TARGET，或配一条备用通道（COURSE_NOTIFY_FALLBACK）')
+    }
 
-    const sender = injectedSender || createWechatSender({
-      openclawBin: config.notify.openclawBin,
-      openclawHome: config.notify.openclawHome,
-      openclawStateDir: config.notify.openclawStateDir,
-      target
+    const primary = injectedSender || (target
+      ? createWechatSender({
+        openclawBin: config.notify.openclawBin,
+        openclawHome: config.notify.openclawHome,
+        openclawStateDir: config.notify.openclawStateDir,
+        target
+      })
+      : { send: async () => { throw new Error('没有配置微信通道') }, probe: async () => ({ ok: false, detail: '未配置 COURSE_WECHAT_TARGET' }) })
+
+    /**
+     * 微信机器人能不能自己发出去，是可以判断的：平台只在用户来信时发 context_token，
+     * 出站必须带上；没有它接口也会返回成功，消息却到不了微信（实测 21 条全中）。
+     * 所以这里先看会话，过期就直接改走备用通道，而不是"试一次再说"。
+     */
+    const fallback = fallbackConfig.kind
+      ? createFallbackSender({
+        kind: fallbackConfig.kind,
+        url: fallbackConfig.url,
+        // Server酱与 PushPlus 要的是密钥，群机器人要的是地址；一个字段两边都用
+        sendKey: fallbackConfig.key || fallbackConfig.sendKey,
+        token: fallbackConfig.key || fallbackConfig.token
+      })
+      : null
+    if (fallback && !fallback.configured) {
+      stderr(`备用通道 ${fallback.kind} 缺地址或密钥，本次不使用`)
+    }
+
+    const sender = createResilientSender({
+      primary,
+      fallback: fallback && fallback.configured ? fallback : null,
+      primaryUsable: async () => {
+        if (!target) return false
+        const state = wechatSessionState({ stateDir: config.notify.openclawStateDir, home: config.notify.openclawHome })
+        return Boolean(state.ok) && Number(state.ageMinutes || 0) <= WECHAT_SESSION_MAX_AGE_MINUTES
+      },
+      onFallback: reason => stderr(`改用备用通道 ${fallbackConfig.kind}：${reason}`)
     })
 
     if (options.flags.has('probe')) {
@@ -768,7 +809,7 @@ export function createCommands(context) {
         maxAttempts: config.notify.maxAttempts,
         maxItems: Number(options.options['max-items'] || 10),
         workerId: options.options['worker-id'] || `notify:${os.hostname()}`,
-        onEvent: event => stderr(`  ${event.status} ${event.dedupeKey}${event.error ? ` — ${event.error}` : ''}`)
+        onEvent: event => stderr(`  ${event.status} ${event.dedupeKey}${event.channel ? ` [${event.channel}]` : ''}${event.error ? ` — ${event.error}` : ''}`)
       }
 
       if (!options.flags.has('loop')) {

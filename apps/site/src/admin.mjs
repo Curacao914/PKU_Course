@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { clearPassword, asrCostCny, noteCostCny, readPasswordRecord, resolvePricing, validatePassword, verifyPassword, writePassword } from '@course/core'
+import { WECHAT_SESSION_MAX_AGE_MINUTES, wechatSessionState } from '@course/notify'
 import { addMaterial, listMaterials, unassignedDir } from '@course/materials'
 
 import { ADMIN_HTML } from './admin-page.mjs'
@@ -46,7 +47,17 @@ export const EDITABLE_CONFIG = {
   llmPeakWindows: { type: 'string', label: '高价时段', hint: '形如 09:00-12:00,14:00-18:00（北京时间）' },
   keepMedia: { type: 'boolean', label: '保留媒体原件', hint: '打开后 prune 不会删视频/音频' },
   notifyMaxAttempts: { type: 'number', min: 1, max: 10, label: '通知最大重试次数' },
-  minFreeBytes: { type: 'number', min: 1_000_000_000, max: 50_000_000_000, label: '磁盘下限（字节）' }
+  minFreeBytes: { type: 'number', min: 1_000_000_000, max: 50_000_000_000, label: '磁盘下限（字节）' },
+  // 备用推送通道：微信机器人要用户先来信才能推，这条依赖不该转嫁给用户，
+  // 所以允许在界面上直接配一条不依赖会话的通道。密钥同样只落本机私有文件。
+  notifyFallback: {
+    type: 'string',
+    enum: ['', 'wecom', 'dingtalk', 'feishu', 'bark', 'serverchan', 'pushplus', 'generic'],
+    label: '备用推送通道',
+    hint: '主通道会话过期时改走它；留空则不启用'
+  },
+  notifyFallbackUrl: { type: 'string', label: '备用通道地址', hint: '群机器人 webhook / Bark 地址；Server酱与 PushPlus 不用填' },
+  notifyFallbackKey: { type: 'string', label: '备用通道密钥', hint: 'Server酱 SendKey 或 PushPlus token' }
 }
 
 export function validateConfigPatch(patch = {}) {
@@ -300,25 +311,40 @@ export function createAdminHandler({
    * 而不是让用户对着"已发送"发呆。
    */
   function channelHealth() {
-    // 显式配置了就去配置的地方找，不要"顺便猜几个目录"——猜错会把别的机器/别的
-    // 部署的会话状态当成自己的，界面上的通道状态就成了假消息
-    const configured = [process.env.OPENCLAW_STATE_DIR, process.env.OPENCLAW_HOME].filter(Boolean)
-    const bases = configured.length
-      ? configured
-      : [path.join(os.homedir(), '.openclaw-candidate'), path.join(os.homedir(), '.openclaw')]
-    for (const base of bases) {
-      const dir = path.join(base, 'openclaw-weixin', 'accounts')
-      if (!fs.existsSync(dir)) continue
-      let newest = 0
-      for (const name of fs.readdirSync(dir)) {
-        if (!name.endsWith('.context-tokens.json')) continue
-        newest = Math.max(newest, fs.statSync(path.join(dir, name)).mtimeMs)
-      }
-      if (!newest) return { ok: false, reason: '机器人还没有收到过你的消息，无法主动推送' }
-      const ageMinutes = Math.round((now() - newest) / 60000)
-      return { ok: true, lastInboundAt: new Date(newest).toISOString(), ageMinutes }
-    }
-    return { ok: false, reason: '没找到微信通道状态目录（OPENCLAW_STATE_DIR 未设置？）' }
+    const session = wechatSessionState({
+      stateDir: process.env.OPENCLAW_STATE_DIR || '',
+      home: process.env.OPENCLAW_HOME || '',
+      now: now()
+    })
+    const fresh = session.ok && Number(session.ageMinutes || 0) <= WECHAT_SESSION_MAX_AGE_MINUTES
+    return { ...session, fresh, fallback: fallbackChannelState() }
+  }
+
+  /**
+   * 备用通道配了没。
+   *
+   * 站点进程的环境变量来自 systemd 单元，而推送的配置在 worker 的 env 文件里，
+   * 两处都可能写着——所以两边都看。这里只判断"配没配齐"，绝不回显密钥。
+   */
+  function fallbackChannelState() {
+    const file = path.join(scratchRoot, 'env')
+    let fromFile = {}
+    try {
+      fromFile = Object.fromEntries(fs.readFileSync(file, 'utf8').split('\n')
+        .map(line => line.trim())
+        .filter(line => line && !line.startsWith('#') && line.includes('='))
+        .map(line => { const at = line.indexOf('='); return [line.slice(0, at).trim(), line.slice(at + 1).trim()] }))
+    } catch { fromFile = {} }
+    const read = key => process.env[key] || fromFile[key] || ''
+    // 界面上配的写在 config.json 里（键名与 EDITABLE_CONFIG 一致），优先于环境变量
+    let runtime = {}
+    try { runtime = JSON.parse(fs.readFileSync(configPath(), 'utf8')) } catch { runtime = {} }
+    const kind = String(runtime.notifyFallback || read('COURSE_NOTIFY_FALLBACK') || '')
+    const url = String(runtime.notifyFallbackUrl || read('COURSE_NOTIFY_FALLBACK_URL') || '')
+    const key = String(runtime.notifyFallbackKey || read('SERVERCHAN_SENDKEY') || read('PUSHPLUS_TOKEN') || '')
+    if (!kind) return { kind: '', configured: false }
+    const needsUrl = ['wecom', 'dingtalk', 'feishu', 'bark', 'generic'].includes(kind)
+    return { kind, configured: needsUrl ? Boolean(url) : Boolean(key) }
   }
 
   /** 从课次产物里读出笔记模块列表（管理台要能"只重写某一个模块"）。 */
@@ -699,6 +725,8 @@ export function createAdminHandler({
         const next = { ...readConfigFile(), ...clean, updatedAt: new Date(now()).toISOString() }
         fs.mkdirSync(path.dirname(configPath()), { recursive: true })
         fs.writeFileSync(configPath(), `${JSON.stringify(next, null, 2)}\n`)
+        // 这个文件可能存着备用通道的密钥（SendKey / token）：只给自己读
+        fs.chmodSync(configPath(), 0o600)
         sendJson(res, 200, { ok: true, values: next, applied: Object.keys(clean) })
         return true
       }

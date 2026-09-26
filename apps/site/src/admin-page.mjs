@@ -165,7 +165,6 @@ pre{background:var(--sunken);border-radius:var(--r-md);padding:14px;overflow:aut
         <label>管理密码或主令牌</label>
         <input id="token" type="password" placeholder="粘贴后回车" autocomplete="current-password">
         <div class="row" style="margin-top:8px"><button class="act primary" data-act="save">保存</button></div>
-        <div class="tiny muted" style="margin-top:8px">忘记密码时在服务器上跑 course admin-passwd --set-stdin（见 docs/10）。</div>
       </div>
     </details>
   </div>
@@ -296,7 +295,7 @@ async function load (options) {
       ? '服务端没有配置 COURSE_ADMIN_TOKEN，管理台已关闭。'
       : data.error === 'too_many_attempts'
         ? '凭据错误次数过多，请等 5 分钟再试。'
-        : $('token').value.trim() ? '密码或主令牌不对。点右上角 ··· 重新输入。' : '还没有登录：点右上角 ···，把管理台密码或服务器上的主令牌粘进去。'
+        : $('token').value.trim() ? '凭据不对' : '未登录：点右上角 ··· 填入密码或主令牌'
     $('tab-overview').innerHTML = card('<h2>需要登录</h2><p class="muted">' + reason + '</p>')
     setRunState('未登录', 'bad')
     return false
@@ -352,25 +351,23 @@ function renderOverview () {
     todos.push({ title: item.courseName + ' · ' + item.title, note: '连续失败已停止重试：' + String(item.lastError || '').slice(0, 60), label: '去重跑', tab: 'courses' })
   })
   ;(t.missingMaterials || []).forEach(function (item) {
-    todos.push({ title: item.courseName + ' · ' + item.title, note: '马上要写笔记了，还缺课件——传一份会更准', label: '传课件', tab: 'courses' })
+    todos.push({ title: item.courseName + ' · ' + item.title, note: '缺课件', label: '传课件', tab: 'courses' })
   })
   var channel = s.channel || { ok: true }
   if (channel.ok === false) {
-    todos.push({ title: '微信推送发不出去', note: channel.reason || '通道没准备好', label: '怎么办', tab: 'settings' })
+    todos.push({ title: '推送发不出去', note: '通道未就绪', label: '查看', tab: 'overview' })
   }
   if (t.failedDeliveries) {
-    todos.push({ title: t.failedDeliveries + ' 条通知发送失败', note: '失败不会自己消失，需要你决定是否重发', label: '去处理', tab: 'notes' })
+    todos.push({ title: t.failedDeliveries + ' 条通知发送失败', note: '未送达', label: '重发', tab: 'notes' })
   }
 
   var hero = todos.length
-    ? '<h1>需要你做 ' + todos.length + ' 件事</h1><p class="lede">其余步骤都会自己跑。</p>' +
+    ? '<h1>' + todos.length + ' 件事待处理</h1>' +
       todos.map(function (item) {
         return '<div class="todo"><div class="t"><b>' + esc(item.title) + '</b><span>' + esc(item.note) + '</span></div>' +
           '<button class="act" data-go="' + item.tab + '">' + esc(item.label) + '</button></div>'
       }).join('')
-    : '<h1>都处理完了</h1><p class="lede">没有需要你动手的事。' +
-      (counts.waiting ? '队列里还有 ' + counts.waiting + ' 节，会按阶段自己往下跑（写笔记排在低价时段），跑完推到你微信。' : '有新笔记会推到你微信。') + '</p>' +
-      '<div class="empty-ok"><span class="pill ok"><span class="dot"></span>一切正常</span></div>'
+    : '<h1>无待办</h1><div class="empty-ok"><span class="pill ok"><span class="dot"></span>一切正常</span></div>'
 
   var spend = s.spend || { asrCny: 0, notesCny: 0, totalCny: 0 }
   var pricing = s.pricing || {}
@@ -389,8 +386,8 @@ function renderOverview () {
       card('<h2>花费</h2><div class="stat">' + money(spend.totalCny) + '<small>已发生合计 · 转写 ' + money(spend.asrCny) + ' + 笔记 ' + money(spend.notesCny) + '</small></div>' +
         '<div class="row" style="margin-top:14px;align-items:flex-start">' + balancesHtml() + '</div>' +
         '<div class="row" style="margin-top:8px"><button class="act quiet" data-act="refresh-balance">刷新余额</button></div>' +
-        '<div class="tiny muted" style="margin-top:10px">单价：转写 ¥' + (pricing.asrPerHourCny || 0.288) + '/小时（按语音时长，静音不算）· 笔记 ¥' + (pricing.noteInputPerMillionCny || 1) + ' / ¥' + (pricing.noteOutputPerMillionCny || 4) + ' 每百万 token（输入/输出）。逐节课明细在「课程」里。</div>') +
-      card('<h2>微信通道</h2>' + channelHtml() + '<div class="tiny muted" style="margin-top:10px">这个机器人只有在"你最近给它发过消息"之后才能把消息送到微信。收不到推送时，先在微信里给它发一句话，再点上面的「重发失败通知」。</div>') +
+        '<div class="tiny muted" style="margin-top:10px">转写 ¥' + (pricing.asrPerHourCny || 0.288) + '/小时（按语音时长）· 笔记 ¥' + (pricing.noteInputPerMillionCny || 1) + ' / ¥' + (pricing.noteOutputPerMillionCny || 4) + ' 每百万 token（输入/输出）</div>') +
+      card('<h2>推送通道</h2>' + channelHtml()) +
     '</div>' +
     card('<details class="d" style="border-top:0"><summary><span class="ttl">最近运行</span><span class="muted small">' + ((s.runs || []).length) + ' 次</span></summary><div class="body">' + runsTable() + '</div></details>')
 }
@@ -413,14 +410,19 @@ function balancesHtml () {
 }
 function channelHtml () {
   var c = state.status.channel || {}
+  var rows = []
   if (c.ok) {
     var age = Number(c.ageMinutes || 0)
-    var text = age < 60 ? age + ' 分钟前有过互动' : Math.round(age / 60) + ' 小时前有过互动'
-    var fresh = age < 24 * 60
-    return '<span class="pill ' + (fresh ? 'ok' : 'warn') + '"><span class="dot"></span>' + (fresh ? '可以推送' : '会话可能已过期') + '</span>' +
-      '<p class="small muted" style="margin-top:10px">最近一次互动：' + esc(text) + '。</p>'
+    var text = age < 60 ? age + ' 分钟前' : Math.round(age / 60) + ' 小时前'
+    rows.push('<div><span class="pill ' + (c.fresh ? 'ok' : 'warn') + '"><span class="dot"></span>微信机器人 ' + (c.fresh ? '可用' : '会话过期') + '</span>' +
+      '<span class="tiny muted" style="margin-left:8px">最近互动 ' + esc(text) + '</span></div>')
+  } else {
+    rows.push('<div><span class="pill bad"><span class="dot"></span>微信机器人 不可用</span>' +
+      (c.reason ? '<span class="tiny muted" style="margin-left:8px">' + esc(c.reason) + '</span>' : '') + '</div>')
   }
-  return '<span class="pill bad"><span class="dot"></span>暂时推不出去</span><p class="small muted" style="margin-top:10px">' + esc(c.reason || '') + '</p>'
+  var f = c.fallback || {}
+  rows.push('<div style="margin-top:8px"><span class="pill ' + (f.configured ? 'ok' : '') + '"><span class="dot"></span>备用通道 ' + (f.configured ? esc(f.kind) : '未配置') + '</span></div>')
+  return rows.join('')
 }
 function runsTable () {
   var runs = (state.status.runs || []).slice(0, 6)
@@ -444,10 +446,10 @@ function materialBlock (task) {
   return '<div class="drop" data-drop="' + esc(key) + '">' +
     '<input class="hidden-file" type="file" data-file="' + esc(key) + '" accept=".pptx,.ppt,.pdf">' +
     '<button class="act" data-act="pick" data-key="' + esc(key) + '">选择课件并上传</button>' +
-    '<span class="small muted">或把 .pptx / .pdf 拖到这里</span>' +
+    '<span class="small muted">或拖入 .pptx / .pdf</span>' +
     '</div>' +
     '<div class="status ' + (status.indexOf('失败') === 0 ? 'bad' : status ? 'ok' : '') + '" data-status="' + esc(key) + '">' + esc(status) + '</div>' +
-    (list ? '<div style="margin-top:8px">' + list + '</div>' : '<p class="small muted" style="margin:8px 0 0">这个课次还没有课件。没有也能写，只是术语对齐会差一些。</p>')
+    (list ? '<div style="margin-top:8px">' + list + '</div>' : '<p class="small muted" style="margin:8px 0 0">无课件</p>')
 }
 
 function lessonDetails (task, index) {
@@ -490,10 +492,10 @@ function renderCourses () {
       '<div class="body">' + list.map(lessonDetails).join('') + '</div></details>'
   }).join('')
   var parked = state.status.unassigned || []
-  $('tab-courses').innerHTML = card('<p class="lede" style="margin-bottom:14px">点开一门课看课次；点开一节可以传课件、重跑或重新发布。</p>' +
-    (html || '<p class="muted">账本里还没有课次。先去「设置」跑一次扫描。</p>')) +
+  $('tab-courses').innerHTML = card(
+    (html || '<p class="muted">账本里还没有课次</p>')) +
     (parked.length ? card('<h2>归属不明的课件</h2><div>' + parked.map(function (n) { return '<span class="pill warn">' + esc(n) + '</span>' }).join(' ') + '</div>' +
-      '<p class="small muted" style="margin-top:10px">这些文件认不出属于哪一节课，改名成 课程__课次.pptx 放进服务器收件箱，再在「设置」里跑一次归档。</p>') : '')
+      '<p class="small muted" style="margin-top:10px">改名成 课程__课次.pptx 放进收件箱，再跑一次归档</p>') : '')
 }
 
 /* ── 笔记：逐模块重写 ── */
@@ -512,7 +514,6 @@ function renderNotes () {
       '<table><thead><tr><th>模块</th><th>字数</th><th>状态</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>' +
       '<div class="row" style="margin-top:12px"><input data-request="' + esc(t.replayKey) + '" value="' + esc(state.requests[t.replayKey] || '') + '" placeholder="修改要求（例如：这一段太长，压缩到 1200 字并拆成列表）">' +
       '<button class="act primary" data-act="revise-first" data-key="' + esc(t.replayKey) + '">按这个要求重写</button></div>' +
-      '<div class="tiny muted" style="margin-top:8px">重写只改你指定的那个模块，其余保持原样；改完想上线，再去「课程」里点「重新发布」。</div>' +
       '</div></details>'
   }).join('')
   var deliveries = (state.status.ledger && state.status.ledger.deliveries) || []
@@ -523,8 +524,8 @@ function renderNotes () {
       '<td class="small muted">' + esc(String(x.sent_at || x.created_at || '').slice(5, 16).replace('T', ' ')) + '</td>' +
       '<td class="tiny muted">' + esc(String(x.last_error || '').slice(0, 60)) + '</td></tr>'
   }).join('')
-  $('tab-notes').innerHTML = card('<p class="lede" style="margin-bottom:14px">逐模块重写只动你指定的那一段。</p>' +
-      (cards || '<p class="muted">还没有带模块状态的笔记。跑完一次笔记阶段后这里会出现逐模块列表。</p>') +
+  $('tab-notes').innerHTML = card(
+      (cards || '<p class="muted">还没有带模块状态的笔记</p>') +
       (failed ? '<div class="row" style="margin-top:14px"><button class="act primary" data-act="notify-retry">把 ' + failed + ' 条失败通知放回队列</button></div>' : '')) +
     card('<details class="d" style="border-top:0"><summary><span class="ttl">通知记录</span><span class="muted small">最近 ' + Math.min(12, deliveries.length) + ' 条</span></summary>' +
       '<div class="body">' + (rows ? '<table><thead><tr><th>用途</th><th>状态</th><th>时间</th><th>错误</th></tr></thead><tbody>' + rows + '</tbody></table>' : '<p class="muted small">队列为空</p>') + '</div></details>')
@@ -553,28 +554,27 @@ function renderSettings () {
       (spec.hint ? '<div class="tiny muted" style="margin-top:4px">' + esc(spec.hint) + '</div>' : '') + '</div>'
   }).join('')
 
-  $('tab-settings').innerHTML = card('<p class="lede" style="margin-bottom:14px">日常只会用到第一个按钮。</p>' +
+  $('tab-settings').innerHTML = card(
       '<div class="row"><button class="act primary" data-act="cycle-all">跑一轮完整链路</button>' +
       '<button class="act" data-act="discover">扫描教学网</button>' +
       '<button class="act" data-act="notify">投递通知</button>' +
       '<button class="act" data-act="doctor">体检</button>' +
       '<button class="act" data-act="backup">备份账本</button></div>' +
-      '<div class="tiny muted" style="margin-top:10px">「跑一轮完整链路」最多处理 5 个课次，与定时任务一致；它按阶段推进，中断或重复运行都安全。</div>') +
+      '') +
     card('<details class="d" style="border-top:0"><summary><span class="ttl">运行参数</span><span class="muted small">篇幅、并发、成本窗口</span></summary>' +
       '<div class="body">' + fields + '<div class="row"><button class="act primary" data-act="save-config">保存设置</button></div>' +
-      '<div class="tiny muted" style="margin-top:8px">' + esc(c.path || '') + ' · 密钥仍然只从服务器环境变量读取</div></div></details>' +
+      '<div class="tiny muted" style="margin-top:8px">' + esc(c.path || '') + '</div></div></details>' +
       '<details class="d"><summary><span class="ttl">登录密码</span><span class="muted small">' + ((state.status.auth && state.status.auth.passwordSet) ? '已设置' : '未设置') + '</span></summary>' +
       '<div class="body">' + passwordPanel() + '</div></details>' +
       '<details class="d"><summary><span class="ttl">清理原件</span><span class="muted small">不可撤销</span></summary>' +
-      '<div class="body"><p class="small muted">转写稿、课件文字与笔记永久保留；视频与 PPT 原件在确认无误后才删。先预演看一眼再决定。</p>' +
+      '<div class="body"><p class="small muted">只删通过校验的原始媒体与 PPT；转录稿、课件文字、笔记保留。</p>' +
       '<div class="row"><button class="act" data-act="prune">清理预演</button><button class="act danger" data-act="prune-apply">清理并删除</button></div></div></details>')
 }
 
 function passwordPanel () {
   var auth = (state.status && state.status.auth) || {}
-  return '<p class="small muted">用自己设的密码登录，比记 64 位随机串实际得多。密码只存哈希，明文不落盘；主令牌始终是找回路径（见 docs/10）。</p>' +
-    (auth.masterTokenSet ? '' : '<p class="small" style="color:var(--danger)">服务器上没有配置主令牌，一旦忘记密码就只能去服务器重设。</p>') +
-    '<div class="field"><label>新密码（至少 8 位）</label><input data-pw="next" type="password" autocomplete="new-password" placeholder="换一个记得住的"></div>' +
+  return (auth.masterTokenSet ? '' : '<p class="small" style="color:var(--danger)">主令牌未配置：忘记密码只能去服务器重设。</p>') +
+    '<div class="field"><label>新密码（至少 8 位）</label><input data-pw="next" type="password" autocomplete="new-password" placeholder="新密码"></div>' +
     '<div class="row"><button class="act primary" data-act="save-password">保存新密码</button>' +
     '<button class="act" data-act="clear-password">清除密码（只留主令牌）</button></div>'
 }

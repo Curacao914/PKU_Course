@@ -138,6 +138,36 @@ HOME 与 STATE_DIR 都设        → 正常返回 {"action":"send", ...}
 **首条真实投递已验证**（2026-09-24）：`status=sent`，
 `externalId=openclaw-weixin:1790262057530-b0b1fafc`。
 
+### ⚠️ 这条通道发不出"主动推送"（2026-09-26 查清）
+
+**症状**：账本里 21 条投递全是 `sent`（还有 externalId），用户手机一条没收到。
+
+**原因**：这个微信机器人通道的规矩是——**用户每给机器人发一次消息，平台发一个
+`context_token`，出站消息必须原样带上**。插件的"回复"路径会去取它，但 CLI / 定时任务
+这种**主动推送**路径不会：
+
+```
+sendWeixinOutbound: contextToken missing for to=o9cq…@im.wechat, sending without context
+```
+
+没有 context 时接口照样返回 messageId，所以"发送成功"是假的。用户上次给机器人发消息是
+9-24 23:14，之后的每一条都没送达。
+
+**两手处理**：
+
+1. `deploy/patch-weixin-context.sh`：让主动推送回退使用已存的 context_token（幂等，插件升级后重跑）。
+   实测：补丁后网关日志不再出现 missing，但**平台侧仍可能因为会话过久而丢弃**——
+   所以不能只靠它。
+2. **备用通道**（推荐）：配一条不依赖会话的通道，主通道会话过期时自动改走它。
+   在管理台「设置 → 运行参数」里选通道即可：`wecom` / `dingtalk` / `feishu`（群机器人 webhook，
+   填"备用通道地址"）、`serverchan` / `pushplus`（填"备用通道密钥"）、`bark`、`generic`（自建接口）。
+   配置写在 `~/.course-worker/config.json`（0600）；也可以在 `~/.course-worker/env` 里写
+   `COURSE_NOTIFY_FALLBACK` / `COURSE_NOTIFY_FALLBACK_URL` / `SERVERCHAN_SENDKEY` / `PUSHPLUS_TOKEN`。
+
+判定逻辑在 `packages/notify/src/session.mjs`：会话超过 **12 小时**没有互动就判为过期，
+**直接改走备用通道**——而不是先往微信试一次（那会继续产生"账本说成功、手机没有消息"的假记录）。
+管理台「概览 → 推送通道」把两个通道的状态都显示出来。
+
 ### 顺带发现：既有 relay 一直在失败
 
 `law-tech-wechat-relay.service` 的日志里密集出现 `[wechat-outbound] fetch failed`——

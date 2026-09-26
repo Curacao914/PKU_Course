@@ -7,10 +7,15 @@ import { openLedger } from '@course/store'
 import {
   absoluteObjectUrl,
   buildDeliveryMessage,
+  chooseChannel,
+  createFallbackSender,
+  createResilientSender,
   createWechatSender,
   deliveryLinkLabel,
+  plainTextForChannel,
   runDeliveryCycle
 } from './sender.mjs'
+import { WECHAT_SESSION_MAX_AGE_MINUTES, wechatSessionState } from './session.mjs'
 
 const NOTE_URL = 'https://course.law-tech.dev/notes/刑法分论/第10-12节.html'
 
@@ -165,6 +170,89 @@ test('a cycle with nothing pending does nothing', async () => {
   assert.deepEqual(summary.results, [])
   assert.equal(calls.length, 0, '没有待发消息时不应调用 openclaw')
   store.close()
+})
+
+test('an expired wechat session is detected from the channel state', async () => {
+  // 这条通道的规矩：用户每来一次消息，平台给一个 context_token，出站必须带上。
+  // 没有它接口也返回成功、消息却到不了微信——所以「能不能推」必须能判断，不能靠猜。
+  const fs = await import('node:fs')
+  const os = await import('node:os')
+  const path = await import('node:path')
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-state-'))
+
+  const missing = wechatSessionState({ stateDir: home })
+  assert.equal(missing.ok, false, '没有会话记录时不能假装能推')
+
+  const accounts = path.join(home, 'openclaw-weixin', 'accounts')
+  fs.mkdirSync(accounts, { recursive: true })
+  fs.writeFileSync(path.join(accounts, 'bot.context-tokens.json'), '{}')
+  const fresh = wechatSessionState({ stateDir: home, now: Date.now() })
+  assert.equal(fresh.ok, true)
+  assert.ok(fresh.ageMinutes <= 1)
+  assert.ok(fresh.ageMinutes < WECHAT_SESSION_MAX_AGE_MINUTES)
+
+  const stale = wechatSessionState({ stateDir: home, now: Date.now() + 48 * 60 * 60 * 1000 })
+  assert.ok(stale.ageMinutes > WECHAT_SESSION_MAX_AGE_MINUTES, '两天前的会话要判为过期')
+})
+
+test('the fallback channel is used when the wechat session is stale', async () => {
+  const sent = []
+  const fetchImpl = async (url, options = {}) => {
+    sent.push({ url, body: options.body })
+    return { ok: true, status: 200, text: async () => '{"errcode":0}' }
+  }
+  const fallback = createFallbackSender({ kind: 'wecom', url: 'https://qyapi.example/webhook', fetchImpl })
+  assert.equal(fallback.configured, true)
+
+  const primaryCalls = []
+  const primary = { send: async () => { primaryCalls.push('primary'); return { externalId: 'wx-1' } } }
+  const sender = createResilientSender({
+    primary,
+    fallback,
+    primaryUsable: async () => false,   // 会话过期
+    onFallback: () => {}
+  })
+  const result = await sender.send('【新课】1 节\n\n[打开管理台传课件](https://course.law-tech.dev/admin)')
+  assert.equal(result.channel, 'wecom')
+  assert.deepEqual(primaryCalls, [], '会话不可用时就不要再往微信发一次——那会留下假的成功记录')
+  assert.equal(sent.length, 1)
+  assert.match(sent[0].body, /msgtype/, '企业微信要的是 msgtype/text 结构')
+  assert.match(sent[0].body, /打开管理台传课件 https:\/\/course\.law-tech\.dev\/admin/, 'Markdown 链接要展成纯文本')
+})
+
+test('a healthy wechat session still goes through the primary channel', async () => {
+  const posts = []
+  const fallback = createFallbackSender({ kind: 'wecom', url: 'https://qyapi.example/webhook', fetchImpl: async (u, o) => { posts.push(u); return { ok: true, status: 200, text: async () => '{}' } } })
+  const sender = createResilientSender({ primary: { send: async () => ({ externalId: 'wx-9' }) }, fallback, primaryUsable: async () => true })
+  const result = await sender.send('正文')
+  assert.equal(result.channel, 'wechat')
+  assert.equal(result.externalId, 'wx-9')
+  assert.deepEqual(posts, [], '主通道正常时不该碰备用通道')
+})
+
+test('a failing primary falls back instead of losing the message', async () => {
+  const posts = []
+  const fallback = createFallbackSender({ kind: 'generic', url: 'https://example.test/hook', fetchImpl: async (u, o) => { posts.push(o.body); return { ok: true, status: 200, text: async () => 'ok' } } })
+  const reasons = []
+  const sender = createResilientSender({
+    primary: { send: async () => { throw new Error('openclaw 退出码 1') } },
+    fallback,
+    primaryUsable: async () => true,
+    onFallback: reason => reasons.push(reason)
+  })
+  const result = await sender.send('正文')
+  assert.equal(result.channel, 'generic')
+  assert.equal(posts.length, 1)
+  assert.match(reasons[0], /主通道发送失败/)
+})
+
+test('channel choice is explicit and testable', () => {
+  const fallback = { configured: true }
+  assert.equal(chooseChannel({ primaryUsable: true, fallback }).channel, 'primary')
+  assert.equal(chooseChannel({ primaryUsable: false, fallback }).channel, 'fallback')
+  assert.equal(chooseChannel({ primaryUsable: false, fallback: null }).channel, 'primary', '没有备用就只能试主通道')
+  assert.equal(chooseChannel({ primaryUsable: false, fallback: { configured: false } }).channel, 'primary', '备用没配好等于没有')
+  assert.equal(plainTextForChannel('[看笔记](https://x.test/a)'), '看笔记 https://x.test/a')
 })
 
 test('the cycle refuses to run without a ledger or sender', async () => {
