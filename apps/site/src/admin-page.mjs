@@ -456,7 +456,7 @@ function materialBlock (task) {
   var key = task.replayKey
   var status = state.uploads[key] || ''
   return '<div class="drop" data-drop="' + esc(key) + '">' +
-    '<input class="hidden-file" type="file" data-file="' + esc(key) + '" accept=".pptx,.ppt,.pdf">' +
+    '<input class="hidden-file" type="file" data-file="' + esc(key) + '" accept=".pptx,.pdf,.docx,.xlsx,.md,.txt">' +
     '<button class="act" data-act="pick" data-key="' + esc(key) + '">选择课件并上传</button>' +
     '<span class="small muted">或拖入 .pptx / .pdf</span>' +
     '</div>' +
