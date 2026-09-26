@@ -159,12 +159,26 @@ test('chunked upload rejects a traversal-shaped upload id and empty commits', as
   assert.equal(bad.res.state.status, 400)
   assert.equal(bad.body.error, 'bad_upload_id')
 
+  // 少一片就合并 → 会得到一个半截文件，解析时报"不是 zip"这种莫名其妙的话。
+  // 按片号核对齐全，把错误说在能看懂的地方。
+  const partial = await call(handler, {
+    method: 'PUT', url: '/api/admin/materials/chunk?uploadId=partial12345&index=0', body: Buffer.from('前半段')
+  })
+  assert.equal(partial.body.ok, true)
+  const incomplete = await call(handler, {
+    method: 'POST', url: '/api/admin/materials/commit',
+    body: JSON.stringify({ uploadId: 'partial12345', course: '刑法分论', lesson: '第10-12节', name: 'x.json', chunks: 3 })
+  })
+  assert.equal(incomplete.res.state.status, 400)
+  assert.equal(incomplete.body.error, 'incomplete_upload')
+  assert.match(incomplete.body.message, /缺 2 个分片/)
+
   const none = await call(handler, {
     method: 'POST', url: '/api/admin/materials/commit',
     body: JSON.stringify({ uploadId: 'nothinghere1', course: '刑法分论', lesson: '第10-12节', name: 'x.pptx' })
   })
   assert.equal(none.res.state.status, 400)
-  assert.equal(none.body.error, 'no_chunks')
+  assert.equal(none.body.error, 'incomplete_upload', '一个分片都没有时报的就是"没收齐"')
 })
 
 test('uploading requires the admin token', async () => {

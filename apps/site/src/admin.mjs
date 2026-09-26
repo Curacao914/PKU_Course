@@ -631,8 +631,21 @@ export function createAdminHandler({
       const parts = fs.existsSync(dir)
         ? fs.readdirSync(dir).filter(item => item.endsWith('.part')).sort()
         : []
-      if (!parts.length) {
-        sendJson(res, 400, { ok: false, error: 'no_chunks', message: '没有收到任何分片' })
+      const expected = Number(payload.chunks || 0)
+      // 少一片就合并出半个文件，解析时报"不是 zip"之类莫名其妙的话。
+      // 所以按片号核对齐全再合并——错要说在能看懂的地方。
+      const indexes = parts.map(name => Number(name.slice(0, 5)))
+      const missing = expected > 0
+        ? Array.from({ length: expected }, (_, i) => i).filter(i => !indexes.includes(i))
+        : []
+      if (!parts.length || missing.length) {
+        sendJson(res, 400, {
+          ok: false,
+          error: 'incomplete_upload',
+          message: missing.length ? `缺 ${missing.length} 个分片（${missing.slice(0, 8).join('、')}…），请重试` : '没有收到任何分片',
+          received: parts.length,
+          expected
+        })
         return true
       }
       const tempDir = path.join(scratchRoot, 'tmp')

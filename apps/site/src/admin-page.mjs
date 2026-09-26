@@ -688,7 +688,7 @@ async function uploadDeck (key, file, btn) {
       setStatus(key, state.uploads[key])
       var res = await fetch('/api/admin/materials/commit', {
         method: 'POST', headers: headers(true),
-        body: JSON.stringify({ uploadId: uploadId, course: task.courseName, lesson: task.title, scope: 'lesson', name: file.name })
+        body: JSON.stringify({ uploadId: uploadId, course: task.courseName, lesson: task.title, scope: 'lesson', name: file.name, chunks: total })
       })
       data = await res.json()
     } else {
