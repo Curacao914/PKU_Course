@@ -94,6 +94,14 @@ test('the mermaid loader only ships on pages that actually contain a diagram', (
   assert.ok(withDiagram.includes('language-mermaid'), '渲染器仍输出原始代码块，供脚本接管')
 })
 
+test('the 3.5MB diagram library is only fetched after the reader opens the fold', () => {
+  // 读者到这台机器只有 100—250KB/s：知识地图折叠着的时候，绘图库一个字节都不该下。
+  const html = renderNotePage(record({ markdown: `${NOTE}\n\n\`\`\`mermaid\nflowchart TD\n  A-->B\n\`\`\`\n` }))
+  assert.match(html, /const fold = blocks\[0\]\.closest\('details'\)/)
+  assert.match(html, /if \(!fold \|\| fold\.open\) start\(\)/, '折叠块已展开（或没有折叠块）时才立即加载')
+  assert.match(html, /addEventListener\('toggle', function \(\) \{ if \(fold\.open\) start\(\) \}\)/, '展开时才加载')
+})
+
 test('the note page ships reading controls that work without an account', () => {
   // 字号、深浅、位置记忆都只依赖浏览器本地存储——个人笔记站不该为这三件小事引入登录
   const html = renderNotePage(record({ markdown: NOTE }))

@@ -333,6 +333,8 @@ export function buildNoteRecord({
 const MERMAID_VERSION = '11.17.2'
 
 const MERMAID_LOADER = `<script type="module">
+// 绘图库 3.5MB，而我们这台机器到读者的路只有 100—250KB/s：**等读者真的展开知识地图再下载**。
+// 折叠块没打开之前一个字节都不下，页面其余部分该多快就多快。
 const blocks = [...document.querySelectorAll('pre > code.language-mermaid, pre > code.lang-mermaid')]
 if (blocks.length) {
   const load = () => new Promise((resolve, reject) => {
@@ -342,7 +344,7 @@ if (blocks.length) {
     script.onerror = reject
     document.head.appendChild(script)
   })
-  load().then(() => {
+  const start = () => load().then(() => {
     const mermaid = window.mermaid
     if (!mermaid) return
     mermaid.initialize({ startOnLoad: false, theme: 'neutral', securityLevel: 'strict' })
@@ -357,6 +359,11 @@ if (blocks.length) {
         .catch(() => { holder.innerHTML = \`<pre><code>\${source.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]))}</code></pre>\` })
     })
   }).catch(() => {})
+
+  // 折叠块展开时才下载：没展开就是一个字节都不下
+  const fold = blocks[0].closest('details')
+  if (!fold || fold.open) start()
+  else fold.addEventListener('toggle', function () { if (fold.open) start() })
 }
 </script>`
 
