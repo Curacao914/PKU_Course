@@ -123,8 +123,33 @@ function stripRawMeta(markdown = '') {
  * 「两级标题、第二级缩进」的目录——那就必须让小节真的是标题，而不是加粗文字，
  * 否则左栏目录只剩一级。四级及以下一律降级/拍平，目录就两级，扫一眼看得出结构。
  */
+/** 四级及以下标题拍成加粗行（正文里再深的一层靠加粗与「1.」编号承担）。 */
+export function boldBodyHeadings(markdown = '') {
+  return String(markdown ?? '').split('\n').map(line => {
+    const match = line.match(/^(#{4,6})\s+(.+?)\s*#*\s*$/)
+    return match ? `**${match[2]}**` : line
+  }).join('\n')
+}
+
 export function normalizeBodyHeadings(markdown = '') {
-  return demoteBodyHeadings(markdown, 3)
+  // 先把最浅的一级对齐到 h3（**允许负位移**：模型常把小节写成 h4，也要提上来），
+  // 再把剩下的 h4+ 拍成加粗行——目录就两级，正文再深靠加粗与编号承担。
+  return boldBodyHeadings(shiftBodyHeadings(markdown, 3))
+}
+
+/** 把标题整体平移，使最浅的一级正好落在 floor 上（可升可降，但不越过 h1/h6）。 */
+export function shiftBodyHeadings(markdown = '', floor = 3) {
+  const lines = String(markdown ?? '').split('\n')
+  const levels = lines.map(line => line.match(/^(#{1,6})\s+\S/)).filter(Boolean).map(match => match[1].length)
+  if (!levels.length) return markdown
+  const shift = floor - Math.min(...levels)
+  if (!shift) return markdown
+  return lines.map(line => {
+    const match = line.match(/^(#{1,6})(\s+.*)$/)
+    if (!match) return line
+    const level = Math.min(6, Math.max(1, match[1].length + shift))
+    return `${'#'.repeat(level)}${match[2]}`
+  }).join('\n')
 }
 
 export function stripMetaBlock(markdown = '') {
