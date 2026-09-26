@@ -151,7 +151,7 @@ export function nodeBodyPieces(node = {}) {
   if (!ids.length || !body) return pieces
 
   if (ids.length === 1) {
-    pieces.set(ids[0], demoteBodyHeadings(body))
+    pieces.set(ids[0], boldBodyHeadings(demoteBodyHeadings(body)))
     return pieces
   }
 
@@ -177,10 +177,10 @@ export function nodeBodyPieces(node = {}) {
   }
 
   if (!matched) {
-    pieces.set(ids[0], demoteBodyHeadings(body))
+    pieces.set(ids[0], boldBodyHeadings(demoteBodyHeadings(body)))
     return pieces
   }
-  for (const id of ids) pieces.set(id, demoteBodyHeadings(buckets.get(id).join('\n').trim()))
+  for (const id of ids) pieces.set(id, boldBodyHeadings(demoteBodyHeadings(buckets.get(id).join('\n').trim())))
   return pieces
 }
 
@@ -396,7 +396,8 @@ export function renderAppendix(value = {}) {
   const terms = (Array.isArray(value.terms) ? value.terms.filter(Boolean) : []).slice(0, SPLICE_LIMITS.appendixTerms)
   const topics = (Array.isArray(value.topics) ? value.topics.filter(Boolean) : []).slice(0, SPLICE_LIMITS.appendixTopics)
   if (!terms.length && !topics.length) return ''
-  const lines = ['## 附录：补充与发散', '', '> 以下内容为课堂补充材料和发散性讨论，不影响课程主线。']
+  // 标题由拼装器统一给出（课间事务与发散小节也要挂在同一个附录下，否则会出现两个「附录」）
+  const lines = ['> 以下内容为课堂补充材料和发散性讨论，不影响课程主线。']
   if (terms.length) {
     lines.push('', '### 术语汇总', '', '| 术语 | 英文/原文 | 定义或说明 |', '|------|----------|-----------|')
     terms.forEach(term => lines.push(
@@ -797,6 +798,8 @@ export function buildFinalNoteMarkdown({ courseSpec = {}, lesson = {}, spliceDat
   }
 
   const appendix = renderAppendix(spliceData.appendix || {})
+  // 附录标题只出现一次：事务/发散小节与术语/发散话题同属一个附录块
+  if (appendix && !asideOutline.length) parts.push('', '## 附录：补充与发散', '')
   if (appendix) parts.push('', appendix, '')
   const timeline = renderTimeline(lesson)
   if (timeline) parts.push('', timeline, '')

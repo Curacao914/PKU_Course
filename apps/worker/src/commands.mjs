@@ -697,7 +697,9 @@ export function createCommands(context) {
     const store = openStore(config.ledgerPath)
     try {
       const task = replayKey ? store.getTask(replayKey) : null
-      if (changed) {
+      // --no-notify：只更新站点、不排队推送。换排版之后批量重发时用得上——
+      // 内容确实变了，但"每一篇都推一条"对读者是骚扰，而读者要的是站点上新。
+      if (changed && !options.flags?.has('no-notify')) {
         delivery = store.enqueueDelivery({
           // 幂等键带上内容指纹：同一课次内容变了要重新推一次，
           // 否则"改好之后再发一遍"会被去重规则静默吃掉（旧实现就是只按 slug 去重）。
@@ -1842,6 +1844,7 @@ export const USAGE = `用法：course <命令> [选项]
   publish    --from <笔记目录> [--course <名称>] [--lesson <课次>] [--out <站点目录>] [--origin <域名>]
              --rebuild                     只按发布库重写站点（换模板/改样式后重建，
                                            不跑模型、不发通知）
+             --no-notify                   更新站点但这一次不排推送
                                            把笔记发布到站点，内容变化时排入一条微信通知
   notify     [--probe] [--loop] [--max-items <条数>] [--retry-failed]
                                            把账本里排队的通知发到微信；--probe 只验证通道；

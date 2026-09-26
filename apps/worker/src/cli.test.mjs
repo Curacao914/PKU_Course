@@ -647,6 +647,22 @@ test('publish --rebuild rewrites the site from the library without touching the 
   assert.equal(ledger.getTask('replay-1').stage, 'published', '重建不碰账本阶段')
 })
 
+test('publish --no-notify updates the site without queueing another push', async () => {
+  // 换排版之后要批量重发：内容确实变了，但每篇都推一条对读者是骚扰。
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const notesDir = path.join(dir, 'notes')
+  fs.mkdirSync(notesDir, { recursive: true })
+  fs.writeFileSync(path.join(notesDir, 'notes-run-summary.json'), JSON.stringify({ course: '刑法分论', lesson: '第10-12节', status: 'completed' }))
+  fs.writeFileSync(path.join(notesDir, '第10-12节.md'), '# 第10-12节\n\n## 课程概览\n\n正文。')
+  const siteDir = path.join(dir, 'site')
+  const { deps, lines } = harness()
+  assert.equal(await runCli(['publish', '--from', notesDir, '--out', siteDir, '--no-notify'], deps), 0)
+  const payload = parse(lines.at(-1))
+  assert.equal(payload.changed, true)
+  assert.equal(payload.delivery, null, '--no-notify 不该排队')
+  assert.ok(fs.existsSync(path.join(siteDir, 'notes/刑法分论/第10-12节.html')), '站点照样要更新')
+})
+
 test('publish refuses a directory without a notes run summary', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
   const { deps, errors } = harness()
