@@ -635,13 +635,29 @@ async function doAction (action, extra, btn) {
  */
 var CHUNK_SIZE = 1024 * 1024
 
-async function putChunk (uploadId, index, blob, key) {
-  var res = await fetch('/api/admin/materials/chunk?uploadId=' + encodeURIComponent(uploadId) + '&index=' + index, {
-    method: 'PUT', headers: headers(false), body: blob
-  })
-  var data = await res.json()
-  if (!res.ok || !data.ok) throw new Error(data.message || data.error || ('分片 ' + index + ' 失败'))
-  return data
+/**
+ * 传一片，失败自动重试两次。
+ *
+ * 网络抖动（隧道断一下、Wi-Fi 切换）会让 fetch 直接抛 TypeError: Failed to fetch——
+ * 一个 25MB 的课件有二十多片，任何一片抖一下整包就白传，用户只看到"失败"。
+ * 分片的意义之一就是可以单独重试，所以这里兜住。
+ */
+async function putChunk (uploadId, index, blob) {
+  var lastError = null
+  for (var attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      var res = await fetch('/api/admin/materials/chunk?uploadId=' + encodeURIComponent(uploadId) + '&index=' + index, {
+        method: 'PUT', headers: headers(false), body: blob
+      })
+      var data = await res.json().catch(function () { return {} })
+      if (res.ok && data.ok) return data
+      lastError = new Error(data.message || data.error || ('分片 ' + index + ' 失败（HTTP ' + res.status + '）'))
+    } catch (error) {
+      lastError = error
+    }
+    await new Promise(function (done) { setTimeout(done, 600 * attempt) })
+  }
+  throw lastError
 }
 
 async function uploadDeck (key, file, btn) {
@@ -666,7 +682,7 @@ async function uploadDeck (key, file, btn) {
         var percent = Math.round((index / total) * 100)
         state.uploads[key] = '上传中 ' + percent + '%（' + file.name + ' · ' + sizeMb + 'MB · 第 ' + (index + 1) + '/' + total + ' 片）'
         setStatus(key, state.uploads[key])
-        await putChunk(uploadId, index, file.slice(index * CHUNK_SIZE, (index + 1) * CHUNK_SIZE), key)
+        await putChunk(uploadId, index, file.slice(index * CHUNK_SIZE, (index + 1) * CHUNK_SIZE))
       }
       state.uploads[key] = '解析中…（' + file.name + '）'
       setStatus(key, state.uploads[key])
