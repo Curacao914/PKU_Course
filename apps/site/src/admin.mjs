@@ -1,8 +1,9 @@
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 
-import { clearPassword, readPasswordRecord, validatePassword, verifyPassword, writePassword } from '@course/core'
+import { clearPassword, asrCostCny, noteCostCny, readPasswordRecord, resolvePricing, validatePassword, verifyPassword, writePassword } from '@course/core'
 import { addMaterial, listMaterials, unassignedDir } from '@course/materials'
 
 import { ADMIN_HTML } from './admin-page.mjs'
@@ -243,6 +244,83 @@ export function createAdminHandler({
     else failures.set(key, { at: entry.at, count: entry.count + 1 })
   }
 
+  /**
+   * 从 lesson-state 的调用轨迹里汇总 token 用量。
+   *
+   * 每一步模型调用的 usage 都留在状态文件里，所以"这节课花了多少钱"不用翻账单反推。
+   * 注意 **finalNoteVersions 是 finalNote 的历史副本**：同一份 usage 会在两处出现，
+   * 一起算就把最后那次拼装重复计一遍，因此显式跳过它。
+   */
+  function collectNoteUsage(lesson = {}) {
+    const totals = { calls: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0, reasoningTokens: 0 }
+    const add = (usage) => {
+      if (!usage || typeof usage !== 'object' || !Number.isFinite(Number(usage.prompt_tokens))) return
+      totals.calls += 1
+      totals.inputTokens += Number(usage.prompt_tokens || 0)
+      totals.outputTokens += Number(usage.completion_tokens || 0)
+      totals.cachedTokens += Number(usage.prompt_tokens_details?.cached_tokens || 0)
+      totals.reasoningTokens += Number(usage.completion_tokens_details?.reasoning_tokens || 0)
+    }
+    const addTrace = (holder) => add(holder?.trace?.usage)
+    for (const trace of lesson.outlineTraces || []) add(trace?.usage || trace?.trace?.usage)
+    for (const node of lesson.nodes || []) {
+      for (const version of node.versions || []) addTrace(version)
+      for (const report of node.reviewerReports || []) addTrace(report)
+      for (const trace of node.reviseTraces || []) add(trace?.usage)
+    }
+    addTrace(lesson.finalNote?.assembly)
+    for (const report of lesson.finalReviewReports || []) addTrace(report)
+    return totals
+  }
+
+  /** 一节课的两笔钱：转写（按语音时长）与写笔记（按 token）。 */
+  function lessonCostOf(task, lessonState, pricing) {
+    const runtime = task?.runtime || {}
+    const asrCny = Number.isFinite(Number(runtime.estimatedCostCny)) && Number(runtime.estimatedCostCny) > 0
+      ? Number(runtime.estimatedCostCny)
+      : asrCostCny({ seconds: Number(runtime.videoDurationSeconds || 0), pricing })
+    const usage = lessonState?.usage || null
+    const notesCny = usage
+      ? noteCostCny({ inputTokens: usage.inputTokens, cachedTokens: usage.cachedTokens, outputTokens: usage.outputTokens, pricing })
+      : 0
+    return {
+      asrCny: Number(asrCny.toFixed(4)),
+      notesCny: Number(notesCny.toFixed(4)),
+      totalCny: Number((asrCny + notesCny).toFixed(4)),
+      usage: usage || null
+    }
+  }
+
+  /**
+   * 微信通道的会话状态。
+   *
+   * 这个通道（微信机器人）只在"用户最近给机器人发过消息"之后才能把消息真正送到——
+   * 平台给每条来信发一个 context_token，出站必须原样带上。没有它会怎样：接口照常返回
+   * messageId，看起来"发送成功"，但微信端收不到。所以必须在界面上说出来，
+   * 而不是让用户对着"已发送"发呆。
+   */
+  function channelHealth() {
+    // 显式配置了就去配置的地方找，不要"顺便猜几个目录"——猜错会把别的机器/别的
+    // 部署的会话状态当成自己的，界面上的通道状态就成了假消息
+    const configured = [process.env.OPENCLAW_STATE_DIR, process.env.OPENCLAW_HOME].filter(Boolean)
+    const bases = configured.length
+      ? configured
+      : [path.join(os.homedir(), '.openclaw-candidate'), path.join(os.homedir(), '.openclaw')]
+    for (const base of bases) {
+      const dir = path.join(base, 'openclaw-weixin', 'accounts')
+      if (!fs.existsSync(dir)) continue
+      let newest = 0
+      for (const name of fs.readdirSync(dir)) {
+        if (!name.endsWith('.context-tokens.json')) continue
+        newest = Math.max(newest, fs.statSync(path.join(dir, name)).mtimeMs)
+      }
+      if (!newest) return { ok: false, reason: '机器人还没有收到过你的消息，无法主动推送' }
+      const ageMinutes = Math.round((now() - newest) / 60000)
+      return { ok: true, lastInboundAt: new Date(newest).toISOString(), ageMinutes }
+    }
+    return { ok: false, reason: '没找到微信通道状态目录（OPENCLAW_STATE_DIR 未设置？）' }
+  }
+
   /** 从课次产物里读出笔记模块列表（管理台要能"只重写某一个模块"）。 */
   function readLessonState(task) {
     const transcriptPath = task?.artifacts?.transcriptPath || ''
@@ -255,6 +333,7 @@ export function createAdminHandler({
       return {
         statePath,
         outputDir: path.dirname(transcriptPath),
+        usage: collectNoteUsage(lesson),
         status: lesson.status || null,
         finalChars: (lesson.finalNote?.markdown || '').length,
         savedAt: state.savedAt || null,
@@ -293,8 +372,10 @@ export function createAdminHandler({
   }
 
   function snapshot() {
+    const pricing = resolvePricing(process.env)
     const status = {
       generatedAt: new Date(now()).toISOString(),
+      pricing,
       // 正在运行的状态要暴露出来：否则用户点完按钮看不到反馈，
       // 又在别处点一次会撞上 409 却不明白为什么
       running: running ? { action: running.action, startedAt: running.startedAt } : null,
@@ -308,6 +389,7 @@ export function createAdminHandler({
         const rawTasks = store.listTasks({ limit: 60 })
         const tasks = rawTasks.map(task => {
           const artifacts = task.artifacts || {}
+          const lesson = readLessonState(task)
           const materials = task.course_name && task.title
             ? listMaterials({ root: materialsRoot, course: task.course_name, lesson: task.title, replayKey: task.replay_key })
             : []
@@ -329,9 +411,15 @@ export function createAdminHandler({
             },
             hasTranscript: Boolean(artifacts.transcriptPath && fs.existsSync(artifacts.transcriptPath)),
             materials: materials.map(item => ({ name: item.name, scope: item.scope, slideCount: item.slideCount, addedAt: item.addedAt })),
-            lesson: readLessonState(task)
+            lesson,
+            cost: lessonCostOf(task, lesson, pricing)
           }
         })
+        status.spend = tasks.reduce((sum, task) => ({
+          asrCny: Number((sum.asrCny + (task.cost?.asrCny || 0)).toFixed(4)),
+          notesCny: Number((sum.notesCny + (task.cost?.notesCny || 0)).toFixed(4)),
+          totalCny: Number((sum.totalCny + (task.cost?.totalCny || 0)).toFixed(4))
+        }), { asrCny: 0, notesCny: 0, totalCny: 0 })
         status.ledger = {
           path: store.path,
           stages: store.countTasks(),
@@ -415,6 +503,8 @@ export function createAdminHandler({
         passwordSet: Boolean(readPasswordRecord(scratchRoot)),
         masterTokenSet: Boolean(activeToken)
       }
+      // 微信通道：主动推送需要用户最近和机器人有过互动，界面要把这件事说清楚
+      snap.channel = channelHealth()
       // _unassigned：收件箱里认不出归属的课件，等人指定
       try {
         const parked = unassignedDir(materialsRoot)

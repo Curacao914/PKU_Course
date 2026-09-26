@@ -152,7 +152,7 @@ const EXPECTED = {
   save: '已登录',
   refresh: '已刷新',
   'refresh-balance': '正在查余额',
-  upload: '已归档',
+  pick: '已归档',
   retry: '完成',
   republish: '完成',
   cycle: '完成',
@@ -168,7 +168,7 @@ const EXPECTED = {
   'prune-apply': '完成',
   'save-config': '设置已保存',
   'save-password': '密码已更新',
-  'clear-password': '已清除密码'
+  'clear-password': '已清除密码'  // 「已清除密码；当前浏览器用的是主令牌，仍然有效」也匹配
 }
 
 /** 管理台：把每个按钮点一遍，要求「立刻有反馈」且发出的命令正确。 */
@@ -178,34 +178,50 @@ async function auditAdmin(page, site, calls, dialogs, failures) {
   await page.waitForSelector('#tab-overview .card', { timeout: 10000 })
   if (await page.locator('text=需要登录').count()) throw new Error('管理台没登录上（fixture 或令牌有问题）')
 
+  // 界面默认折叠（课程、课次、运行参数、输出）——审计要先把折叠层打开，
+  // 否则测不到里面那些按钮，而"藏在折叠里的按钮点不动"恰恰是最容易漏的
+  // 顶栏那个 ··· 是浮层，不展开（它会盖住内容，点了会挡住下面的按钮）
+  const openAll = () => page.$$eval('main details, .card details', nodes => nodes.forEach(node => { node.open = true }))
+  await openAll()
+
   const tabNames = ['overview', 'courses', 'notes', 'settings']
   for (const tab of tabNames) {
-    await page.click('.tabs button[data-tab="' + tab + '"]')
+    await openAll()
+    await page.click('.seg button[data-tab="' + tab + '"]')
     // 切页也是"点了要有反应"的一份：选中态与内容区显隐都要跟着动
-    const selected = await page.getAttribute('.tabs button[data-tab="' + tab + '"]', 'aria-selected')
+    const selected = await page.getAttribute('.seg button[data-tab="' + tab + '"]', 'aria-selected')
     const visible = await page.isVisible('#tab-' + tab)
     const others = await Promise.all(tabNames.filter(name => name !== tab).map(name => page.isVisible('#tab-' + name)))
     if (selected !== 'true' || !visible || others.some(Boolean)) {
       failures.push('管理台 tab · ' + tab + '：切换后选中态或显示状态不对')
     }
+    await openAll()
     const acts = await page.$$eval('#tab-' + tab + ' [data-act]', nodes => [...new Set(nodes.map(node => node.dataset.act))])
     for (const act of acts) {
       const selector = '#tab-' + tab + ' [data-act="' + act + '"]'
+      // 每次操作后界面会重绘（折叠层又合上），所以每点一个按钮前都先展开
+      await openAll()
       // 点之前把该填的填好，否则测到的是「参数没填」那条分支
-      if (act === 'upload') {
-        await page.setInputFiles('#tab-' + tab + ' input[type=file]', {
-          name: '第5-6节课件.json',
-          mimeType: 'application/json',
-          buffer: Buffer.from(JSON.stringify({ slides: [{ slideNumber: 1, text: '执行程序' }] }))
-        })
-      }
       if (act === 'revise' || act === 'revise-first') {
         await page.fill('#tab-' + tab + ' [data-request]', '把这一节压缩到 1200 字并拆成列表')
       }
       if (act === 'save-password') await page.fill('[data-pw="next"]', 'audit-password-2026')
 
+      await openAll()
       const before = calls.length
-      await page.click(selector, { timeout: 5000 })
+      if (act === 'pick') {
+        // 「选择课件并上传」会唤起系统文件框，然后**直接开始上传**（不再点第二次）
+        const chooser = page.waitForEvent('filechooser', { timeout: 5000 })
+        await page.click(selector, { timeout: 5000 })
+        const fileChooser = await chooser
+        await fileChooser.setFiles({
+          name: '第5-6节课件.json',
+          mimeType: 'application/json',
+          buffer: Buffer.from(JSON.stringify({ slides: [{ slideNumber: 1, text: '执行程序' }] }))
+        })
+      } else {
+        await page.click(selector, { timeout: 5000 })
+      }
 
       // 第一关：点下去必须立刻出现可见提示——这就是「按钮有没有反应」的判据
       let immediate = { text: '', kind: '' }
@@ -225,6 +241,16 @@ async function auditAdmin(page, site, calls, dialogs, failures) {
       const settled = await page.$eval('#toast', el => ({ text: el.textContent.trim(), kind: el.className })).catch(() => immediate)
       const toast = settled.text && settled.text !== immediate.text ? settled : immediate
 
+      // 清密码之后浏览器手上那串就失效了（这是对的）。审计继续跑下去要重新用主令牌登录，
+      // 相当于用户在服务器上查到主令牌再粘回来。
+      if (act === 'clear-password') {
+        await page.evaluate(token => {
+          localStorage.setItem('course.admin.token', token)
+          var input = document.getElementById('token')
+          if (input) input.value = token
+        }, TOKEN)
+      }
+
       const argv = calls.length > before ? calls[calls.length - 1] : null
       results.push({ tab, act, toast: toast.text, argv })
 
@@ -236,13 +262,13 @@ async function auditAdmin(page, site, calls, dialogs, failures) {
   }
 
   // 「去处理」这类页内跳转：点了要切到对应 tab
-  await page.click('.tabs button[data-tab="overview"]')
+  await page.click('.seg button[data-tab="overview"]')
   const jump = await page.$('#tab-overview [data-go]')
   if (jump) {
     const target = await jump.getAttribute('data-go')
     await jump.click()
     await page.waitForTimeout(150)
-    const on = await page.getAttribute('.tabs button[data-tab="' + target + '"]', 'aria-selected')
+    const on = await page.getAttribute('.seg button[data-tab="' + target + '"]', 'aria-selected')
     if (on !== 'true') failures.push('管理台 · 「去处理」链接没有切到 ' + target)
     else console.log('  [概览] 去处理链接 →  切到 ' + target + ' 区')
   }
@@ -401,7 +427,13 @@ async function main() {
   const dialogs = []
   page.on('dialog', dialog => { dialogs.push(dialog.message()); dialog.accept() })
   page.on('pageerror', error => { failures.push('页面脚本异常：' + error.message) })
-  page.on('console', message => { if (message.type() === 'error') failures.push('控制台报错：' + message.text()) })
+  page.on('console', message => {
+    // 清密码那一步会把当前凭据作废，浏览器随后必然吃到一次 401——这是预期行为，
+    // 不是缺陷；其余控制台报错一律算失败
+    if (message.type() !== 'error') return
+    if (/401/.test(message.text())) return
+    failures.push('控制台报错：' + message.text())
+  })
   // 余额是外部网络调用，审计里换成固定值
   await page.route('**/api/admin/balance', route => route.fulfill({
     status: 200,

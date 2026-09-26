@@ -1,23 +1,18 @@
 /**
  * 管理台页面。
  *
- * 单独一个文件：界面源码本来就长，混在 handler 里既难读也容易和转义打架。
- * 页面自己带样式与脚本，不引任何外部依赖（与笔记站同一套设计令牌）。
+ * 设计原则（2026-09-26 重做，用户反馈「太臃肿、信息太爆炸」）：
  *
- * 四个区，按"一类操作一个区"划分，不是按数据种类：
- *   概览 —— 现在要我做什么（待办 + 余额 + 账本阶段 + 最近运行）
- *   课程 —— 课次表；每行能重跑/重置/重新发布，展开即该课课件上传
- *   笔记 —— 逐模块状态与"只重写这个模块" + 通知队列（含失败重发）
- *   设置 —— 维护动作 + 运行参数（可改的只有调参，密钥仍只在服务器环境变量里）
- *
- * 两条经验写在这里，免得下次又踩：
- *   1. **按钮必须当场有反应。** 维护动作动辄跑几分钟，只把结果写进页面底部的
- *      <pre> 等于没反应——用户在「课程」区点了「重跑」，看不到任何东西变化，
- *      会以为按钮坏了。所以每个按钮点击后：立刻置灰改字、右上角弹一条提示、
- *      顶部状态灯切成"正在运行"，跑完再弹结果（成功/失败都用一句话说清楚）。
- *   2. **按钮属性与事件委托必须对得上。** 之前把属性写成 data-run，委托只认
- *      data-act，点了完全没反应且不报错。页面上所有按钮只用 data-act，
- *      并有测试逐条比对"页面里的 data-act"与"脚本里的处理分支"两个集合。
+ *   1. **一屏只回答一个问题。** 概览先回答"现在需要我做什么"，其余数字排在后面。
+ *      第一版把阶段分布、余额、最近运行、待办全铺在一屏，等于什么都没说。
+ *   2. **默认折叠，需要时展开。** 课程按课程折叠、课次按行折叠、设置里的参数与密码折叠、
+ *      运行输出折叠。用原生 <details>：没有构建步骤，也不需要自己写展开逻辑。
+ *   3. **一件事一个动作。** 上传课件不再是"先点选文件、再点上传"两步，而是
+ *      「选择课件并上传」一个按钮（也可以直接把文件拖到那一行）。
+ *   4. **数字要说明白。** 花费按"转写 / 笔记"两笔分开显示，并把单价写在旁边——
+ *      用户问过"为什么阿里云花了八块多"，界面上就该能自己回答。
+ *   5. **按钮点下去必须当场有反应。** 置灰改字 + 顶部状态灯 + 右下角提示，
+ *      跑完再弹明确的成功/失败（见 docs/09 §9）。
  */
 export const ADMIN_HTML = `<!doctype html>
 <html lang="zh-CN">
@@ -26,107 +21,196 @@ export const ADMIN_HTML = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>课程笔记 · 管理台</title>
 <style>
-:root{--bg:#fff;--bg-soft:#f6f7f8;--bg-sunken:#f1f3f4;--ink:#16191d;--ink-soft:#454b52;--muted:#787f87;
---line:#e7e9ec;--line-strong:#d5d9dd;--accent:#2f6f61;--accent-ink:#245a4f;--accent-soft:#eef4f2;
---warn:#a8641b;--warn-soft:#fdf5e9;--danger:#a33a3a;--danger-soft:#fbeeee;--ok:#2f7d52;
---radius:12px;--radius-lg:16px;--shadow-sm:0 1px 2px rgba(16,24,32,.05);--shadow-md:0 10px 30px -18px rgba(16,24,32,.28);
---sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;}
+:root{
+  --bg:#fbfbfd;--card:#fff;--sunken:#f5f5f7;--ink:#1d1d1f;--ink-2:#6e6e73;--ink-3:#86868b;
+  --line:#e8e8ed;--line-2:#d2d2d7;--accent:#2f6f61;--accent-ink:#245a4f;--accent-soft:#eef4f2;
+  --danger:#b3261e;--danger-soft:#fdecea;--warn:#8a5a00;--warn-soft:#fff5e0;--ok:#1c7c4a;
+  --r-lg:18px;--r-md:12px;--r-sm:9px;
+  --shadow:0 1px 2px rgba(0,0,0,.04),0 10px 30px -22px rgba(0,0,0,.3);
+  --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased}
-a{color:var(--accent);text-decoration:none}a:hover{color:var(--accent-ink)}
-.topbar{position:sticky;top:0;z-index:20;background:rgba(255,255,255,.9);backdrop-filter:blur(12px);border-bottom:1px solid var(--line)}
-.topbar .inner{max-width:1100px;margin:0 auto;padding:0 22px;height:56px;display:flex;align-items:center;gap:12px}
-.brand{font-weight:650}.brand span{font-weight:400;color:var(--muted);margin-left:8px;font-size:14px}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:16px;line-height:1.55;
+  -webkit-font-smoothing:antialiased;letter-spacing:-.005em;overflow-wrap:anywhere}
+/* 路径、replayKey、URL 这类长串没有空格，不强制断行会把窄屏整体撑宽 */
+code,.tiny,pre,td{overflow-wrap:anywhere}
+a{color:var(--accent);text-decoration:none}
+a:hover{color:var(--accent-ink)}
+.wrap{max-width:960px;margin:0 auto;padding:0 22px}
+
+/* 顶栏：只留身份、状态与一个"更多"入口 */
+header.top{position:sticky;top:0;z-index:20;background:rgba(251,251,253,.86);backdrop-filter:saturate(180%) blur(20px);
+  border-bottom:1px solid var(--line)}
+header.top .wrap{height:60px;display:flex;align-items:center;gap:14px}
+.brand{font-size:17px;font-weight:600;letter-spacing:-.02em}
+.brand em{font-style:normal;color:var(--ink-3);font-weight:400;margin-left:6px;font-size:14px}
 .spacer{flex:1}
-.tabs{max-width:1100px;margin:0 auto;padding:0 22px;display:flex;gap:4px;border-bottom:1px solid var(--line)}
-.tabs button{background:none;border:0;padding:12px 14px;font:inherit;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px}
-.tabs button:hover{color:var(--ink)}
-.tabs button[aria-selected=true]{color:var(--accent-ink);border-bottom-color:var(--accent);font-weight:600}
-main{max-width:1100px;margin:0 auto;padding:24px 22px 96px}
+.chip{display:inline-flex;align-items:center;gap:7px;height:30px;padding:0 12px;border-radius:999px;
+  background:var(--sunken);color:var(--ink-2);font-size:13.5px;white-space:nowrap}
+.chip .dot{width:7px;height:7px;border-radius:50%;background:var(--ink-3)}
+.chip.ok .dot{background:var(--ok)}.chip.warn .dot{background:#e0a300}.chip.bad .dot{background:var(--danger)}
+.menu{position:relative}
+.menu>summary{list-style:none;cursor:pointer;height:30px;width:30px;border-radius:50%;background:var(--sunken);
+  display:flex;align-items:center;justify-content:center;color:var(--ink-2);font-size:15px;letter-spacing:1px}
+.menu>summary::-webkit-details-marker{display:none}
+.menu[open]>summary{background:var(--line)}
+.menu .sheet{position:absolute;right:0;top:38px;width:290px;background:var(--card);border:1px solid var(--line);
+  border-radius:var(--r-md);box-shadow:var(--shadow);padding:14px}
+.menu .sheet a{display:block;padding:6px 0}
+.menu label{display:block;font-size:12.5px;color:var(--ink-3);margin:8px 0 4px}
+
+/* 分区导航：分段控件 */
+nav.seg{display:flex;gap:2px;background:var(--sunken);border-radius:10px;padding:2px;margin:18px 0 22px;width:fit-content}
+nav.seg button{font:inherit;font-size:14px;border:0;background:none;color:var(--ink-2);padding:6px 16px;border-radius:8px;cursor:pointer}
+nav.seg button[aria-selected=true]{background:var(--card);color:var(--ink);font-weight:500;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+
+main{padding-bottom:80px}
+h1{font-size:28px;line-height:1.2;letter-spacing:-.02em;margin:0 0 6px}
+h2{font-size:19px;letter-spacing:-.015em;margin:0 0 10px}
+h3{font-size:16px;margin:0 0 8px}
+p{margin:0 0 10px}
+.lede{color:var(--ink-2);font-size:15px;margin:0 0 18px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--r-lg);padding:20px 22px;box-shadow:var(--shadow);margin-bottom:16px}
+.card .sub{color:var(--ink-3);font-size:13.5px;margin:-4px 0 12px}
 .grid{display:grid;gap:16px}
-.grid.two{grid-template-columns:repeat(auto-fit,minmax(330px,1fr))}
-.grid.three{grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}
-.card{background:var(--bg);border:1px solid var(--line);border-radius:var(--radius-lg);padding:18px 20px;box-shadow:var(--shadow-sm)}
-.card h2{margin:0 0 10px;font-size:15px}
-.card .sub{color:var(--muted);font-size:13.5px;margin:-6px 0 12px}
-.stat{font-size:26px;font-weight:650;letter-spacing:-.02em}
-.pill{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;background:var(--bg-soft);border:1px solid var(--line);color:var(--ink-soft);font-size:13px;margin:0 6px 6px 0}
-.pill.warn{background:var(--warn-soft);border-color:#f0dfc2;color:var(--warn)}
-.pill.danger{background:var(--danger-soft);border-color:#f0d3d3;color:var(--danger)}
-.pill.ok{background:var(--accent-soft);border-color:#d6e6e1;color:var(--accent-ink)}
-.dot{width:7px;height:7px;border-radius:50%;background:var(--muted)}
-.dot.ok{background:var(--ok)}.dot.warn{background:var(--warn)}.dot.danger{background:var(--danger)}
-table{width:100%;border-collapse:collapse;font-size:14px}
-th,td{border-bottom:1px solid var(--line);padding:9px 8px;text-align:left;vertical-align:top}
-th{color:var(--muted);font-weight:600;font-size:12.5px;letter-spacing:.04em;text-transform:uppercase}
-tbody tr:hover{background:#fcfcfd}
-button.act{font:inherit;font-size:13px;padding:5px 10px;border-radius:8px;border:1px solid var(--line-strong);background:var(--bg);color:var(--ink-soft);cursor:pointer}
-button.act:hover{border-color:var(--accent);color:var(--accent-ink)}
-button.act[disabled]{opacity:.55;cursor:progress}
+.grid.two{grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
+.grid.three{grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}
+.stat{font-size:30px;font-weight:600;letter-spacing:-.03em;line-height:1.1}
+.stat small{display:block;font-size:13px;font-weight:400;color:var(--ink-3);letter-spacing:0;margin-top:4px}
+
+/* 待办：一条一行，右边一个动作 */
+.todo{display:flex;align-items:center;gap:12px;padding:12px 0;border-top:1px solid var(--line)}
+.todo:first-of-type{border-top:0;padding-top:2px}
+.todo .t{flex:1;min-width:0}
+.todo .t b{display:block;font-weight:500}
+.todo .t span{color:var(--ink-3);font-size:13.5px}
+.empty-ok{display:flex;align-items:center;gap:10px;color:var(--ok);font-size:15px}
+
+button.act{font:inherit;font-size:14px;padding:7px 14px;border-radius:980px;border:1px solid var(--line-2);
+  background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+button.act:hover{border-color:var(--ink-3)}
+button.act[disabled]{opacity:.5;cursor:progress}
 button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
-button.primary:hover{background:var(--accent-ink);color:#fff;border-color:var(--accent-ink)}
-button.danger{border-color:#e6c9c9;color:var(--danger)}
-input,select,textarea{font:inherit;padding:8px 10px;border:1px solid var(--line-strong);border-radius:10px;background:var(--bg);color:var(--ink);width:100%}
-input:focus,select:focus,textarea:focus{outline:3px solid var(--accent-soft);outline-offset:1px;border-color:var(--accent)}
-.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
-.row>*{width:auto}
-label{display:block;font-size:13px;color:var(--muted);margin-bottom:4px}
+button.primary:hover{background:var(--accent-ink);border-color:var(--accent-ink);color:#fff}
+button.quiet{border-color:transparent;background:var(--sunken);color:var(--ink-2)}
+button.danger{border-color:#eccac7;color:var(--danger)}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.muted{color:var(--ink-3)}.small{font-size:13.5px}.tiny{font-size:12.5px}
+
+/* 折叠：课程、课次、参数、输出都用同一套 */
+details.d{border-top:1px solid var(--line)}
+details.d:first-of-type{border-top:0}
+details.d>summary{list-style:none;cursor:pointer;padding:14px 2px;display:flex;align-items:center;gap:12px}
+details.d>summary::-webkit-details-marker{display:none}
+details.d>summary::after{content:'';width:8px;height:8px;border-right:1.6px solid var(--ink-3);border-bottom:1.6px solid var(--ink-3);
+  transform:rotate(-45deg);margin-left:auto;transition:transform .2s ease;flex:none}
+details.d[open]>summary::after{transform:rotate(45deg)}
+details.d>summary:hover .ttl{color:var(--accent-ink)}
+.ttl{font-weight:500}
+.body{padding:0 2px 18px}
+.sub-row{display:flex;align-items:center;gap:12px;padding:10px 0;border-top:1px solid var(--line)}
+.sub-row:first-child{border-top:0}
+.sub-row .name{flex:1;min-width:0}
+.sub-row .name span{display:block;color:var(--ink-3);font-size:12.5px}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:2px 10px;border-radius:999px;background:var(--sunken);
+  color:var(--ink-2);font-size:12.5px}
+.pill.ok{background:var(--accent-soft);color:var(--accent-ink)}
+.pill.warn{background:var(--warn-soft);color:var(--warn)}
+.pill.bad{background:var(--danger-soft);color:var(--danger)}
+.pill .dot{width:6px;height:6px;border-radius:50%;background:currentColor;opacity:.7}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--ink-3);font-weight:500;font-size:12.5px}
+tbody tr:last-child td{border-bottom:0}
+label{display:block;font-size:13px;color:var(--ink-3);margin:0 0 5px}
+input,select{font:inherit;font-size:15px;padding:9px 12px;border:1px solid var(--line-2);border-radius:var(--r-sm);
+  background:var(--card);color:var(--ink);width:100%}
+input:focus,select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
 .field{margin-bottom:14px}
-pre{background:var(--bg-sunken);border:1px solid var(--line);border-radius:var(--radius);padding:12px 14px;overflow:auto;max-height:360px;font-size:12.5px}
-.empty{color:var(--muted);background:var(--bg-soft);border:1px dashed var(--line-strong);border-radius:var(--radius);padding:18px;text-align:center}
-.muted{color:var(--muted)}.small{font-size:13px}
-.token{width:180px}
-/* 右下角提示条：按钮点下去之后必须马上有东西动，否则用户会以为坏了 */
-.toast{position:fixed;right:20px;bottom:20px;z-index:60;max-width:min(420px,calc(100vw - 40px));
-padding:11px 14px;border-radius:12px;border:1px solid var(--line-strong);background:rgba(255,255,255,.97);
-box-shadow:var(--shadow-md);font-size:13.5px;color:var(--ink-soft);opacity:0;transform:translateY(10px);
-transition:opacity .18s ease,transform .18s ease;pointer-events:none}
+.hidden-file{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);border:0}
+.drop{border:1px dashed var(--line-2);border-radius:var(--r-md);padding:12px 14px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.drop.hot{border-color:var(--accent);background:var(--accent-soft)}
+.status{font-size:13.5px;color:var(--ink-3);margin-top:8px;min-height:0}
+.status.bad{color:var(--danger)}
+.status.ok{color:var(--ok)}
+pre{background:var(--sunken);border-radius:var(--r-md);padding:14px;overflow:auto;max-height:340px;font-size:12.5px;margin:0}
+.toast{position:fixed;right:20px;bottom:20px;z-index:60;max-width:min(420px,calc(100vw - 40px));padding:12px 15px;
+  border-radius:var(--r-md);border:1px solid var(--line);background:rgba(255,255,255,.98);box-shadow:var(--shadow);
+  font-size:14px;color:var(--ink-2);opacity:0;transform:translateY(10px);transition:opacity .18s ease,transform .18s ease;pointer-events:none}
 .toast.show{opacity:1;transform:none}
 .toast.ok{border-color:#cfe4d8;background:var(--accent-soft);color:var(--accent-ink)}
-.toast.error{border-color:#e6c9c9;background:var(--danger-soft);color:var(--danger)}
+.toast.error{border-color:#eccac7;background:var(--danger-soft);color:var(--danger)}
+@media (max-width:560px){
+  body{font-size:15.5px}
+  h1{font-size:24px}
+  .card{padding:16px}
+  .stat{font-size:26px}
+}
 </style>
 </head>
 <body>
-<header class="topbar"><div class="inner">
-  <div class="brand">课程笔记<span>管理台</span></div>
-  <div class="spacer"></div>
-  <span id="runState" class="pill"><span class="dot"></span>空闲</span>
-  <input class="token" id="token" type="password" placeholder="管理密码或令牌">
-  <button class="act" data-act="save">保存令牌</button>
-  <button class="act" data-act="refresh">刷新</button>
-  <a class="act" href="/" target="_blank" rel="noopener" style="padding:5px 10px;border:1px solid var(--line-strong);border-radius:8px">看站点</a>
-</div></header>
-<nav class="tabs" role="tablist">
-  <button role="tab" data-tab="overview" aria-selected="true">概览</button>
-  <button role="tab" data-tab="courses" aria-selected="false">课程</button>
-  <button role="tab" data-tab="notes" aria-selected="false">笔记</button>
-  <button role="tab" data-tab="settings" aria-selected="false">设置</button>
-</nav>
-<main>
+<header class="top">
+  <div class="wrap">
+    <div class="brand">课程笔记<em>管理台</em></div>
+    <div class="spacer"></div>
+    <span id="runState" class="chip"><span class="dot"></span>空闲</span>
+    <details class="menu" id="menu">
+      <summary title="更多">···</summary>
+      <div class="sheet">
+        <div class="row" style="margin-bottom:6px">
+          <button class="act" data-act="refresh">刷新</button>
+          <a class="act" href="/" target="_blank" rel="noopener" style="padding:7px 14px;border:1px solid var(--line-2);border-radius:980px">看站点</a>
+        </div>
+        <label>管理密码或主令牌</label>
+        <input id="token" type="password" placeholder="粘贴后回车" autocomplete="current-password">
+        <div class="row" style="margin-top:8px"><button class="act primary" data-act="save">保存</button></div>
+        <div class="tiny muted" style="margin-top:8px">忘记密码时在服务器上跑 course admin-passwd --set-stdin（见 docs/10）。</div>
+      </div>
+    </details>
+  </div>
+</header>
+
+<main class="wrap">
+  <nav class="seg" role="tablist">
+    <button role="tab" data-tab="overview" aria-selected="true">概览</button>
+    <button role="tab" data-tab="courses" aria-selected="false">课程</button>
+    <button role="tab" data-tab="notes" aria-selected="false">笔记</button>
+    <button role="tab" data-tab="settings" aria-selected="false">设置</button>
+  </nav>
   <section id="tab-overview"></section>
   <section id="tab-courses" hidden></section>
   <section id="tab-notes" hidden></section>
   <section id="tab-settings" hidden></section>
-  <div class="card" style="margin-top:18px"><h2>运行输出</h2><pre id="out">（尚未运行）</pre></div>
+  <div class="card" style="padding:6px 22px">
+    <details class="d" id="outCard" style="border-top:0">
+      <summary><span class="ttl">运行输出</span><span class="muted small">最近一次命令的完整结果</span></summary>
+      <div class="body"><pre id="out">（尚未运行）</pre></div>
+    </details>
+  </div>
 </main>
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 <script>
 var $ = function (id) { return document.getElementById(id) }
 var KEY = 'course.admin.token'
-// requests：每个课次输入框里正在写的要求。重绘很频繁（每次操作完、每 20 秒轮询），
-// 不记住的话用户写到一半的字会被冲掉——这比"按钮没反应"更让人恼火。
-var state = { status: null, balance: null, config: null, tab: 'overview', busy: false, requests: {} }
+// requests：每个课次输入框里正在写的要求。重绘很频繁，不记住就会把写到一半的字冲掉。
+var state = { status: null, balance: null, config: null, tab: 'overview', busy: false, requests: {}, uploads: {} }
 
-// 动作 → 人话。按钮文案与提示共用一张表，避免两处各写一份、改一处漏一处。
 var LABELS = {
   discover: '扫描教学网', cycle: '跑一轮完整链路', 'cycle-all': '跑一轮完整链路',
   notify: '投递通知', doctor: '体检', backup: '备份账本', prune: '清理预演',
   'prune-apply': '清理并删除原件', retry: '重跑这节课', republish: '重新发布',
   revise: '按新要求重写模块', 'notify-retry': '重发失败通知'
 }
+var MODULE_TEXT = { approved: '已通过', draft: '草稿', reviewing: '审查中', revising: '重写中', pending: '待写', failed: '失败' }
+var STAGE_TEXT = {
+  discovered: '待处理', queued: '排队中', downloading: '下载中', downloaded: '已下载',
+  transcribing: '转写中', transcript_ready: '待写笔记', writing: '写笔记中',
+  notes_ready: '待发布', publishing: '发布中', published: '已发布',
+  needs_attention: '卡住了', failed: '失败', completed: '已完成'
+}
 
 $('token').value = localStorage.getItem(KEY) || ''
-// 回车即登录：粘贴完凭据顺手敲一下回车是本能动作
 $('token').addEventListener('keydown', function (event) {
   if (event.key === 'Enter') { event.preventDefault(); localStorage.setItem(KEY, $('token').value.trim()); load() }
 })
@@ -141,41 +225,43 @@ function headers (json) {
   if (json) h['content-type'] = 'application/json'
   return h
 }
-function panel (title, body, sub) {
-  return '<div class="card">' + (title ? '<h2>' + esc(title) + '</h2>' : '') +
-    (sub ? '<div class="sub">' + esc(sub) + '</div>' : '') + body + '</div>'
+function money (value) {
+  var amount = Number(value || 0)
+  if (!amount) return '¥0'
+  return amount < 1 ? '¥' + amount.toFixed(3) : '¥' + amount.toFixed(2)
+}
+function stagePill (stage) {
+  var cls = stage === 'published' ? 'ok' : stage === 'needs_attention' || stage === 'failed' ? 'bad' : ''
+  return '<span class="pill ' + cls + '"><span class="dot"></span>' + esc(STAGE_TEXT[stage] || stage) + '</span>'
 }
 function taskByKey (key) {
   var tasks = (state.status && state.status.ledger && state.status.ledger.tasks) || []
   for (var i = 0; i < tasks.length; i += 1) if (tasks[i].replayKey === key) return tasks[i]
   return null
 }
+function card (inner, cls) { return '<div class="card ' + (cls || '') + '">' + inner + '</div>' }
 
-// ── 反馈通道：右下角提示条 + 按钮置灰 + 顶部状态灯 ──
+/* ── 反馈：右下角提示 + 按钮置灰 + 顶部状态灯 ── */
 var toastTimer = null
 function toast (message, kind) {
   var el = $('toast')
   el.textContent = String(message)
   el.className = 'toast show ' + (kind || 'info')
   clearTimeout(toastTimer)
-  // 成功/进行中的提示自己消失；失败留着，逼人看见
   if (kind !== 'error') toastTimer = setTimeout(function () { el.className = 'toast' }, 7000)
 }
 function out (text) { $('out').textContent = String(text) }
-function labelOf (action) { return LABELS[action] || action }
 function setRunState (text, cls) {
-  $('runState').innerHTML = '<span class="dot ' + (cls || '') + '"></span>' + esc(text)
+  $('runState').className = 'chip ' + (cls || '')
+  $('runState').innerHTML = '<span class="dot"></span>' + esc(text)
 }
-/** 按钮进入"处理中"：置灰、改字，返回一个复原函数。 */
 function busyButton (btn, text) {
   if (!btn || btn.tagName !== 'BUTTON') return function () {}
   var old = btn.textContent
   btn.disabled = true
-  btn.setAttribute('aria-busy', 'true')
   btn.textContent = text || '处理中…'
-  return function () { btn.disabled = false; btn.removeAttribute('aria-busy'); btn.textContent = old }
+  return function () { btn.disabled = false; btn.textContent = old }
 }
-/** 事件里的异常一律要露面：异步 handler 抛错默认只会进 console，看起来就是"点了没反应"。 */
 function fail (error) {
   var text = (error && error.message) || String(error)
   out('操作失败：' + text)
@@ -187,14 +273,18 @@ function run (fn) {
     if (pending && typeof pending.catch === 'function') pending.catch(fail)
   } catch (error) { fail(error) }
 }
-
-/** 页面里有正在编辑的内容吗：自动刷新时不能把这些冲掉。 */
 function isDirty () {
   var active = document.activeElement
   if (active && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName)) return true
   var boxes = document.querySelectorAll('[data-request],[data-pw="next"]')
   for (var i = 0; i < boxes.length; i += 1) if (boxes[i].value) return true
   return false
+}
+function setStatus (key, text, kind) {
+  var el = document.querySelector('[data-status="' + key + '"]')
+  if (!el) return
+  el.className = 'status ' + (kind || '')
+  el.textContent = text
 }
 
 async function load (options) {
@@ -206,23 +296,20 @@ async function load (options) {
       ? '服务端没有配置 COURSE_ADMIN_TOKEN，管理台已关闭。'
       : data.error === 'too_many_attempts'
         ? '凭据错误次数过多，请等 5 分钟再试。'
-        : $('token').value.trim() ? '密码或主令牌不对，请重新输入。' : '还没有填写登录凭据：把管理台密码或服务器上的主令牌粘进右上角输入框，点「保存令牌」（或直接回车）。'
-    $('tab-overview').innerHTML = panel('需要登录', '<div class="muted">' + reason + '</div>')
-    setRunState('未登录', 'danger')
+        : $('token').value.trim() ? '密码或主令牌不对。点右上角 ··· 重新输入。' : '还没有登录：点右上角 ···，把管理台密码或服务器上的主令牌粘进去。'
+    $('tab-overview').innerHTML = card('<h2>需要登录</h2><p class="muted">' + reason + '</p>')
+    setRunState('未登录', 'bad')
     return false
   }
   state.status = data
   if (!state.config) {
     try { state.config = await (await fetch('/api/admin/config', { headers: headers(false) })).json() } catch (e) {}
   }
-  // 自动刷新时若用户正在输入，只更新状态灯，别把输入框里的字冲掉
   if (options.quiet && isDirty()) { renderRunState(); return true }
   render()
-  // 余额是外部网络调用，只在首次进来或手动点「刷新余额」时查，不跟着轮询打
   if (!state.balance && !options.quiet) refreshBalance()
   return true
 }
-
 function refreshBalance () {
   state.balance = null
   renderOverview()
@@ -231,14 +318,12 @@ function refreshBalance () {
     .then(function (b) { state.balance = b; renderOverview() })
     .catch(function (error) { state.balance = { ok: false, error: String(error) }; renderOverview() })
 }
-
 function renderRunState () {
   var running = state.status && state.status.running
   setRunState(running ? '正在运行 ' + running.action : '空闲', running ? 'warn' : 'ok')
 }
-
 function render () {
-  document.querySelectorAll('.tabs button').forEach(function (btn) {
+  document.querySelectorAll('.seg button').forEach(function (btn) {
     var on = btn.dataset.tab === state.tab
     btn.setAttribute('aria-selected', on ? 'true' : 'false')
     $('tab-' + btn.dataset.tab).hidden = !on
@@ -247,74 +332,143 @@ function render () {
   renderOverview(); renderCourses(); renderNotes(); renderSettings()
 }
 
-function todoCard (title, items, hint, tab) {
-  var body = items.length
-    ? '<div>' + items.map(function (x) {
-      return '<span class="pill warn">' + esc(x.courseName || '') + ' · ' + esc(x.title || x.replayKey || '') + '</span>'
-    }).join('') + '</div>' + (tab ? '<div class="small"><a href="#" data-go="' + tab + '">去处理</a></div>' : '')
-    : '<div class="pill ok"><span class="dot ok"></span>没有待处理</div>'
-  return panel(title, body, hint)
-}
-
+/* ── 概览：先回答"现在要做什么" ── */
 function renderOverview () {
   if (!state.status) return
   var s = state.status
   var t = s.todos || {}
-  var b = state.balance
-  var balances = (b && b.balances) || []
-  var balanceHtml
-  if (!b) balanceHtml = '<div class="muted small">加载中…</div>'
-  else if (b.ok === false) balanceHtml = '<div class="muted small">' + esc(b.error || b.stderr || '查询失败') + '</div>'
-  else if (!balances.length) balanceHtml = '<div class="muted small">没有余额信息</div>'
-  else balanceHtml = balances.map(function (x) {
-    var amount = x.total != null ? x.total : x.available
-    var low = amount != null && amount < (b.threshold || 5)
-    var name = x.provider === 'deepseek' ? 'DeepSeek（笔记写作）' : x.provider === 'aliyun' ? '阿里云百炼（语音转写）' : x.provider
-    return '<div class="field"><label>' + esc(name) + '</label>' +
-      '<div class="stat">' + (amount == null ? '—' : '¥' + Number(amount).toFixed(2)) + '</div>' +
-      (x.configured === false ? '<div class="muted small">' + esc(x.reason || '未配置') + '</div>' : '') +
-      (low ? '<div class="pill danger">低于阈值，建议充值</div>' : '') +
-      (x.rechargeUrl ? '<div class="small"><a href="' + esc(x.rechargeUrl) + '" target="_blank" rel="noopener">去充值 / 查看余额</a></div>' : '') +
-      '</div>'
-  }).join('')
-  var stages = (s.ledger && s.ledger.stages) || []
-  var runs = (s.runs || []).slice(0, 5).map(function (r) {
-    var tasks = (r.summary && r.summary.tasks) || []
-    var ok = tasks.filter(function (x) { return x.ok }).length
-    return '<tr><td>' + esc(String(r.at).slice(0, 16).replace('T', ' ')) + '</td><td>' + esc(r.name) + '</td><td>' +
-      (r.summary ? '<span class="pill">' + ok + ' 成功 / ' + (tasks.length - ok) + ' 失败</span>' : '—') + '</td></tr>'
-  }).join('')
+  var ledger = s.ledger || {}
+  var tasks = ledger.tasks || []
+  var counts = { published: 0, running: 0, waiting: 0 }
+  tasks.forEach(function (task) {
+    if (task.stage === 'published') counts.published += 1
+    else if (task.stage === 'discovered') counts.waiting += 1
+    else counts.running += 1
+  })
+
+  // 待办：能点一下就去的，才放在第一屏
+  var todos = []
+  ;(t.stuck || []).forEach(function (item) {
+    todos.push({ title: item.courseName + ' · ' + item.title, note: '连续失败已停止重试：' + String(item.lastError || '').slice(0, 60), label: '去重跑', tab: 'courses' })
+  })
+  ;(t.missingMaterials || []).forEach(function (item) {
+    todos.push({ title: item.courseName + ' · ' + item.title, note: '马上要写笔记了，还缺课件——传一份会更准', label: '传课件', tab: 'courses' })
+  })
+  var channel = s.channel || { ok: true }
+  if (channel.ok === false) {
+    todos.push({ title: '微信推送发不出去', note: channel.reason || '通道没准备好', label: '怎么办', tab: 'settings' })
+  }
+  if (t.failedDeliveries) {
+    todos.push({ title: t.failedDeliveries + ' 条通知发送失败', note: '失败不会自己消失，需要你决定是否重发', label: '去处理', tab: 'notes' })
+  }
+
+  var hero = todos.length
+    ? '<h1>需要你做 ' + todos.length + ' 件事</h1><p class="lede">其余步骤都会自己跑。</p>' +
+      todos.map(function (item) {
+        return '<div class="todo"><div class="t"><b>' + esc(item.title) + '</b><span>' + esc(item.note) + '</span></div>' +
+          '<button class="act" data-go="' + item.tab + '">' + esc(item.label) + '</button></div>'
+      }).join('')
+    : '<h1>都处理完了</h1><p class="lede">没有需要你动手的事。定时任务会继续按阶段推进，有新笔记会推到你微信。</p>' +
+      '<div class="empty-ok"><span class="pill ok"><span class="dot"></span>一切正常</span></div>'
+
+  var spend = s.spend || { asrCny: 0, notesCny: 0, totalCny: 0 }
+  var pricing = s.pricing || {}
+
   $('tab-overview').innerHTML =
-    '<div class="grid three">' +
-      todoCard('等我补课件', t.missingMaterials || [], '这些课次已经转录、马上要写笔记，但没有课件', 'courses') +
-      todoCard('卡住的课次', t.stuck || [], '连续失败到上限已停止重试；处理完在「课程」里点重跑', 'courses') +
-      panel('通知', (t.failedDeliveries ? '<div class="pill danger">' + t.failedDeliveries + ' 条发送失败</div>' : '<div class="pill ok"><span class="dot ok"></span>没有失败</div>') + '<div class="small"><a href="#" data-go="notes">去「笔记」看队列</a></div>', '推送失败不会自己消失，需要你决定是否重发') +
+    card(hero) +
+    card(
+      '<div class="grid three">' +
+        '<div class="stat">' + counts.published + '<small>已发布</small></div>' +
+        '<div class="stat">' + counts.running + '<small>进行中</small></div>' +
+        '<div class="stat">' + counts.waiting + '<small>还没轮到</small></div>' +
+      '</div>',
+      ''
+    ) +
+    '<div class="grid two">' +
+      card('<h2>花费</h2><div class="stat">' + money(spend.totalCny) + '<small>已发生合计 · 转写 ' + money(spend.asrCny) + ' + 笔记 ' + money(spend.notesCny) + '</small></div>' +
+        '<div class="row" style="margin-top:14px;align-items:flex-start">' + balancesHtml() + '</div>' +
+        '<div class="row" style="margin-top:8px"><button class="act quiet" data-act="refresh-balance">刷新余额</button></div>' +
+        '<div class="tiny muted" style="margin-top:10px">单价：转写 ¥' + (pricing.asrPerHourCny || 0.288) + '/小时（按语音时长，静音不算）· 笔记 ¥' + (pricing.noteInputPerMillionCny || 1) + ' / ¥' + (pricing.noteOutputPerMillionCny || 4) + ' 每百万 token（输入/输出）。逐节课明细在「课程」里。</div>') +
+      card('<h2>微信通道</h2>' + channelHtml() + '<div class="tiny muted" style="margin-top:10px">这个机器人只有在"你最近给它发过消息"之后才能把消息送到微信。收不到推送时，先在微信里给它发一句话，再点上面的「重发失败通知」。</div>') +
     '</div>' +
-    '<div class="grid two" style="margin-top:16px">' +
-      panel('账本阶段', stages.map(function (x) { return '<span class="pill">' + esc(x.stage) + ' ' + x.n + '</span>' }).join('') || '<span class="muted">账本为空</span>', '共 ' + ((s.ledger && s.ledger.tasks) || []).length + ' 个课次') +
-      panel('余额与充值', balanceHtml +
-        '<div class="row"><button class="act" data-act="refresh-balance">刷新余额</button></div>',
-        '写笔记排在低价时段；欠费时相关阶段会停下并通知你') +
-    '</div>' +
-    '<div class="card" style="margin-top:16px"><h2>最近运行</h2>' +
-      (runs ? '<table><thead><tr><th>时间</th><th>运行</th><th>结果</th></tr></thead><tbody>' + runs + '</tbody></table>' : '<div class="muted">还没有运行记录</div>') + '</div>'
+    card('<details class="d" style="border-top:0"><summary><span class="ttl">最近运行</span><span class="muted small">' + ((s.runs || []).length) + ' 次</span></summary><div class="body">' + runsTable() + '</div></details>')
 }
 
-function materialCell (task) {
+function balancesHtml () {
+  var b = state.balance
+  if (!b) return '<span class="muted small">余额加载中…</span>'
+  if (b.ok === false) return '<span class="muted small">' + esc(b.error || b.stderr || '查询失败') + '</span>'
+  var list = b.balances || []
+  if (!list.length) return '<span class="muted small">没有余额信息</span>'
+  return list.map(function (x) {
+    var amount = x.total != null ? x.total : x.available
+    var name = x.provider === 'deepseek' ? 'DeepSeek（写笔记）' : x.provider === 'aliyun' ? '阿里云百炼（转写）' : x.provider
+    var low = amount != null && amount < (b.threshold || 5)
+    return '<div style="flex:1;min-width:140px"><div class="tiny muted">' + esc(name) + '</div>' +
+      '<div style="font-size:20px;font-weight:600">' + (amount == null ? '—' : '¥' + Number(amount).toFixed(2)) + '</div>' +
+      (low ? '<span class="pill bad">低于阈值</span>' : (x.configured === false ? '<span class="tiny muted">' + esc(x.reason || '未配置') + '</span>' : '')) +
+      (x.rechargeUrl ? ' <a class="tiny" href="' + esc(x.rechargeUrl) + '" target="_blank" rel="noopener">充值</a>' : '') + '</div>'
+  }).join('')
+}
+function channelHtml () {
+  var c = state.status.channel || {}
+  if (c.ok) {
+    var age = Number(c.ageMinutes || 0)
+    var text = age < 60 ? age + ' 分钟前有过互动' : Math.round(age / 60) + ' 小时前有过互动'
+    var fresh = age < 24 * 60
+    return '<span class="pill ' + (fresh ? 'ok' : 'warn') + '"><span class="dot"></span>' + (fresh ? '可以推送' : '会话可能已过期') + '</span>' +
+      '<p class="small muted" style="margin-top:10px">最近一次互动：' + esc(text) + '。</p>'
+  }
+  return '<span class="pill bad"><span class="dot"></span>暂时推不出去</span><p class="small muted" style="margin-top:10px">' + esc(c.reason || '') + '</p>'
+}
+function runsTable () {
+  var runs = (state.status.runs || []).slice(0, 6)
+  if (!runs.length) return '<p class="muted small">还没有运行记录</p>'
+  return '<table><thead><tr><th>时间</th><th>运行</th><th>结果</th></tr></thead><tbody>' +
+    runs.map(function (r) {
+      var tasks = (r.summary && r.summary.tasks) || []
+      var ok = tasks.filter(function (x) { return x.ok }).length
+      return '<tr><td class="small">' + esc(String(r.at).slice(5, 16).replace('T', ' ')) + '</td><td class="small">' + esc(r.name) + '</td><td class="small">' +
+        (r.summary ? ok + ' 成功 / ' + (tasks.length - ok) + ' 失败' : '—') + '</td></tr>'
+    }).join('') + '</tbody></table>'
+}
+
+/* ── 课程：按课程折叠，课次再折叠 ── */
+function materialBlock (task) {
   var list = (task.materials || []).map(function (m) {
     return '<span class="pill">' + esc(m.name) + (m.scope === 'course' ? ' · 全课程' : '') + ' · ' + m.slideCount + ' 页</span>'
-  }).join('')
-  return (list || '<span class="muted small">无</span>') +
-    '<div class="row" style="margin-top:8px"><input type="file" accept=".pptx,.ppt,.pdf" data-file="' + esc(task.replayKey) + '" style="width:auto"><button class="act" data-act="upload" data-key="' + esc(task.replayKey) + '">上传并解析</button></div>'
+  }).join(' ')
+  var key = task.replayKey
+  var status = state.uploads[key] || ''
+  return '<div class="drop" data-drop="' + esc(key) + '">' +
+    '<input class="hidden-file" type="file" data-file="' + esc(key) + '" accept=".pptx,.ppt,.pdf">' +
+    '<button class="act" data-act="pick" data-key="' + esc(key) + '">选择课件并上传</button>' +
+    '<span class="small muted">或把 .pptx / .pdf 拖到这里</span>' +
+    '</div>' +
+    '<div class="status ' + (status.indexOf('失败') === 0 ? 'bad' : status ? 'ok' : '') + '" data-status="' + esc(key) + '">' + esc(status) + '</div>' +
+    (list ? '<div style="margin-top:8px">' + list + '</div>' : '<p class="small muted" style="margin:8px 0 0">这个课次还没有课件。没有也能写，只是术语对齐会差一些。</p>')
 }
 
-function actionCell (task) {
-  var html = '<button class="act" data-act="retry" data-key="' + esc(task.replayKey) + '">重跑</button> '
-  if (task.artifacts && task.artifacts.transcriptPath) {
-    html += '<button class="act" data-act="republish" data-key="' + esc(task.replayKey) + '">重新发布</button> '
-  }
-  html += '<button class="act" data-act="cycle" data-key="' + esc(task.replayKey) + '">跑一轮</button>'
-  return html
+function lessonDetails (task, index) {
+  var lesson = task.lesson || {}
+  var cost = task.cost || {}
+  var title = String(task.title || '') + (task.courseName ? '' : '')
+  var costText = cost.totalCny ? '转写 ' + money(cost.asrCny) + ' · 笔记 ' + money(cost.notesCny) : '还没花钱'
+  var actions = '<div class="row" style="margin-top:12px">' +
+    '<button class="act primary" data-act="cycle" data-key="' + esc(task.replayKey) + '">跑一轮</button>' +
+    '<button class="act" data-act="retry" data-key="' + esc(task.replayKey) + '">重跑</button>' +
+    (task.artifacts && task.artifacts.transcriptPath ? '<button class="act" data-act="republish" data-key="' + esc(task.replayKey) + '">重新发布</button>' : '') +
+    '</div>'
+  var metaBits = [esc(task.replayKey), '尝试 ' + task.attempts + ' 次']
+  if (task.updatedAt) metaBits.push('更新于 ' + esc(String(task.updatedAt).slice(5, 16).replace('T', ' ')))
+  if (lesson.finalChars) metaBits.push('成品 ' + lesson.finalChars + ' 字')
+  if (cost.usage) metaBits.push(cost.usage.calls + ' 次模型调用')
+  var meta = '<div class="tiny muted" style="margin-bottom:10px">' + metaBits.join(' · ') + '</div>'
+  var error = task.lastError ? '<p class="small" style="color:var(--danger);margin:10px 0 0">最近错误：' + esc(String(task.lastError).slice(0, 200)) + '</p>' : ''
+  var noteLine = ''
+  return '<details class="d"><summary><span class="ttl">' + esc(title) + '</span>' + stagePill(task.stage) +
+    '<span class="muted small">' + esc(costText) + '</span></summary>' +
+    '<div class="body">' + meta + noteLine + materialBlock(task) + error + actions + '</div></details>'
 }
 
 function renderCourses () {
@@ -326,56 +480,56 @@ function renderCourses () {
     groups[key].push(t)
   })
   var html = Object.keys(groups).map(function (course) {
-    var rows = groups[course].map(function (t) {
-      var cls = t.stage === 'needs_attention' ? 'danger' : t.stage === 'published' ? 'ok' : ''
-      return '<tr><td>' + esc(t.title) + '<div class="muted small">' + esc(t.replayKey) + '</div></td>' +
-        '<td><span class="pill ' + cls + '">' + esc(t.stage) + '</span></td>' +
-        '<td>' + t.attempts + '</td>' +
-        '<td>' + materialCell(t) + '</td>' +
-        '<td class="small muted">' + esc(String(t.lastError || '').slice(0, 140)) + '</td>' +
-        '<td>' + actionCell(t) + '</td></tr>'
-    }).join('')
-    return panel(course + ' · ' + groups[course].length + ' 讲',
-      '<table><thead><tr><th>课次</th><th>阶段</th><th>尝试</th><th>课件</th><th>最近错误</th><th>操作</th></tr></thead><tbody>' + rows + '</tbody></table>')
-  }).join('<div style="height:16px"></div>')
+    var list = groups[course].slice().sort(function (a, b) { return String(b.title).localeCompare(String(a.title)) })
+    var done = list.filter(function (t) { return t.stage === 'published' }).length
+    var alert = list.some(function (t) { return t.stage === 'needs_attention' || t.stage === 'failed' })
+    return '<details class="d"><summary><span class="ttl">' + esc(course) + '</span>' +
+      '<span class="muted small">' + done + ' / ' + list.length + ' 讲已发布</span>' +
+      (alert ? '<span class="pill bad"><span class="dot"></span>有卡住的</span>' : '') + '</summary>' +
+      '<div class="body">' + list.map(lessonDetails).join('') + '</div></details>'
+  }).join('')
   var parked = state.status.unassigned || []
-  $('tab-courses').innerHTML = (html || '<div class="empty">账本里还没有课次。先去「设置」跑一次扫描。</div>') +
-    (parked.length ? '<div style="height:16px"></div>' + panel('归属不明的课件',
-      '<div>' + parked.map(function (n) { return '<span class="pill warn">' + esc(n) + '</span>' }).join('') + '</div>' +
-      '<div class="muted small">这些文件认不出属于哪一节课。把它们改名成 课程__课次.pptx 放进服务器收件箱，再在「设置」里跑一次归档。</div>') : '')
+  $('tab-courses').innerHTML = card('<p class="lede" style="margin-bottom:14px">点开一门课看课次；点开一节可以传课件、重跑或重新发布。</p>' +
+    (html || '<p class="muted">账本里还没有课次。先去「设置」跑一次扫描。</p>')) +
+    (parked.length ? card('<h2>归属不明的课件</h2><div>' + parked.map(function (n) { return '<span class="pill warn">' + esc(n) + '</span>' }).join(' ') + '</div>' +
+      '<p class="small muted" style="margin-top:10px">这些文件认不出属于哪一节课，改名成 课程__课次.pptx 放进服务器收件箱，再在「设置」里跑一次归档。</p>') : '')
 }
 
+/* ── 笔记：逐模块重写 ── */
 function renderNotes () {
   var tasks = (state.status.ledger && state.status.ledger.tasks) || []
   var withNotes = tasks.filter(function (t) { return t.lesson && (t.lesson.modules || []).length })
   var cards = withNotes.map(function (t) {
     var rows = t.lesson.modules.map(function (m) {
       var id = m.outlineNodeId || m.id
-      return '<tr><td>' + esc(m.title || m.id) + '<div class="muted small">' + esc(m.id) + '</div></td>' +
-        '<td>' + m.chars + ' 字</td><td>' + esc(m.status) + '</td><td>' + m.revisions + '</td>' +
-        '<td><button class="act" data-act="revise" data-key="' + esc(t.replayKey) + '" data-module="' + esc(id) + '">只重写这个模块</button></td></tr>'
+      return '<tr><td>' + esc(m.title || m.id) + '</td><td class="small muted">' + m.chars + ' 字</td><td class="small muted">' + esc(MODULE_TEXT[m.status] || m.status) + '</td>' +
+        '<td style="text-align:right"><button class="act quiet" data-act="revise" data-key="' + esc(t.replayKey) + '" data-module="' + esc(id) + '">重写</button></td></tr>'
     }).join('')
-    return panel(t.courseName + ' · ' + t.title,
-      '<div class="sub">成品 ' + t.lesson.finalChars + ' 字 · 状态 ' + esc(t.lesson.status || '') + ' · 保存于 ' + esc(String(t.lesson.savedAt || '').slice(0, 16).replace('T', ' ')) + '</div>' +
-      '<table><thead><tr><th>模块</th><th>字数</th><th>状态</th><th>重写次数</th><th>操作</th></tr></thead><tbody>' + rows + '</tbody></table>' +
-      '<div class="row" style="margin-top:12px"><input data-request="' + esc(t.replayKey) + '" value="' + esc(state.requests[t.replayKey] || '') + '" placeholder="修改要求（例如：这一段太长，压缩到 1200 字并拆成列表）"><button class="act primary" data-act="revise-first" data-key="' + esc(t.replayKey) + '">按这个要求重写</button></div>' +
-      '<div class="muted small">重写只改这一个模块，其余模块的草稿原样保留；改完想上线，再点该课次的「重新发布」。</div>')
-  }).join('<div style="height:16px"></div>')
-  var deliveries = (state.status.ledger && state.status.ledger.deliveries) || []
-  var rows = deliveries.map(function (x) {
-    return '<tr><td>' + esc(x.purpose) + '</td><td>' + esc(x.status) + '</td><td>' + x.attempts + '</td>' +
-      '<td class="small muted">' + esc(String(x.last_error || '').slice(0, 90)) + '</td>' +
-      '<td class="small">' + esc(String(x.sent_at || '').slice(0, 16).replace('T', ' ')) + '</td></tr>'
+    return '<details class="d"><summary><span class="ttl">' + esc(t.courseName + ' · ' + t.title) + '</span>' +
+      '<span class="muted small">成品 ' + t.lesson.finalChars + ' 字 · ' + t.lesson.modules.length + ' 个模块</span></summary>' +
+      '<div class="body">' +
+      '<table><thead><tr><th>模块</th><th>字数</th><th>状态</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>' +
+      '<div class="row" style="margin-top:12px"><input data-request="' + esc(t.replayKey) + '" value="' + esc(state.requests[t.replayKey] || '') + '" placeholder="修改要求（例如：这一段太长，压缩到 1200 字并拆成列表）">' +
+      '<button class="act primary" data-act="revise-first" data-key="' + esc(t.replayKey) + '">按这个要求重写</button></div>' +
+      '<div class="tiny muted" style="margin-top:8px">重写只改你指定的那个模块，其余保持原样；改完想上线，再去「课程」里点「重新发布」。</div>' +
+      '</div></details>'
   }).join('')
+  var deliveries = (state.status.ledger && state.status.ledger.deliveries) || []
   var failed = (state.status.todos && state.status.todos.failedDeliveries) || 0
-  $('tab-notes').innerHTML = (cards || '<div class="empty">还没有带模块状态的笔记。跑完一次笔记阶段后这里会出现逐模块列表。</div>') +
-    '<div style="height:16px"></div>' +
-    panel('通知队列',
-      '<table><thead><tr><th>用途</th><th>状态</th><th>次数</th><th>最近错误</th><th>发送时间</th></tr></thead><tbody>' +
-      (rows || '<tr><td colspan="5" class="muted">队列为空</td></tr>') + '</tbody></table>' +
-      (failed ? '<div class="row" style="margin-top:12px"><button class="act primary" data-act="notify-retry">把 ' + failed + ' 条失败通知放回队列</button></div>' : ''))
+  var rows = deliveries.slice(0, 12).map(function (x) {
+    var cls = x.status === 'sent' ? 'ok' : x.status === 'failed' ? 'bad' : ''
+    return '<tr><td class="small">' + esc(x.purpose) + '</td><td><span class="pill ' + cls + '">' + esc(x.status) + '</span></td>' +
+      '<td class="small muted">' + esc(String(x.sent_at || x.created_at || '').slice(5, 16).replace('T', ' ')) + '</td>' +
+      '<td class="tiny muted">' + esc(String(x.last_error || '').slice(0, 60)) + '</td></tr>'
+  }).join('')
+  $('tab-notes').innerHTML = card('<p class="lede" style="margin-bottom:14px">逐模块重写只动你指定的那一段。</p>' +
+      (cards || '<p class="muted">还没有带模块状态的笔记。跑完一次笔记阶段后这里会出现逐模块列表。</p>') +
+      (failed ? '<div class="row" style="margin-top:14px"><button class="act primary" data-act="notify-retry">把 ' + failed + ' 条失败通知放回队列</button></div>' : '')) +
+    card('<details class="d" style="border-top:0"><summary><span class="ttl">通知记录</span><span class="muted small">最近 ' + Math.min(12, deliveries.length) + ' 条</span></summary>' +
+      '<div class="body">' + (rows ? '<table><thead><tr><th>用途</th><th>状态</th><th>时间</th><th>错误</th></tr></thead><tbody>' + rows + '</tbody></table>' : '<p class="muted small">队列为空</p>') + '</div></details>')
 }
 
+/* ── 设置 ── */
 function renderSettings () {
   var c = state.config || { values: {}, editable: {} }
   var fields = Object.keys(c.editable || {}).map(function (key) {
@@ -395,61 +549,48 @@ function renderSettings () {
       input = '<input data-cfg="' + key + '" type="' + (spec.type === 'number' ? 'number' : 'text') + '" value="' + esc(value) + '" placeholder="跟随环境变量">'
     }
     return '<div class="field"><label>' + esc(spec.label || key) + '</label>' + input +
-      (spec.hint ? '<div class="muted small">' + esc(spec.hint) + '</div>' : '') + '</div>'
+      (spec.hint ? '<div class="tiny muted" style="margin-top:4px">' + esc(spec.hint) + '</div>' : '') + '</div>'
   }).join('')
-  $('tab-settings').innerHTML = '<div class="grid two">' +
-    panel('维护动作',
-      '<div class="row">' +
+
+  $('tab-settings').innerHTML = card('<p class="lede" style="margin-bottom:14px">日常只会用到第一个按钮。</p>' +
+      '<div class="row"><button class="act primary" data-act="cycle-all">跑一轮完整链路</button>' +
       '<button class="act" data-act="discover">扫描教学网</button>' +
-      '<button class="act" data-act="cycle-all">跑一轮完整链路</button>' +
       '<button class="act" data-act="notify">投递通知</button>' +
       '<button class="act" data-act="doctor">体检</button>' +
-      '<button class="act" data-act="backup">备份账本</button>' +
-      '<button class="act" data-act="prune">清理预演</button>' +
-      '<button class="act danger" data-act="prune-apply">清理并删除</button>' +
-      '</div>' +
-      '<div class="muted small">「跑一轮完整链路」最多处理 5 个课次，与定时任务一致。清理只删通过校验的原件：转录稿与课件文字永久保留，视频与 PPT 原件在确认无误后才删。</div>',
-      '手动运行走的是与定时任务完全相同的 CLI 入口') +
-    panel('运行参数', fields + '<div class="row"><button class="act primary" data-act="save-config">保存设置</button></div>' +
-      '<div class="muted small">' + esc(c.path || '') + '</div>',
-      '这里只放可以随手改的参数；密钥仍然只从服务器环境变量读取，不接受界面写入') +
-    '</div>' +
-    '<div style="height:16px"></div>' +
-    passwordPanel()
+      '<button class="act" data-act="backup">备份账本</button></div>' +
+      '<div class="tiny muted" style="margin-top:10px">「跑一轮完整链路」最多处理 5 个课次，与定时任务一致；它按阶段推进，中断或重复运行都安全。</div>') +
+    card('<details class="d" style="border-top:0"><summary><span class="ttl">运行参数</span><span class="muted small">篇幅、并发、成本窗口</span></summary>' +
+      '<div class="body">' + fields + '<div class="row"><button class="act primary" data-act="save-config">保存设置</button></div>' +
+      '<div class="tiny muted" style="margin-top:8px">' + esc(c.path || '') + ' · 密钥仍然只从服务器环境变量读取</div></div></details>' +
+      '<details class="d"><summary><span class="ttl">登录密码</span><span class="muted small">' + ((state.status.auth && state.status.auth.passwordSet) ? '已设置' : '未设置') + '</span></summary>' +
+      '<div class="body">' + passwordPanel() + '</div></details>' +
+      '<details class="d"><summary><span class="ttl">清理原件</span><span class="muted small">不可撤销</span></summary>' +
+      '<div class="body"><p class="small muted">转写稿、课件文字与笔记永久保留；视频与 PPT 原件在确认无误后才删。先预演看一眼再决定。</p>' +
+      '<div class="row"><button class="act" data-act="prune">清理预演</button><button class="act danger" data-act="prune-apply">清理并删除</button></div></div></details>')
 }
 
 function passwordPanel () {
   var auth = (state.status && state.status.auth) || {}
-  var status = auth.passwordSet
-    ? '<div class="pill ok"><span class="dot ok"></span>已设置登录密码</div>'
-    : '<div class="pill warn">还没设置密码：现在只能用服务器上的主令牌登录</div>'
-  var master = auth.masterTokenSet
-    ? '<div class="muted small">主令牌仍然有效——它是忘记密码时的找回路径（见 docs/10）</div>'
-    : '<div class="pill danger">服务器上没有配置主令牌，一旦忘记密码就只能去服务器重设</div>'
-  return panel('登录密码',
-    '<div class="sub">用自己设的密码登录管理台，比记 64 位随机串实际得多。密码只存哈希，明文不落盘。</div>' +
-    status + master +
-    '<div class="field" style="margin-top:12px"><label>新密码（至少 8 位）</label>' +
-    '<input data-pw="next" type="password" autocomplete="new-password" placeholder="换一个记得住的"></div>' +
+  return '<p class="small muted">用自己设的密码登录，比记 64 位随机串实际得多。密码只存哈希，明文不落盘；主令牌始终是找回路径（见 docs/10）。</p>' +
+    (auth.masterTokenSet ? '' : '<p class="small" style="color:var(--danger)">服务器上没有配置主令牌，一旦忘记密码就只能去服务器重设。</p>') +
+    '<div class="field"><label>新密码（至少 8 位）</label><input data-pw="next" type="password" autocomplete="new-password" placeholder="换一个记得住的"></div>' +
     '<div class="row"><button class="act primary" data-act="save-password">保存新密码</button>' +
-    '<button class="act" data-act="clear-password">清除密码（只留主令牌）</button></div>' +
-    '<div class="muted small">忘记密码时在服务器上跑：<code>course admin-passwd --set-stdin</code>（详见 docs/10-管理台登录与找回.md）</div>')
+    '<button class="act" data-act="clear-password">清除密码（只留主令牌）</button></div>'
 }
 
-function go (tab) { state.tab = tab; render() }
+function go (tab) {
+  state.tab = tab
+  render()
+  window.scrollTo({ top: 0, behavior: 'smooth' })
+}
 
-/**
- * 触发一次服务端动作。
- *
- * 关键在"点下去立刻有反应"：置灰按钮 → 顶部状态灯 → 右下角提示，三处同时变，
- * 再去等结果。跑完把 JSON 写进运行输出，并用一句话说清成功还是失败。
- */
+/* ── 动作 ── */
 async function doAction (action, extra, btn) {
   if (state.busy || (state.status && state.status.running)) {
     toast('服务端已经有任务在跑，等它结束再点', 'error')
     return
   }
-  var label = labelOf(action)
+  var label = LABELS[action] || action
   var restore = busyButton(btn, '处理中…')
   state.busy = true
   setRunState('正在运行 ' + label, 'warn')
@@ -472,35 +613,48 @@ async function doAction (action, extra, btn) {
   load()
 }
 
-async function uploadDeck (key, btn) {
-  var input = document.querySelector('[data-file="' + key + '"]')
-  var file = input && input.files && input.files[0]
-  if (!file) { toast('先选一个 .pptx / .ppt / .pdf 文件', 'error'); if (input) input.focus(); return }
+/** 上传课件：选好文件就直接传，不需要再点一次按钮。 */
+async function uploadDeck (key, file, btn) {
   var task = taskByKey(key)
   if (!task || !task.courseName) { toast('找不到这条课次的课程名，先刷新页面', 'error'); return }
+  if (!file) {
+    var input = document.querySelector('[data-file="' + key + '"]')
+    file = input && input.files && input.files[0]
+  }
+  if (!file) { toast('先选一个 .pptx / .ppt / .pdf 文件', 'error'); return }
   var restore = busyButton(btn, '上传中…')
+  state.uploads[key] = '上传中…（' + file.name + '）'
+  setStatus(key, state.uploads[key])
   var params = new URLSearchParams({ course: task.courseName, lesson: task.title, scope: 'lesson', name: file.name })
-  out('上传中…（' + file.name + '）')
   toast('上传并解析：' + file.name, 'info')
   try {
     var res = await fetch('/api/admin/materials?' + params.toString(), { method: 'PUT', headers: headers(false), body: file })
     var data = await res.json()
     out(JSON.stringify(data, null, 2))
-    if (data.ok) toast('已归档：' + data.name + '（' + data.slideCount + ' 页）', 'ok')
-    else toast('上传失败：' + (data.message || data.error), 'error')
+    if (data.ok) {
+      var when = new Date().toTimeString().slice(0, 5)
+      state.uploads[key] = '已归档：' + data.name + '（' + data.slideCount + ' 页 · ' + when + '）'
+      toast('已归档：' + data.name + '（' + data.slideCount + ' 页）', 'ok')
+    } else {
+      state.uploads[key] = '失败：' + (data.message || data.error)
+      toast('上传失败：' + (data.message || data.error), 'error')
+    }
   } catch (error) {
-    out('上传失败：' + error)
+    state.uploads[key] = '失败：' + error
     toast('上传失败：' + error, 'error')
-  } finally { restore() }
+  } finally {
+    restore()
+    setStatus(key, state.uploads[key], state.uploads[key].indexOf('失败') === 0 ? 'bad' : 'ok')
+  }
   load()
 }
 
 function reviseWith (key, module, btn) {
   var task = taskByKey(key)
-  if (!task) { toast('找不到这条课次，先点「刷新」', 'error'); return }
+  if (!task) { toast('找不到这条课次，先点刷新', 'error'); return }
   var box = document.querySelector('[data-request="' + key + '"]')
   var request = box && box.value.trim()
-  if (!request) { toast('先在输入框里写清要改什么，再点重写', 'error'); if (box) box.focus(); return }
+  if (!request) { toast('先在输入框里写清要改什么', 'error'); if (box) box.focus(); return }
   if (!task.artifacts || !task.artifacts.transcriptPath) { toast('这条课次还没有转录稿，无法重写模块', 'error'); return }
   if (!module) {
     var first = task.lesson && (task.lesson.modules || [])[0]
@@ -544,7 +698,6 @@ async function savePassword (clear, btn) {
     if (data.ok) { done = true; toast(clear ? '已清除密码，现在只能用主令牌登录' : '密码已更新，当前浏览器已换用新密码', 'ok') }
     else toast('没成功：' + (data.message || data.error), 'error')
     if (res.ok && !clear) {
-      // 改完立刻用新密码继续（否则下一次刷新会因为旧凭据失效而被挡在门外）
       $('token').value = body.password
       localStorage.setItem(KEY, body.password)
     }
@@ -553,73 +706,106 @@ async function savePassword (clear, btn) {
     toast('请求失败：' + error, 'error')
   } finally { restore() }
   if (done && clear) {
-    // 密码刚被清掉，浏览器里还留着的那串此刻已是废凭据。与其让它静默 401、
-    // 让人以为管理台坏了，不如直接清空并把人引到「用主令牌登录」这条明路上。
-    $('token').value = ''
+    // 先试试手上这串还能不能用：本来就是主令牌的话，没必要把人踢出去重新登录
+    var stillOk = await load()
+    if (stillOk) { toast('已清除密码；当前浏览器用的是主令牌，仍然有效', 'ok'); return }
     try { localStorage.removeItem(KEY) } catch (e) {}
-    $('tab-overview').innerHTML = panel('需要登录',
-      '<div class="muted">密码已清除。现在只能用服务器上的主令牌登录：在服务器上执行 ' +
-      '<code>grep COURSE_ADMIN_TOKEN ~/.course-worker/env</code>，把结果粘进右上角输入框。</div>')
-    setRunState('未登录', 'warn')
+    toast('已清除密码，现在需要用主令牌登录', 'error')
     return
   }
   load()
 }
 
-// 事件委托：界面里的按钮很多，逐个绑定容易漏，也让内联 handler 的引号到处打架
+/* ── 事件委托：界面里按钮很多，逐个绑定既容易漏也和引号打架 ── */
+function handleAct (act, btn) {
+  var key = btn.dataset.key || ''
+  var menu = $('menu')
+  if (menu && menu.open) menu.open = false
+  if (act === 'save') {
+    var value = $('token').value.trim()
+    localStorage.setItem(KEY, value)
+    if (!value) { toast('先填密码或主令牌', 'error'); return }
+    return load().then(function (ok) { if (ok) toast('已登录', 'ok') })
+  }
+  if (act === 'refresh') return load().then(function (ok) { if (ok) toast('已刷新', 'ok') })
+  if (act === 'refresh-balance') { refreshBalance(); toast('正在查余额…', 'info'); return }
+  if (act === 'pick') {
+    var input = document.querySelector('[data-file="' + key + '"]')
+    if (input) input.click()
+    return
+  }
+  if (act === 'retry') return doAction('retry', { replayKey: key }, btn)
+  if (act === 'republish') {
+    var task = taskByKey(key)
+    if (!task || !task.artifacts || !task.artifacts.transcriptPath) { toast('这条课次还没有转录稿，无法重新发布', 'error'); return }
+    return doAction('republish', { transcriptPath: task.artifacts.transcriptPath, course: task.courseName, lesson: task.title, replayKey: key }, btn)
+  }
+  if (act === 'cycle') return doAction('cycle', { replayKey: key, maxTasks: 1 }, btn)
+  if (act === 'cycle-all') return doAction('cycle', { maxTasks: 5 }, btn)
+  if (act === 'revise') return reviseWith(key, btn.dataset.module, btn)
+  if (act === 'revise-first') return reviseWith(key, '', btn)
+  if (act === 'notify-retry') return doAction('notify-retry', {}, btn)
+  if (act === 'discover' || act === 'notify' || act === 'doctor' || act === 'backup') return doAction(act, {}, btn)
+  if (act === 'prune') return doAction('prune', {}, btn)
+  if (act === 'prune-apply') {
+    if (!window.confirm('确定要删除原件吗？视频、音频、PPT 原件会从磁盘移除；转录稿、课件文字与笔记保留。')) return
+    return doAction('prune', { apply: true }, btn)
+  }
+  if (act === 'save-config') return saveConfig(btn)
+  if (act === 'save-password') return savePassword(false, btn)
+  if (act === 'clear-password') return savePassword(true, btn)
+  toast('这个按钮还没有接上处理逻辑：' + act, 'error')
+}
+
 document.addEventListener('click', function (event) {
+  // 顶栏的 ··· 面板是浮层：点到别处就要收起来，
+  // 否则它会一直盖在内容上、把点击吃掉（看起来就像"按钮点不动"）
+  var menu = $('menu')
+  if (menu && menu.open && !event.target.closest('#menu')) menu.open = false
   var goLink = event.target.closest('[data-go]')
   if (goLink) { event.preventDefault(); go(goLink.dataset.go); return }
-  var tab = event.target.closest('.tabs button')
+  var tab = event.target.closest('.seg button')
   if (tab) { go(tab.dataset.tab); return }
   var btn = event.target.closest('[data-act]')
   if (!btn) return
-  var act = btn.dataset.act
-  var key = btn.dataset.key || ''
-  run(function () {
-    if (act === 'save') {
-      var value = $('token').value.trim()
-      localStorage.setItem(KEY, value)
-      if (!value) { toast('先填密码或主令牌', 'error'); return }
-      return load().then(function (ok) { if (ok) toast('已登录', 'ok') })
-    }
-    if (act === 'refresh') return load().then(function (ok) { if (ok) toast('已刷新', 'ok') })
-    if (act === 'refresh-balance') { refreshBalance(); toast('正在查余额…', 'info'); return }
-    if (act === 'upload') return uploadDeck(key, btn)
-    if (act === 'retry') return doAction('retry', { replayKey: key }, btn)
-    if (act === 'republish') {
-      var task = taskByKey(key)
-      if (!task || !task.artifacts || !task.artifacts.transcriptPath) { toast('这条课次还没有转录稿，无法重新发布', 'error'); return }
-      return doAction('republish', { transcriptPath: task.artifacts.transcriptPath, course: task.courseName, lesson: task.title, replayKey: key }, btn)
-    }
-    // 课次行里的「跑一轮」只推这一节；「设置」里的整轮跑与定时任务一致，最多 5 节
-    if (act === 'cycle') return doAction('cycle', { replayKey: key, maxTasks: 1 }, btn)
-    if (act === 'cycle-all') return doAction('cycle', { maxTasks: 5 }, btn)
-    if (act === 'revise') return reviseWith(key, btn.dataset.module, btn)
-    if (act === 'revise-first') return reviseWith(key, '', btn)
-    if (act === 'notify-retry') return doAction('notify-retry', {}, btn)
-    if (act === 'discover' || act === 'notify' || act === 'doctor' || act === 'backup') return doAction(act, {}, btn)
-    if (act === 'prune') return doAction('prune', {}, btn)
-    if (act === 'prune-apply') {
-      // 真删原件不可逆：先问一句再动手
-      if (!window.confirm('确定要删除原件吗？视频、音频、PPT 原件会从磁盘移除；转录稿、课件文字与笔记保留。')) return
-      return doAction('prune', { apply: true }, btn)
-    }
-    if (act === 'save-config') return saveConfig(btn)
-    if (act === 'save-password') return savePassword(false, btn)
-    if (act === 'clear-password') return savePassword(true, btn)
-    toast('这个按钮还没有接上处理逻辑：' + act, 'error')
-  })
+  run(function () { return handleAct(btn.dataset.act, btn) })
 })
 
-// 记住输入框里正在写的内容，重绘之后再放回去
+// 选好文件就直接上传；拖进来也一样——不再要求"先选文件再点上传"
+document.addEventListener('change', function (event) {
+  var input = event.target.closest ? event.target.closest('[data-file]') : null
+  if (!input) return
+  var file = input.files && input.files[0]
+  if (file) run(function () { return uploadDeck(input.dataset.file, file) })
+})
+document.addEventListener('dragover', function (event) {
+  var zone = event.target.closest ? event.target.closest('[data-drop]') : null
+  if (!zone) return
+  event.preventDefault()
+  zone.classList.add('hot')
+})
+document.addEventListener('dragleave', function (event) {
+  var zone = event.target.closest ? event.target.closest('[data-drop]') : null
+  if (zone) zone.classList.remove('hot')
+})
+document.addEventListener('drop', function (event) {
+  var zone = event.target.closest ? event.target.closest('[data-drop]') : null
+  if (!zone) return
+  event.preventDefault()
+  zone.classList.remove('hot')
+  var file = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0]
+  if (file) run(function () { return uploadDeck(zone.dataset.drop, file) })
+})
 document.addEventListener('input', function (event) {
   var box = event.target && event.target.closest ? event.target.closest('[data-request]') : null
   if (box) state.requests[box.dataset.request] = box.value
 })
-
-// 输入框里直接回车＝点旁边那颗按钮（改模块的要求、改密码都是这个习惯）
 document.addEventListener('keydown', function (event) {
+  if (event.key === 'Escape') {
+    var menu = $('menu')
+    if (menu && menu.open) menu.open = false
+    return
+  }
   if (event.key !== 'Enter') return
   var target = event.target
   if (!target || !target.dataset) return

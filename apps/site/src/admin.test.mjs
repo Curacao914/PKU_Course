@@ -385,6 +385,76 @@ test('the console page is served without a token so the user can enter one', asy
   assert.ok(!res.state.body.includes(TOKEN), '页面里不得内嵌令牌')
 })
 
+test('each lesson reports what it cost, split into transcription and note writing', async () => {
+  // 用户问过「转文字和写笔记各花多少钱」。这个数字来自真实用量：
+  // 转写用账单口径的语音秒数，笔记用状态文件里每次模型调用的 usage。
+  const { handler, scratchRoot } = fixture()
+  const outputDir = path.join(scratchRoot, 'replays', 'replay-1', 'output')
+  fs.mkdirSync(outputDir, { recursive: true })
+  const transcriptPath = path.join(outputDir, 'transcript.txt')
+  fs.writeFileSync(transcriptPath, '正文')
+  // 一次大纲、一次节点写作、一次审查、一次拼装；finalNoteVersions 是拼装的历史副本，不该重复计
+  const trace = (prompt, completion, cached = 0) => ({ trace: { usage: {
+    prompt_tokens: prompt, completion_tokens: completion, prompt_tokens_details: { cached_tokens: cached } } } })
+  fs.writeFileSync(path.join(outputDir, 'lesson-state.json'), JSON.stringify({
+    savedAt: '2026-09-26T00:00:00.000Z',
+    lesson: {
+      status: 'notes_ready',
+      finalNote: { markdown: '成品正文', assembly: trace(5000, 10000) },
+      finalNoteVersions: [trace(5000, 10000)],
+      outlineTraces: [{ usage: { prompt_tokens: 30000, completion_tokens: 8000 } }],
+      nodes: [
+        { id: 'node-1', title: '模块一', status: 'approved', draft: '草稿', versions: [trace(20000, 5000, 1000)], reviewerReports: [trace(21000, 3000)] }
+      ]
+    }
+  }))
+
+  const store = openLedger(path.join(scratchRoot, 'ledger.sqlite'))
+  const claimed = store.claimTask({ replayKey: 'replay-1', workerId: 'test' })
+  store.reportStage({
+    id: claimed.task.id, stage: 'notes_ready', message: '笔记完成',
+    data: { artifacts: { transcriptPath, notePath: path.join(outputDir, '第10-12节.md') }, runtime: { videoDurationSeconds: 7200, estimatedCostCny: 0.5 } }
+  })
+  store.close()
+
+  const { body } = await call(handler, { url: '/api/admin/status' })
+  const task = body.ledger.tasks.find(item => item.replayKey === 'replay-1')
+  assert.equal(task.cost.asrCny, 0.5, '转写费用取账本里记的那笔（账单口径是语音时长，不是视频时长）')
+  // 输入 30000+20000+21000+5000 = 76000（其中 1000 命中缓存），输出 8000+5000+3000+10000 = 26000
+  assert.equal(task.cost.usage.inputTokens, 76000, 'finalNoteVersions 不能重复计一次拼装')
+  assert.equal(task.cost.usage.cachedTokens, 1000)
+  assert.equal(task.cost.usage.outputTokens, 26000)
+  assert.equal(task.cost.usage.calls, 4, '四类调用各一次（拼装的历史副本不算）')
+  assert.ok(task.cost.notesCny > 0 && task.cost.notesCny < 1, '笔记费用应在几毛量级，实际 ' + task.cost.notesCny)
+  assert.equal(task.cost.totalCny, Number((task.cost.asrCny + task.cost.notesCny).toFixed(4)))
+  assert.equal(body.spend.totalCny, task.cost.totalCny, '总计要等于逐课次之和')
+  assert.ok(body.pricing.noteOutputPerMillionCny > body.pricing.noteInputPerMillionCny, '输出 token 比输入贵，界面上要能看出这一点')
+})
+
+test('the console reports whether wechat can actually push right now', async () => {
+  // 这个通道要先有用户来信（拿到 context_token）才能推送。以前接口返回 messageId 就算「已发送」，
+  // 结果微信端收不到、账本却一片绿。所以状态里必须把通道会话说清楚。
+  const { handler } = fixture()
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'openclaw-state-'))
+  const previous = process.env.OPENCLAW_STATE_DIR
+  try {
+    process.env.OPENCLAW_STATE_DIR = home
+    const missing = await call(handler, { url: '/api/admin/status' })
+    assert.equal(missing.body.channel.ok, false, '没有会话记录时要如实说推不出去')
+
+    const accounts = path.join(home, 'openclaw-weixin', 'accounts')
+    fs.mkdirSync(accounts, { recursive: true })
+    fs.writeFileSync(path.join(accounts, 'bot.context-tokens.json'), JSON.stringify({ 'user@im.wechat': 'token' }))
+    const ready = await call(handler, { url: '/api/admin/status' })
+    assert.equal(ready.body.channel.ok, true)
+    assert.ok(ready.body.channel.ageMinutes >= 0)
+    assert.ok(ready.body.channel.lastInboundAt, '要说清最近一次互动是什么时候')
+  } finally {
+    if (previous === undefined) delete process.env.OPENCLAW_STATE_DIR
+    else process.env.OPENCLAW_STATE_DIR = previous
+  }
+})
+
 test('non-admin paths are left to the static handler', async () => {
   const { handler } = fixture()
   const req = fakeRequest({ url: '/notes/x.html' })
