@@ -119,6 +119,16 @@ test('the toc highlight matches headings even when their ids are chinese', () =>
   assert.match(html, /article h2\[id\], article h3\[id\], article h4\[id\]/, '目录里有四级标题，高亮要跟到四级')
 })
 
+test('the rail toc scrolls itself so the current section stays visible', () => {
+  // 长笔记的目录比屏幕还长：高亮在动、但滚出可视区就等于没有。
+  // 目录栏自己也要跟着滚（用户报过「左侧目录不会同步自动滑动」）。
+  const html = renderNotePage(record({ markdown: NOTE }))
+  assert.match(html, /function followActive/, '要有一个把目录滚到当前条目的函数')
+  assert.match(html, /rail\.scrollTo\(/, '滚的是目录栏本身，不是整页')
+  assert.match(html, /rail\.scrollHeight <= rail\.clientHeight \+ 8/, '目录没超出可视区时不要乱滚')
+  assert.match(html, /setActive\(current\.id\)[\s\S]{0,200}followActive|followActive\(next\[0\]\)/, '高亮与滚动要一起发生')
+})
+
 test('the index groups by course and lists newest first', () => {
   const html = renderIndexPage([
     record({ lessonTitle: '第1-2节', publishedAt: '2026-09-01T00:00:00.000Z' }),

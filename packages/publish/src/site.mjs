@@ -440,6 +440,26 @@ const NOTE_SCRIPT = `<script>
     document.querySelectorAll('.rail nav.toc a.active').forEach(function (a) { a.classList.remove('active') })
     var next = links.get(id) || [];
     next.forEach(function (a) { a.classList.add('active') })
+    followActive(next[0])
+  }
+
+  /**
+   * 目录跟着正文滚。
+   *
+   * 长笔记的目录条目比屏幕还多，当前小节一旦滚出目录可视区，读者就"不知道自己在哪"——
+   * 高亮明明在动，但看不见等于没有。所以把目录栏自己也滚一下，让当前条目始终在视野里。
+   * 只在偏离较远时才滚（否则每滚一点就抖一下）。
+   */
+  function followActive (link) {
+    var rail = document.querySelector('.rail')
+    if (!rail || !link) return
+    if (rail.scrollHeight <= rail.clientHeight + 8) return
+    var railTop = rail.getBoundingClientRect().top
+    var linkTop = link.getBoundingClientRect().top - railTop + rail.scrollTop
+    var target = Math.max(0, Math.min(linkTop - rail.clientHeight / 2 + link.offsetHeight / 2, rail.scrollHeight - rail.clientHeight))
+    if (Math.abs(rail.scrollTop - target) > Math.max(24, link.offsetHeight * 1.5)) {
+      rail.scrollTo({ top: target, behavior: 'smooth' })
+    }
   }
   if (headings.length && links.size) {
     var io = new IntersectionObserver(function () {
