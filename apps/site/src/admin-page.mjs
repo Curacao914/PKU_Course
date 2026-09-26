@@ -182,7 +182,7 @@ pre{background:var(--sunken);border-radius:var(--r-md);padding:14px;overflow:aut
   <section id="tab-notes" hidden></section>
   <section id="tab-settings" hidden></section>
   <div class="card" style="padding:6px 22px">
-    <details class="d" id="outCard" style="border-top:0">
+    <details class="d" id="outCard" style="border-top:0" data-fold="out">
       <summary><span class="ttl">运行输出</span><span class="muted small">最近一次命令的完整结果</span></summary>
       <div class="body"><pre id="out">（尚未运行）</pre></div>
     </details>
@@ -193,7 +193,19 @@ pre{background:var(--sunken);border-radius:var(--r-md);padding:14px;overflow:aut
 var $ = function (id) { return document.getElementById(id) }
 var KEY = 'course.admin.token'
 // requests：每个课次输入框里正在写的要求。重绘很频繁，不记住就会把写到一半的字冲掉。
-var state = { status: null, balance: null, config: null, tab: 'overview', busy: false, requests: {}, uploads: {} }
+// open：哪些折叠块是展开的。整页 innerHTML 重绘很频繁（每次操作后、每 20 秒轮询一次），
+// 不记住展开状态的话，用户点开的课次每 20 秒自己收回去一次——"我什么都没动，它自己收了"。
+// key 用块自身的标识（课程名/课次 key/固定名），与 DOM 位置无关。
+var state = { status: null, balance: null, config: null, tab: 'overview', busy: false, requests: {}, uploads: {}, open: {} }
+var OPEN_KEY = 'course.admin.open'
+
+try {
+  var savedOpen = JSON.parse(localStorage.getItem(OPEN_KEY) || '{}')
+  if (savedOpen && typeof savedOpen === 'object') state.open = savedOpen
+} catch (e) { state.open = {} }
+
+function isOpen (key) { return state.open[key] === true }
+function foldAttrs (key) { return ' data-fold="' + esc(key) + '"' + (isOpen(key) ? ' open' : '') }
 
 var LABELS = {
   discover: '扫描教学网', cycle: '跑一轮完整链路', 'cycle-all': '跑一轮完整链路',
@@ -389,7 +401,7 @@ function renderOverview () {
         '<div class="tiny muted" style="margin-top:10px">转写 ¥' + (pricing.asrPerHourCny || 0.288) + '/小时（按语音时长）· 笔记 ¥' + (pricing.noteInputPerMillionCny || 1) + ' / ¥' + (pricing.noteOutputPerMillionCny || 4) + ' 每百万 token（输入/输出）</div>') +
       card('<h2>推送通道</h2>' + channelHtml()) +
     '</div>' +
-    card('<details class="d" style="border-top:0"><summary><span class="ttl">最近运行</span><span class="muted small">' + ((s.runs || []).length) + ' 次</span></summary><div class="body">' + runsTable() + '</div></details>')
+    card('<details class="d" style="border-top:0"' + foldAttrs('overview:runs') + '><summary><span class="ttl">最近运行</span><span class="muted small">' + ((s.runs || []).length) + ' 次</span></summary><div class="body">' + runsTable() + '</div></details>')
 }
 
 function balancesHtml () {
@@ -469,7 +481,7 @@ function lessonDetails (task, index) {
   var meta = '<div class="tiny muted" style="margin-bottom:10px">' + metaBits.join(' · ') + '</div>'
   var error = task.lastError ? '<p class="small" style="color:var(--danger);margin:10px 0 0">最近错误：' + esc(String(task.lastError).slice(0, 200)) + '</p>' : ''
   var noteLine = ''
-  return '<details class="d"><summary><span class="ttl">' + esc(title) + '</span>' + stagePill(task.stage) +
+  return '<details class="d"' + foldAttrs('lesson:' + task.replayKey) + '><summary><span class="ttl">' + esc(title) + '</span>' + stagePill(task.stage) +
     '<span class="muted small">' + esc(costText) + '</span></summary>' +
     '<div class="body">' + meta + noteLine + materialBlock(task) + error + actions + '</div></details>'
 }
@@ -486,7 +498,7 @@ function renderCourses () {
     var list = groups[course].slice().sort(function (a, b) { return String(b.title).localeCompare(String(a.title)) })
     var done = list.filter(function (t) { return t.stage === 'published' }).length
     var alert = list.some(function (t) { return t.stage === 'needs_attention' || t.stage === 'failed' })
-    return '<details class="d"><summary><span class="ttl">' + esc(course) + '</span>' +
+    return '<details class="d"' + foldAttrs('course:' + course) + '><summary><span class="ttl">' + esc(course) + '</span>' +
       '<span class="muted small">' + done + ' / ' + list.length + ' 讲已发布</span>' +
       (alert ? '<span class="pill bad"><span class="dot"></span>有卡住的</span>' : '') + '</summary>' +
       '<div class="body">' + list.map(lessonDetails).join('') + '</div></details>'
@@ -508,7 +520,7 @@ function renderNotes () {
       return '<tr><td>' + esc(m.title || m.id) + '</td><td class="small muted">' + m.chars + ' 字</td><td class="small muted">' + esc(MODULE_TEXT[m.status] || m.status) + '</td>' +
         '<td style="text-align:right"><button class="act quiet" data-act="revise" data-key="' + esc(t.replayKey) + '" data-module="' + esc(id) + '">重写</button></td></tr>'
     }).join('')
-    return '<details class="d"><summary><span class="ttl">' + esc(t.courseName + ' · ' + t.title) + '</span>' +
+    return '<details class="d"' + foldAttrs('note:' + t.replayKey) + '><summary><span class="ttl">' + esc(t.courseName + ' · ' + t.title) + '</span>' +
       '<span class="muted small">成品 ' + t.lesson.finalChars + ' 字 · ' + t.lesson.modules.length + ' 个模块</span></summary>' +
       '<div class="body">' +
       '<table><thead><tr><th>模块</th><th>字数</th><th>状态</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>' +
@@ -527,7 +539,7 @@ function renderNotes () {
   $('tab-notes').innerHTML = card(
       (cards || '<p class="muted">还没有带模块状态的笔记</p>') +
       (failed ? '<div class="row" style="margin-top:14px"><button class="act primary" data-act="notify-retry">把 ' + failed + ' 条失败通知放回队列</button></div>' : '')) +
-    card('<details class="d" style="border-top:0"><summary><span class="ttl">通知记录</span><span class="muted small">最近 ' + Math.min(12, deliveries.length) + ' 条</span></summary>' +
+    card('<details class="d" style="border-top:0"' + foldAttrs('notes:deliveries') + '><summary><span class="ttl">通知记录</span><span class="muted small">最近 ' + Math.min(12, deliveries.length) + ' 条</span></summary>' +
       '<div class="body">' + (rows ? '<table><thead><tr><th>用途</th><th>状态</th><th>时间</th><th>错误</th></tr></thead><tbody>' + rows + '</tbody></table>' : '<p class="muted small">队列为空</p>') + '</div></details>')
 }
 
@@ -561,12 +573,12 @@ function renderSettings () {
       '<button class="act" data-act="doctor">体检</button>' +
       '<button class="act" data-act="backup">备份账本</button></div>' +
       '') +
-    card('<details class="d" style="border-top:0"><summary><span class="ttl">运行参数</span><span class="muted small">篇幅、并发、成本窗口</span></summary>' +
+    card('<details class="d" style="border-top:0"' + foldAttrs('settings:params') + '><summary><span class="ttl">运行参数</span><span class="muted small">篇幅、并发、成本窗口</span></summary>' +
       '<div class="body">' + fields + '<div class="row"><button class="act primary" data-act="save-config">保存设置</button></div>' +
       '<div class="tiny muted" style="margin-top:8px">' + esc(c.path || '') + '</div></div></details>' +
-      '<details class="d"><summary><span class="ttl">登录密码</span><span class="muted small">' + ((state.status.auth && state.status.auth.passwordSet) ? '已设置' : '未设置') + '</span></summary>' +
+      '<details class="d"' + foldAttrs('settings:password') + '><summary><span class="ttl">登录密码</span><span class="muted small">' + ((state.status.auth && state.status.auth.passwordSet) ? '已设置' : '未设置') + '</span></summary>' +
       '<div class="body">' + passwordPanel() + '</div></details>' +
-      '<details class="d"><summary><span class="ttl">清理原件</span><span class="muted small">不可撤销</span></summary>' +
+      '<details class="d"' + foldAttrs('settings:prune') + '><summary><span class="ttl">清理原件</span><span class="muted small">不可撤销</span></summary>' +
       '<div class="body"><p class="small muted">只删通过校验的原始媒体与 PPT；转录稿、课件文字、笔记保留。</p>' +
       '<div class="row"><button class="act" data-act="prune">清理预演</button><button class="act danger" data-act="prune-apply">清理并删除</button></div></div></details>')
 }
@@ -838,6 +850,14 @@ document.addEventListener('input', function (event) {
   var box = event.target && event.target.closest ? event.target.closest('[data-request]') : null
   if (box) state.requests[box.dataset.request] = box.value
 })
+
+// 折叠块的展开状态记下来：下一次重绘（操作后或 20 秒轮询）要原样还原
+document.addEventListener('toggle', function (event) {
+  var node = event.target
+  if (!node || !node.dataset || !node.dataset.fold) return
+  state.open[node.dataset.fold] = node.open
+  try { localStorage.setItem(OPEN_KEY, JSON.stringify(state.open)) } catch (e) {}
+}, true)
 document.addEventListener('keydown', function (event) {
   if (event.key === 'Escape') {
     var menu = $('menu')

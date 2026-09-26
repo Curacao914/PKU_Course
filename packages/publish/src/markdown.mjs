@@ -117,6 +117,28 @@ export function renderMarkdown(markdown) {
       continue
     }
 
+    /**
+     * 折叠块：<details><summary>标题</summary> … </details>。
+     *
+     * 之前只认「📑 笔记元数据」那一种，其余（知识地图、参考答案）会被**转义成字面量**
+     * 显示在页面上——读者看到的就是「<details><summary>知识地图</summary>」这一行原文。
+     * 现在按结构识别：summary 文字转义、内部按 Markdown 递归渲染，仍然不放行任意 HTML。
+     */
+    const fold = line.trim().match(/^<details>\s*<summary>([\s\S]*?)<\/summary>\s*$/)
+    if (fold) {
+      const inner = []
+      index += 1
+      while (index < lines.length && !/^<\/details>\s*$/.test(lines[index].trim())) {
+        inner.push(lines[index])
+        index += 1
+      }
+      index += 1
+      const title = fold[1].replace(/<[^>]+>/g, '').trim()
+      const body = renderMarkdown(inner.join('\n'))
+      blocks.push(`<details class="note-fold"><summary>${escapeHtml(title)}</summary><div class="fold-body">${body}</div></details>`)
+      continue
+    }
+
     const fenceMatch = line.match(FENCE)
     if (fenceMatch) {
       const language = line.slice(fenceMatch[0].length).trim()

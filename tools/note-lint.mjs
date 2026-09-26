@@ -84,8 +84,8 @@ function analyze(file) {
     核心问题: has(/^###\s*本课要回答的核心问题/m),
     应当能够: has(/^###\s*本课你应当能够/m),
     课程脉络: has(/^###\s*课程脉络/m),
-    分节正文: has(/^###\s*[一二三四五六七八九十]+、/m),
-    小节加粗: has(/^\*\*[（(]?[一二三四五六七八九十\d]+[）)、.]/m),
+    分节正文: has(/^##\s*[一二三四五六七八九十]+、/m),
+    分节小节: has(/^###\s*[（(]?[一二三四五六七八九十\d]+[）)、.]/m),
     自测: has(/自测|练习|思考题/),
     知识连接: has(/知识连接/),
     附录: has(/附录/),
@@ -104,9 +104,9 @@ function analyze(file) {
     add('warn', 'no-inline-cues', '正文里没有任何「老师强调 / ⚠️ 易混提醒 / 💡 理解难点」引用块：这些提示应当随正文就地出现')
   }
 
-  // 小节标题不该再用四级标题：目录只到「一、话题」这一级才看得出结构
+  // 目录两级：章节（一、）= h2，小节（（一））= h3；再往下就没有了
   const bodyHeadings = (markdown.match(/^#{4,6}\s/mg) || []).length
-  if (bodyHeadings) add('warn', 'deep-headings', `正文里还有 ${bodyHeadings} 处四级及以下标题：小节标题应当是加粗行`)
+  if (bodyHeadings) add('warn', 'deep-headings', `正文里还有 ${bodyHeadings} 处四级及以下标题：目录只保留章节与小节两级`)
 
   // 6.5) 呈现质量：长段落与标题层级——"读得下去"的两个硬指标
   const paragraphs = markdown.split(/\n\s*\n/).filter(block => !/^[#>|\-*\d]/.test(block.trim()) && block.trim())

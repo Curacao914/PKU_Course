@@ -116,15 +116,19 @@ function stripRawMeta(markdown = '') {
  * 好处是左栏目录短、层级浅，扫一眼就知道这节课讲了几件事；而标题层级再往下分
  * （我们之前到 h4）会让目录变成一棵树，读者反而看不出结构。
  */
-export function boldBodyHeadings(markdown = '') {
-  return String(markdown ?? '').split('\n').map(line => {
-    const match = line.match(/^(#{4,6})\s+(.+?)\s*#*\s*$/)
-    return match ? `**${match[2]}**` : line
-  }).join('\n')
+/**
+ * 正文层级：**话题是 h2、小节是 h3**，不再往下分。
+ *
+ * 用户看过两种排法：haoke 那种（话题 h3、小节用加粗行）读起来也顺，但他明确要
+ * 「两级标题、第二级缩进」的目录——那就必须让小节真的是标题，而不是加粗文字，
+ * 否则左栏目录只剩一级。四级及以下一律降级/拍平，目录就两级，扫一眼看得出结构。
+ */
+export function normalizeBodyHeadings(markdown = '') {
+  return demoteBodyHeadings(markdown, 3)
 }
 
 export function stripMetaBlock(markdown = '') {
-  return boldBodyHeadings(demoteBodyHeadings(stripRawMeta(markdown)))
+  return normalizeBodyHeadings(stripRawMeta(markdown))
 }
 
 /** 标题比较用的归一：去掉井号、中式序号与空白，只留文字。 */
@@ -151,7 +155,7 @@ export function nodeBodyPieces(node = {}) {
   if (!ids.length || !body) return pieces
 
   if (ids.length === 1) {
-    pieces.set(ids[0], boldBodyHeadings(demoteBodyHeadings(body)))
+    pieces.set(ids[0], normalizeBodyHeadings(body))
     return pieces
   }
 
@@ -177,10 +181,10 @@ export function nodeBodyPieces(node = {}) {
   }
 
   if (!matched) {
-    pieces.set(ids[0], boldBodyHeadings(demoteBodyHeadings(body)))
+    pieces.set(ids[0], normalizeBodyHeadings(body))
     return pieces
   }
-  for (const id of ids) pieces.set(id, boldBodyHeadings(demoteBodyHeadings(buckets.get(id).join('\n').trim())))
+  for (const id of ids) pieces.set(id, normalizeBodyHeadings(buckets.get(id).join('\n').trim()))
   return pieces
 }
 
@@ -397,7 +401,7 @@ export function renderAppendix(value = {}) {
   const topics = (Array.isArray(value.topics) ? value.topics.filter(Boolean) : []).slice(0, SPLICE_LIMITS.appendixTopics)
   if (!terms.length && !topics.length) return ''
   // 标题由拼装器统一给出（课间事务与发散小节也要挂在同一个附录下，否则会出现两个「附录」）
-  const lines = ['> 以下内容为课堂补充材料和发散性讨论，不影响课程主线。']
+  const lines = []
   if (terms.length) {
     lines.push('', '### 术语汇总', '', '| 术语 | 英文/原文 | 定义或说明 |', '|------|----------|-----------|')
     terms.forEach(term => lines.push(
@@ -760,7 +764,7 @@ export function buildFinalNoteMarkdown({ courseSpec = {}, lesson = {}, spliceDat
 
   contentOutline.forEach((outlineNode, index) => {
     const title = outlineTopic(outlineNode)
-    parts.push('', `### ${chineseIndex(index)}、${title}`, '')
+    parts.push('', `## ${chineseIndex(index)}、${title}`, '')
     const summary = clamp(summaries[outlineNode.id] || outlineNode.rationale || '', SPLICE_LIMITS.summaryChars)
     if (summary) parts.push(summary, '')
     ;(byOutline.get(outlineNode.id) || []).forEach(text => parts.push(text, ''))

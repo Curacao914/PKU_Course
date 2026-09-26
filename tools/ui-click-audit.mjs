@@ -261,6 +261,24 @@ async function auditAdmin(page, site, calls, dialogs, failures) {
     }
   }
 
+  // 折叠状态必须跨重绘保持：用户点开一栏之后，轮询重绘不能把它收回去
+  // （用户报过"我什么都没动，点开的栏目自己收回去"）
+  await page.click('.seg button[data-tab="courses"]')
+  await openAll()
+  const foldKeys = await page.$$eval('#tab-courses details[data-fold]', nodes => nodes.map(node => node.dataset.fold))
+  if (!foldKeys.length) failures.push('管理台 · 课程区的折叠块没有 data-fold 标记：展开状态无法保持')
+  else {
+    await page.$$eval('#tab-courses details[data-fold]', nodes => nodes.forEach(node => { node.open = true }))
+    await page.evaluate(() => window.load({ quiet: true }))
+    await page.waitForTimeout(400)
+    const stillOpen = await page.$$eval('#tab-courses details[data-fold]', nodes => nodes.filter(node => node.open).length)
+    if (stillOpen !== foldKeys.length) {
+      failures.push('管理台 · 重绘之后折叠块被收回：' + stillOpen + '/' + foldKeys.length + ' 仍然展开')
+    } else {
+      console.log('  [课程] 重绘后折叠状态保持 ✓（' + stillOpen + ' 个）')
+    }
+  }
+
   // 「去处理」这类页内跳转：点了要切到对应 tab
   await page.click('.seg button[data-tab="overview"]')
   const jump = await page.$('#tab-overview [data-go]')

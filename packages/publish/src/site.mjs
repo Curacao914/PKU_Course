@@ -389,7 +389,6 @@ ${body}
 </div>
 <footer class="site">
   <span>${escapeHtml(SITE_NAME)} · course.law-tech.dev</span>
-  <span>笔记由课堂转录与课件自动生成，逐节点经独立审查；发现错误请以课堂原音为准。</span>
 </footer>
 ${scripts}
 </body>
@@ -780,9 +779,8 @@ export function renderIndexPage(records, { siteOrigin = '' } = {}) {
   const body = [
     '<section class="hero">',
     '<h1>课程笔记</h1>',
-    '<p>课堂录音自动转录、按知识体系整理的法学课程笔记。每篇都有体系层（知识地图与体系线索）、逐节正文与复习层（概念 / 法条 / 案例索引）。</p>',
     `<div class="meta">共 ${records.length} 篇 · ${courses.length} 门课</div>`,
-    records.length ? '<div style="margin-top:18px"><a href="/search/" class="pill">搜索笔记：概念、条号、案例…</a></div>' : '',
+    records.length ? '<div style="margin-top:14px"><a href="/search/" class="pill">搜索</a></div>' : '',
     '</section>',
     records.length
       ? [...groups.entries()].map(([course, items]) => [
@@ -806,7 +804,7 @@ export function renderIndexPage(records, { siteOrigin = '' } = {}) {
 
   return pageShell({
     title: SITE_NAME,
-    description: '北大课程笔记：按课程与课次整理，含体系层、逐节正文与概念 / 法条 / 案例索引。',
+    description: '北大法学课程笔记',
     canonical: siteOrigin || '',
     body
   })
@@ -846,7 +844,7 @@ export function renderFeed(records = [], { siteOrigin = '', siteName = SITE_NAME
     '  <channel>',
     `    <title>${esc(siteName)}</title>`,
     `    <link>${esc(base)}/</link>`,
-    `    <description>课堂录音自动转录、按知识体系整理的法学课程笔记</description>`,
+    `    <description>北大法学课程笔记</description>`,
     `    <lastBuildDate>${now.toUTCString()}</lastBuildDate>`,
     items,
     '  </channel>',
@@ -886,7 +884,7 @@ export function writeSite({ records = [], outputDir, siteOrigin = '' } = {}) {
   // 索引页与搜索页：数据全部来自各篇笔记的元数据块，不重新跑模型
   write('concepts/index.html', renderTermIndexPage({
     title: '概念索引', kind: 'concepts', notes: sorted, siteOrigin,
-    description: '同一个概念在不同课次里怎么讲、讲到哪一步。复习时按概念查，比重读整篇快。'
+    description: '概念索引'
   }))
   write('statutes/index.html', renderTermIndexPage({
     title: '法条索引', kind: 'statutes', notes: sorted, siteOrigin,

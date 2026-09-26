@@ -85,6 +85,37 @@ test('the metadata details block is rebuilt and its content escaped', () => {
   assert.ok(!html.includes('<script>'))
 })
 
+test('any fold block renders as a real details element, not as literal text', () => {
+  // 之前只认「📑 笔记元数据」那一种折叠块，知识地图与参考答案会被**转义成字面量**：
+  // 读者在页面上看到的就是「<details><summary>知识地图</summary>」这一行原文。
+  const html = renderMarkdown([
+    '## 课程概览',
+    '',
+    '<details><summary>知识地图</summary>',
+    '',
+    '```mermaid',
+    'flowchart TD',
+    '  A-->B',
+    '```',
+    '',
+    '</details>',
+    '',
+    '<details><summary>参考答案</summary>',
+    '',
+    '1. 先回忆再看答案',
+    '',
+    '</details>'
+  ].join('\n'))
+  assert.match(html, /<details class="note-fold"><summary>知识地图<\/summary>/)
+  assert.match(html, /language-mermaid/, '折叠块里的代码块照样渲染')
+  assert.ok(!html.includes('&lt;details&gt;'), '不能再把折叠块本身转义成字面量')
+  assert.match(html, /<details class="note-fold"><summary>参考答案<\/summary><div class="fold-body"><ol><li>先回忆再看答案<\/li><\/ol>/)
+  // summary 里的 HTML 只取文字，正文里的 HTML 仍然转义
+  const evil = renderMarkdown('<details><summary><img src=x onerror=alert(1)>标题</summary>\n\n<script>alert(2)</script>\n\n</details>')
+  assert.ok(!evil.includes('<img'), 'summary 里的标签要被剥掉')
+  assert.ok(evil.includes('&lt;script&gt;'), '正文里的 HTML 仍然转义')
+})
+
 test('inline emphasis and code do not interfere', () => {
   const html = renderInline('**粗** 与 *斜* 与 `a*b*c`')
   assert.match(html, /<strong>粗<\/strong>/)
