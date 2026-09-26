@@ -5,7 +5,7 @@ import path from 'node:path'
 
 import { clearPassword, asrCostCny, noteCostCny, readPasswordRecord, resolvePricing, validatePassword, verifyPassword, writePassword } from '@course/core'
 import { WECHAT_SESSION_MAX_AGE_MINUTES, wechatSessionState } from '@course/notify'
-import { addMaterial, listMaterials, unassignedDir } from '@course/materials'
+import { addMaterial, listMaterials, readDecks, unassignedDir } from '@course/materials'
 
 import { ADMIN_HTML } from './admin-page.mjs'
 import { readSiteIndex } from '@course/publish'
@@ -216,6 +216,122 @@ export function buildActionArgs(action, payload = {}, workerPath = '') {
       return [...base, action]
     default:
       return [...base, action, ...(payload.replayKey ? ['--replay-key', String(payload.replayKey)] : []), ...(payload.course ? ['--course', String(payload.course)] : [])]
+  }
+}
+
+
+/**
+ * 标签。
+ *
+ * 用户要的是「手动打标签，一节课可以多个，能在左侧筛选里拖动排序，而且存服务器」，
+ * 所以标签值单独落一个小文件（不塞进账本——账本是进度账，不是偏好存储）。
+ * 三处可打：课程、课次、全局顺序。
+ */
+function tagsPath(scratchRoot) {
+  return path.join(scratchRoot, 'tags.json')
+}
+
+export function readTags(scratchRoot) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(tagsPath(scratchRoot), 'utf8'))
+    return {
+      order: Array.isArray(parsed.order) ? parsed.order.filter(Boolean) : [],
+      courses: parsed.courses && typeof parsed.courses === 'object' ? parsed.courses : {},
+      lessons: parsed.lessons && typeof parsed.lessons === 'object' ? parsed.lessons : {}
+    }
+  } catch {
+    return { order: [], courses: {}, lessons: {} }
+  }
+}
+
+export function writeTags(scratchRoot, value) {
+  const file = tagsPath(scratchRoot)
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`)
+  fs.chmodSync(file, 0o600)
+  return file
+}
+
+const cleanTag = value => String(value ?? '').trim().slice(0, 40)
+
+/** 校验并归一：未在顺序表里出现过的标签自动追加到末尾，界面不需要再管这件事。 */
+export function normalizeTags(input = {}, previous = { order: [], courses: {}, lessons: {} }) {
+  const order = []
+  const pushTag = value => {
+    const tag = cleanTag(value)
+    if (tag && !order.includes(tag) && order.length < 80) order.push(tag)
+  }
+  for (const tag of Array.isArray(input.order) ? input.order : previous.order) pushTag(tag)
+  const mapOf = (source, fallback) => {
+    const next = {}
+    const entries = source && typeof source === 'object' ? source : fallback
+    for (const [key, list] of Object.entries(entries || {})) {
+      const tags = []
+      for (const tag of Array.isArray(list) ? list : []) {
+        const clean = cleanTag(tag)
+        if (clean && !tags.includes(clean)) tags.push(clean)
+      }
+      if (tags.length) next[String(key)] = tags.slice(0, 20)
+      tags.forEach(pushTag)
+    }
+    return next
+  }
+  return {
+    order,
+    courses: mapOf(input.courses, previous.courses),
+    lessons: mapOf(input.lessons, previous.lessons)
+  }
+}
+
+/**
+ * 存储占用。
+ *
+ * 用户要「知道我存了些什么、占了多少空间」，但不要一堆文件名——所以按类别汇总：
+ * 每类给一个数字与一句人话说明，界面上画成条状图。
+ */
+const STORAGE_CATEGORIES = [
+  { key: 'replays', label: '回放产物', hint: '转录稿、写作状态、运行摘要（视频原件校验后已删）', dir: 'replays' },
+  { key: 'materials', label: '课件', hint: '你上传的 PPT / PDF / Word / Excel 与解析出的文字', dir: 'materials' },
+  { key: 'site', label: '站点', hint: '生成的 HTML、索引与 RSS', dir: 'site' },
+  { key: 'browserProfile', label: '浏览器配置', hint: '登录教学网用的持久化配置（不能删）', dir: 'browser-profile' },
+  { key: 'backups', label: '备份', hint: '账本与站点库的快照（默认留 7 份）', dir: 'backups' },
+  { key: 'runs', label: '运行记录', hint: '每次运行的摘要（只留最近若干次）', dir: 'runs' },
+  { key: 'experiments', label: '实验产物', hint: '切片对比实验留下的中间文件', dir: 'experiments' },
+  { key: 'assets', label: '静态资源', hint: '站点用到的第三方库（绘图库等）', dir: 'assets' },
+  { key: 'tmp', label: '临时文件', hint: '上传分片与中间文件，用完即删', dir: 'tmp' }
+]
+
+function directorySize(target, depth = 0) {
+  if (depth > 6) return 0
+  let total = 0
+  let stat
+  try { stat = fs.statSync(target) } catch { return 0 }
+  if (stat.isFile()) return stat.size
+  let entries = []
+  try { entries = fs.readdirSync(target, { withFileTypes: true }) } catch { return 0 }
+  for (const entry of entries) {
+    total += directorySize(path.join(target, entry.name), depth + 1)
+  }
+  return total
+}
+
+export function storageReport(scratchRoot) {
+  const categories = STORAGE_CATEGORIES.map(item => {
+    const bytes = directorySize(path.join(scratchRoot, item.dir))
+    return { key: item.key, label: item.label, hint: item.hint, bytes }
+  })
+  const ledgerBytes = ['ledger.sqlite', 'ledger.sqlite-wal', 'ledger.sqlite-shm']
+    .reduce((sum, name) => sum + directorySize(path.join(scratchRoot, name)), 0)
+  categories.splice(2, 0, { key: 'ledger', label: '账本', hint: '任务进度与通知队列（SQLite）', bytes: ledgerBytes })
+  let disk = null
+  try {
+    const info = fs.statfsSync(scratchRoot)
+    disk = { freeBytes: info.bavail * info.bsize, totalBytes: info.blocks * info.bsize }
+  } catch { disk = null }
+  return {
+    categories: categories.filter(item => item.bytes > 0).sort((a, b) => b.bytes - a.bytes),
+    totalBytes: categories.reduce((sum, item) => sum + item.bytes, 0),
+    disk
   }
 }
 
@@ -438,7 +554,14 @@ export function createAdminHandler({
               mediaPath: artifacts.mediaPath || ''
             },
             hasTranscript: Boolean(artifacts.transcriptPath && fs.existsSync(artifacts.transcriptPath)),
-            materials: materials.map(item => ({ name: item.name, scope: item.scope, slideCount: item.slideCount, addedAt: item.addedAt })),
+            materials: materials.map(item => ({
+              name: item.name,
+              scope: item.scope,
+              slideCount: item.slideCount,
+              addedAt: item.addedAt,
+              bytes: item.bytes || 0,
+              kind: String(item.name || '').slice(String(item.name || '').lastIndexOf('.') + 1).toLowerCase()
+            })),
             lesson,
             cost: lessonCostOf(task, lesson, pricing)
           }
@@ -533,6 +656,7 @@ export function createAdminHandler({
       }
       // 微信通道：主动推送需要用户最近和机器人有过互动，界面要把这件事说清楚
       snap.channel = channelHealth()
+      snap.tags = readTags(scratchRoot)
       // _unassigned：收件箱里认不出归属的课件，等人指定
       try {
         const parked = unassignedDir(materialsRoot)
@@ -743,6 +867,71 @@ export function createAdminHandler({
         sendJson(res, 500, { ok: false, error: 'material_failed', message: error instanceof Error ? error.message : String(error) })
       } finally {
         fs.rmSync(tempPath, { force: true })
+      }
+      return true
+    }
+
+
+    /** 标签：界面上手动打的，存在服务器上（不是浏览器）。 */
+    if (pathname === `${ADMIN_PREFIX}tags`) {
+      if (req.method === 'GET') {
+        sendJson(res, 200, { ok: true, ...readTags(scratchRoot) })
+        return true
+      }
+      if (req.method === 'PUT' || req.method === 'POST') {
+        let payload = {}
+        try {
+          payload = safeJson(await readBody(req)) || {}
+        } catch (error) {
+          sendJson(res, 400, { ok: false, error: 'bad_body', message: error.message })
+          return true
+        }
+        const next = normalizeTags(payload, readTags(scratchRoot))
+        writeTags(scratchRoot, next)
+        sendJson(res, 200, { ok: true, ...next })
+        return true
+      }
+    }
+
+    /** 存储占用：按类别给数字，界面上画成条状图。 */
+    if (pathname === `${ADMIN_PREFIX}storage`) {
+      sendJson(res, 200, { ok: true, ...storageReport(scratchRoot) })
+      return true
+    }
+
+    /**
+     * 课件文字预览。
+     *
+     * 预览用的是**解析出来的每页文字**，不是把 PPT 渲染成图——几十兆的原件在浏览器里
+     * 渲染既慢又没必要：用户要看的是"这一页讲了什么"。
+     */
+    if (pathname === `${ADMIN_PREFIX}material`) {
+      const course = String(url.searchParams.get('course') || '').trim()
+      const lesson = String(url.searchParams.get('lesson') || '').trim()
+      const name = String(url.searchParams.get('name') || '').trim()
+      const limit = Math.min(24, Math.max(1, Number(url.searchParams.get('pages') || 6)))
+      if (!course) {
+        sendJson(res, 400, { ok: false, error: 'missing_course' })
+        return true
+      }
+      try {
+        const decks = readDecks({ root: materialsRoot, course, lesson })
+        const deck = decks.find(item => item.name === name) || decks[0]
+        if (!deck) {
+          sendJson(res, 404, { ok: false, error: 'no_material' })
+          return true
+        }
+        sendJson(res, 200, {
+          ok: true,
+          name: deck.name,
+          scope: deck.scope,
+          slideCount: deck.slideCount || (deck.slides || []).length,
+          addedAt: deck.addedAt || null,
+          bytes: deck.bytes || 0,
+          pages: (deck.slides || []).slice(0, limit).map(slide => ({ slideNumber: slide.slideNumber, text: String(slide.text || '').slice(0, 2000) }))
+        })
+      } catch (error) {
+        sendJson(res, 500, { ok: false, error: 'material_unreadable', message: error instanceof Error ? error.message : String(error) })
       }
       return true
     }

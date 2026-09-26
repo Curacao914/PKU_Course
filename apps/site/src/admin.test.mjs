@@ -181,6 +181,57 @@ test('chunked upload rejects a traversal-shaped upload id and empty commits', as
   assert.equal(none.body.error, 'incomplete_upload', '一个分片都没有时报的就是"没收齐"')
 })
 
+test('tags live on the server so the filter rail survives a refresh', async () => {
+  const { handler } = fixture()
+  const empty = await call(handler, { url: '/api/admin/tags' })
+  assert.deepEqual(empty.body.order, [])
+
+  const saved = await call(handler, {
+    method: 'PUT', url: '/api/admin/tags',
+    body: JSON.stringify({ order: ['研二上', '考试重点'], courses: { 商法概论: ['研二上'] }, lessons: { 'replay-1': ['重点'] } })
+  })
+  assert.equal(saved.res.state.status, 200)
+  // 用到的标签自动进顺序表（否则筛选栏里筛不到它），未被用到的不受影响
+  assert.deepEqual(saved.body.order, ['研二上', '考试重点', '重点'])
+  assert.deepEqual(saved.body.courses['商法概论'], ['研二上'])
+  assert.deepEqual(saved.body.lessons['replay-1'], ['重点'])
+
+  // 重排顺序（界面里拖动标签）只改 order，不动归属
+  const reordered = await call(handler, {
+    method: 'PUT', url: '/api/admin/tags',
+    body: JSON.stringify({ order: ['考试重点', '研二上', '重点'], courses: { 商法概论: ['研二上'] }, lessons: { 'replay-1': ['重点'] } })
+  })
+  assert.deepEqual(reordered.body.order, ['考试重点', '研二上', '重点'], '顺序按界面拖动的结果保存')
+  assert.deepEqual(reordered.body.courses['商法概论'], ['研二上'], '重排不该丢归属')
+
+  // 新标签自动进入顺序表；状态接口里也带着标签，界面不用再多请求一次
+  const withNew = await call(handler, {
+    method: 'PUT', url: '/api/admin/tags',
+    body: JSON.stringify({ order: ['考试重点'], courses: { 商法概论: ['考试重点', '待补课件'] } })
+  })
+  assert.ok(withNew.body.order.includes('待补课件'), '未登记过的标签要自动补进顺序表')
+  const status = await call(handler, { url: '/api/admin/status' })
+  assert.deepEqual(status.body.tags.order, withNew.body.order)
+})
+
+test('storage usage is reported by category, not as a wall of filenames', async () => {
+  const { handler, scratchRoot } = fixture()
+  fs.mkdirSync(path.join(scratchRoot, 'replays', 'a'), { recursive: true })
+  fs.writeFileSync(path.join(scratchRoot, 'replays', 'a', 'transcript.md'), 'x'.repeat(5000))
+  fs.mkdirSync(path.join(scratchRoot, 'materials', 'c', 'l'), { recursive: true })
+  fs.writeFileSync(path.join(scratchRoot, 'materials', 'c', 'l', 'deck.pptx'), Buffer.alloc(20000))
+
+  const { body } = await call(handler, { url: '/api/admin/storage' })
+  assert.equal(body.ok, true)
+  const replays = body.categories.find(item => item.key === 'replays')
+  const materials = body.categories.find(item => item.key === 'materials')
+  assert.ok(replays.bytes >= 5000, '回放产物要算进去')
+  assert.ok(materials.bytes >= 20000, '课件要算进去')
+  assert.ok(body.totalBytes >= 25000)
+  assert.ok(body.categories.every(item => typeof item.hint === 'string' && item.hint.length > 0), '每一类都要有一句人话说明')
+  assert.ok(!JSON.stringify(body).includes('transcript.md'), '不要贴文件名，按类别汇总')
+})
+
 test('uploading requires the admin token', async () => {
   const { handler } = fixture()
   const res = await call(handler, {
@@ -431,9 +482,11 @@ test('the console page is served without a token so the user can enter one', asy
   assert.equal(res.state.status, 200)
   assert.match(res.state.headers['content-type'], /text\/html/)
   assert.match(res.state.body, /管理台/, '无令牌时也要能打开页面输入令牌')
-  assert.match(res.state.body, /data-tab="overview"/, '四个区在页面里（概览/课程/笔记/设置）')
+  // 三个区：概览 / 课程 / 设置。
+  // 「笔记」那一区并进了课程详情（用户：'这个其实可以放进课程栏目里面去'）——
+  // 逐模块重写现在在课次详情面板里，不再单开一页。
+  assert.match(res.state.body, /data-tab="overview"/)
   assert.match(res.state.body, /data-tab="courses"/)
-  assert.match(res.state.body, /data-tab="notes"/)
   assert.match(res.state.body, /data-tab="settings"/)
   // 页面里的按钮必须挂上事件委托认的属性（曾经写成 data-run，点了没反应）
   const buttons = res.state.body.match(/<button[^>]*>/g) || []
@@ -555,6 +608,14 @@ test('non-admin paths are left to the static handler', async () => {
  *   3. 每个动作最终拼出的 argv，其命令名与旗标必须在 CLI 的用法文本里真的存在
  *      （否则界面会照常弹"已开始"，而命令其实跑不起来）。
  */
+test('the console inline script actually parses', async () => {
+  // 这一条是被真事逼出来的：模板字符串里一个没转义的换行会变成字符串里的真实换行，
+  // 整段脚本语法错误——页面白屏，而单元测试全绿（因为测试只检查字符串，不解析它）。
+  const script = ADMIN_HTML.match(/<script>([\s\S]*)<\/script>/)
+  assert.ok(script, '页面里要有内联脚本')
+  assert.doesNotThrow(() => new Function(script[1]), '内联脚本必须能被解析')
+})
+
 test('every button in the console is wired to a handler, and no handler is orphaned', async () => {
   const acts = new Set([...ADMIN_HTML.matchAll(/data-act="([^"]+)"/g)].map(m => m[1]))
   const handled = new Set([...ADMIN_HTML.matchAll(/act === '([^']+)'/g)].map(m => m[1]))
@@ -576,7 +637,7 @@ test('every button in the console is wired to a handler, and no handler is orpha
 
 test('every tab and in-page jump target exists', async () => {
   const tabs = new Set([...ADMIN_HTML.matchAll(/data-tab="([^"]+)"/g)].map(m => m[1]))
-  assert.deepEqual([...tabs].sort(), ['courses', 'notes', 'overview', 'settings'])
+  assert.deepEqual([...tabs].sort(), ['courses', 'overview', 'settings'])
   for (const tab of tabs) assert.match(ADMIN_HTML, new RegExp('id="tab-' + tab + '"'), 'tab ' + tab + ' 要有一段对应的内容区')
 })
 

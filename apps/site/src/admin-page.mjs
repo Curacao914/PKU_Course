@@ -1,18 +1,19 @@
 /**
  * 管理台页面。
  *
- * 设计原则（2026-09-26 重做，用户反馈「太臃肿、信息太爆炸」）：
+ * 三块，按"一类操作一个区"：
+ *   概览 —— 现在要我做什么（待办 + 数字 + 花费 + 推送通道）
+ *   课程 —— 访达分栏式：筛选栏 | 课程 | 课次 | 详情
+ *   设置 —— 维护动作 + 运行参数 + 存储占用 + 密码 + 清理
  *
- *   1. **一屏只回答一个问题。** 概览先回答"现在需要我做什么"，其余数字排在后面。
- *      第一版把阶段分布、余额、最近运行、待办全铺在一屏，等于什么都没说。
- *   2. **默认折叠，需要时展开。** 课程按课程折叠、课次按行折叠、设置里的参数与密码折叠、
- *      运行输出折叠。用原生 <details>：没有构建步骤，也不需要自己写展开逻辑。
- *   3. **一件事一个动作。** 上传课件不再是"先点选文件、再点上传"两步，而是
- *      「选择课件并上传」一个按钮（也可以直接把文件拖到那一行）。
- *   4. **数字要说明白。** 花费按"转写 / 笔记"两笔分开显示，并把单价写在旁边——
- *      用户问过"为什么阿里云花了八块多"，界面上就该能自己回答。
- *   5. **按钮点下去必须当场有反应。** 置灰改字 + 顶部状态灯 + 右下角提示，
- *      跑完再弹明确的成功/失败（见 docs/09 §9）。
+ * 两条来自用户的硬要求（这一版重做的起因）：
+ *   1. **不要再竖排下拉**。"后续课程内容多起来，像现在这样点开纵排展开根本没法管"——
+ *      所以课程区改成横向分栏：点课程看课次、点课次看详情，一屏之内横向推进。
+ *   2. **不要再出现元说明**。"这种元内容（前端出现的莫名其妙的解释和对话内容）不要出现"——
+ *      界面上只留数据与控件，解释写在文档里。
+ *
+ * 另外三条一直有效的规矩：点下去必须当场有反应（置灰 + 状态灯 + 提示）；
+ * 折叠状态跨重绘保持（20 秒轮询会重绘整页）；异步异常一律露面。
  */
 export const ADMIN_HTML = `<!doctype html>
 <html lang="zh-CN">
@@ -28,18 +29,17 @@ export const ADMIN_HTML = `<!doctype html>
   --r-lg:18px;--r-md:12px;--r-sm:9px;
   --shadow:0 1px 2px rgba(0,0,0,.04),0 10px 30px -22px rgba(0,0,0,.3);
   --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
 }
 *{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%}
 body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:16px;line-height:1.55;
   -webkit-font-smoothing:antialiased;letter-spacing:-.005em;overflow-wrap:anywhere}
-/* 路径、replayKey、URL 这类长串没有空格，不强制断行会把窄屏整体撑宽 */
-code,.tiny,pre,td{overflow-wrap:anywhere}
 a{color:var(--accent);text-decoration:none}
 a:hover{color:var(--accent-ink)}
-.wrap{max-width:960px;margin:0 auto;padding:0 22px}
+.wrap{max-width:1180px;margin:0 auto;padding:0 22px}
+svg.i{width:16px;height:16px;flex:none;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
 
-/* 顶栏：只留身份、状态与一个"更多"入口 */
 header.top{position:sticky;top:0;z-index:20;background:rgba(251,251,253,.86);backdrop-filter:saturate(180%) blur(20px);
   border-bottom:1px solid var(--line)}
 header.top .wrap{height:60px;display:flex;align-items:center;gap:14px}
@@ -55,31 +55,23 @@ header.top .wrap{height:60px;display:flex;align-items:center;gap:14px}
   display:flex;align-items:center;justify-content:center;color:var(--ink-2);font-size:15px;letter-spacing:1px}
 .menu>summary::-webkit-details-marker{display:none}
 .menu[open]>summary{background:var(--line)}
-.menu .sheet{position:absolute;right:0;top:38px;width:290px;background:var(--card);border:1px solid var(--line);
+.menu .sheet{position:absolute;right:0;top:38px;width:300px;background:var(--card);border:1px solid var(--line);
   border-radius:var(--r-md);box-shadow:var(--shadow);padding:14px}
-.menu .sheet a{display:block;padding:6px 0}
 .menu label{display:block;font-size:12.5px;color:var(--ink-3);margin:8px 0 4px}
 
-/* 分区导航：分段控件 */
-nav.seg{display:flex;gap:2px;background:var(--sunken);border-radius:10px;padding:2px;margin:18px 0 22px;width:fit-content}
+nav.seg{display:flex;gap:2px;background:var(--sunken);border-radius:10px;padding:2px;margin:18px 0 20px;width:fit-content}
 nav.seg button{font:inherit;font-size:14px;border:0;background:none;color:var(--ink-2);padding:6px 16px;border-radius:8px;cursor:pointer}
 nav.seg button[aria-selected=true]{background:var(--card);color:var(--ink);font-weight:500;box-shadow:0 1px 3px rgba(0,0,0,.08)}
 
 main{padding-bottom:80px}
 h1{font-size:28px;line-height:1.2;letter-spacing:-.02em;margin:0 0 6px}
 h2{font-size:19px;letter-spacing:-.015em;margin:0 0 10px}
-h3{font-size:16px;margin:0 0 8px}
-p{margin:0 0 10px}
-.lede{color:var(--ink-2);font-size:15px;margin:0 0 18px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r-lg);padding:20px 22px;box-shadow:var(--shadow);margin-bottom:16px}
-.card .sub{color:var(--ink-3);font-size:13.5px;margin:-4px 0 12px}
 .grid{display:grid;gap:16px}
 .grid.two{grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
 .grid.three{grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}
 .stat{font-size:30px;font-weight:600;letter-spacing:-.03em;line-height:1.1}
 .stat small{display:block;font-size:13px;font-weight:400;color:var(--ink-3);letter-spacing:0;margin-top:4px}
-
-/* 待办：一条一行，右边一个动作 */
 .todo{display:flex;align-items:center;gap:12px;padding:12px 0;border-top:1px solid var(--line)}
 .todo:first-of-type{border-top:0;padding-top:2px}
 .todo .t{flex:1;min-width:0}
@@ -88,17 +80,18 @@ p{margin:0 0 10px}
 .empty-ok{display:flex;align-items:center;gap:10px;color:var(--ok);font-size:15px}
 
 button.act{font:inherit;font-size:14px;padding:7px 14px;border-radius:980px;border:1px solid var(--line-2);
-  background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+  background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;gap:6px}
 button.act:hover{border-color:var(--ink-3)}
 button.act[disabled]{opacity:.5;cursor:progress}
 button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
 button.primary:hover{background:var(--accent-ink);border-color:var(--accent-ink);color:#fff}
 button.quiet{border-color:transparent;background:var(--sunken);color:var(--ink-2)}
+button.icon{padding:6px;border-radius:8px;border-color:transparent;background:transparent;color:var(--ink-2)}
+button.icon:hover{background:var(--sunken);color:var(--ink)}
 button.danger{border-color:#eccac7;color:var(--danger)}
 .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
 .muted{color:var(--ink-3)}.small{font-size:13.5px}.tiny{font-size:12.5px}
 
-/* 折叠：课程、课次、参数、输出都用同一套 */
 details.d{border-top:1px solid var(--line)}
 details.d:first-of-type{border-top:0}
 details.d>summary{list-style:none;cursor:pointer;padding:14px 2px;display:flex;align-items:center;gap:12px}
@@ -106,13 +99,8 @@ details.d>summary::-webkit-details-marker{display:none}
 details.d>summary::after{content:'';width:8px;height:8px;border-right:1.6px solid var(--ink-3);border-bottom:1.6px solid var(--ink-3);
   transform:rotate(-45deg);margin-left:auto;transition:transform .2s ease;flex:none}
 details.d[open]>summary::after{transform:rotate(45deg)}
-details.d>summary:hover .ttl{color:var(--accent-ink)}
 .ttl{font-weight:500}
 .body{padding:0 2px 18px}
-.sub-row{display:flex;align-items:center;gap:12px;padding:10px 0;border-top:1px solid var(--line)}
-.sub-row:first-child{border-top:0}
-.sub-row .name{flex:1;min-width:0}
-.sub-row .name span{display:block;color:var(--ink-3);font-size:12.5px}
 .pill{display:inline-flex;align-items:center;gap:6px;padding:2px 10px;border-radius:999px;background:var(--sunken);
   color:var(--ink-2);font-size:12.5px}
 .pill.ok{background:var(--accent-soft);color:var(--accent-ink)}
@@ -129,23 +117,71 @@ input,select{font:inherit;font-size:15px;padding:9px 12px;border:1px solid var(-
 input:focus,select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
 .field{margin-bottom:14px}
 .hidden-file{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);border:0}
-.drop{border:1px dashed var(--line-2);border-radius:var(--r-md);padding:12px 14px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
-.drop.hot{border-color:var(--accent);background:var(--accent-soft)}
-.status{font-size:13.5px;color:var(--ink-3);margin-top:8px;min-height:0}
+.status{font-size:13.5px;color:var(--ink-3)}
 .status.bad{color:var(--danger)}
 .status.ok{color:var(--ok)}
 pre{background:var(--sunken);border-radius:var(--r-md);padding:14px;overflow:auto;max-height:340px;font-size:12.5px;margin:0}
+
+/* ── 访达分栏 ── */
+.board{display:grid;grid-template-columns:176px 216px 232px minmax(0,1fr);background:var(--card);
+  border:1px solid var(--line);border-radius:var(--r-lg);box-shadow:var(--shadow);overflow:hidden}
+.board.rail-hidden{grid-template-columns:0 216px 232px minmax(0,1fr)}
+.board .col{border-right:1px solid var(--line);min-width:0;max-height:74vh;overflow:auto;padding:8px 0}
+.board .col:last-child{border-right:0;padding:0}
+/* 收起的筛选栏**不能 display:none**：它一退出栅格，后面的列会各自顶到前一格上，
+   课程列落进 0 宽的那一格——看起来"按钮在但点不动"。保持占位、把内容裁掉才对。 */
+.board.rail-hidden #rail{width:0;padding:0;border-right:0;overflow:hidden}
+.board.rail-hidden #rail .rail{display:none}
+.colhead{display:flex;align-items:center;gap:6px;padding:6px 12px 8px;color:var(--ink-3);font-size:12px;letter-spacing:.04em}
+.colhead .spacer{flex:1}
+.item{display:flex;align-items:center;gap:8px;padding:7px 12px;cursor:pointer;font-size:14px;min-width:0}
+.item:hover{background:var(--sunken)}
+.item[aria-selected=true]{background:var(--accent-soft);color:var(--accent-ink);font-weight:500}
+.item .name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.item .meta{color:var(--ink-3);font-size:12px;flex:none}
+.item .dot{width:7px;height:7px;border-radius:50%;background:var(--ink-3);flex:none}
+.item .dot.ok{background:var(--ok)}.item .dot.warn{background:var(--warn)}.item .dot.bad{background:var(--danger)}
+.rail{padding:8px 0}
+.rail h4{margin:8px 12px 4px;font-size:12px;color:var(--ink-3);font-weight:600;letter-spacing:.04em}
+.tag-row{display:flex;align-items:center;gap:6px;padding:5px 12px;cursor:pointer;font-size:13.5px;color:var(--ink-2)}
+.tag-row:hover{background:var(--sunken)}
+.tag-row[aria-selected=true]{color:var(--accent-ink);font-weight:500}
+.tag-row .grip{color:var(--ink-3);cursor:grab;opacity:0}
+.tag-row:hover .grip{opacity:1}
+.tag-row.dragging{opacity:.4}
+.detail{padding:18px 20px}
+.detail h2{margin:0 0 4px;font-size:17px}
+.detail .sub{color:var(--ink-3);font-size:13px;margin:0 0 14px}
+.block{padding:14px 0;border-top:1px solid var(--line)}
+.block:first-of-type{border-top:0}
+.block h3{margin:0 0 8px;font-size:13.5px;color:var(--ink-3);font-weight:600;letter-spacing:.03em}
+.file{display:flex;align-items:center;gap:10px;padding:7px 10px;border:1px solid var(--line);border-radius:var(--r-md);margin-bottom:6px;cursor:pointer}
+.file:hover{border-color:var(--ink-3)}
+.file[aria-selected=true]{border-color:var(--accent);background:var(--accent-soft)}
+.file .name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13.5px}
+.file .meta{color:var(--ink-3);font-size:12px}
+.tag{display:inline-flex;align-items:center;gap:6px;padding:3px 6px 3px 10px;border-radius:999px;background:var(--sunken);
+  font-size:12.5px;margin:0 6px 6px 0}
+.tag button{border:0;background:none;color:var(--ink-3);cursor:pointer;padding:0 2px;font-size:14px;line-height:1}
+.tag button:hover{color:var(--danger)}
+.pages{max-height:320px;overflow:auto;border:1px solid var(--line);border-radius:var(--r-md);padding:8px 10px;font-size:13px}
+.pages .page{padding:6px 0;border-top:1px dashed var(--line)}
+.pages .page:first-child{border-top:0}
+.pages .no{color:var(--ink-3);font-size:11.5px;font-family:var(--mono)}
+.bar{height:8px;border-radius:999px;background:var(--sunken);overflow:hidden}
+.bar>i{display:block;height:100%;background:var(--accent);border-radius:999px}
+.storage-row{display:grid;grid-template-columns:1fr auto;gap:4px 12px;padding:8px 0;border-top:1px solid var(--line)}
+.storage-row:first-child{border-top:0}
+.storage-row .hint{grid-column:1/-1;color:var(--ink-3);font-size:12px}
 .toast{position:fixed;right:20px;bottom:20px;z-index:60;max-width:min(420px,calc(100vw - 40px));padding:12px 15px;
   border-radius:var(--r-md);border:1px solid var(--line);background:rgba(255,255,255,.98);box-shadow:var(--shadow);
   font-size:14px;color:var(--ink-2);opacity:0;transform:translateY(10px);transition:opacity .18s ease,transform .18s ease;pointer-events:none}
 .toast.show{opacity:1;transform:none}
 .toast.ok{border-color:#cfe4d8;background:var(--accent-soft);color:var(--accent-ink)}
 .toast.error{border-color:#eccac7;background:var(--danger-soft);color:var(--danger)}
-@media (max-width:560px){
-  body{font-size:15.5px}
-  h1{font-size:24px}
-  .card{padding:16px}
-  .stat{font-size:26px}
+@media (max-width:900px){
+  .board,.board.rail-hidden{grid-template-columns:1fr}
+  .board .col{max-height:none;border-right:0;border-bottom:1px solid var(--line)}
 }
 </style>
 </head>
@@ -174,12 +210,10 @@ pre{background:var(--sunken);border-radius:var(--r-md);padding:14px;overflow:aut
   <nav class="seg" role="tablist">
     <button role="tab" data-tab="overview" aria-selected="true">概览</button>
     <button role="tab" data-tab="courses" aria-selected="false">课程</button>
-    <button role="tab" data-tab="notes" aria-selected="false">笔记</button>
     <button role="tab" data-tab="settings" aria-selected="false">设置</button>
   </nav>
   <section id="tab-overview"></section>
   <section id="tab-courses" hidden></section>
-  <section id="tab-notes" hidden></section>
   <section id="tab-settings" hidden></section>
   <div class="card" style="padding:6px 22px">
     <details class="d" id="outCard" style="border-top:0" data-fold="out">
@@ -192,25 +226,25 @@ pre{background:var(--sunken);border-radius:var(--r-md);padding:14px;overflow:aut
 <script>
 var $ = function (id) { return document.getElementById(id) }
 var KEY = 'course.admin.token'
-// requests：每个课次输入框里正在写的要求。重绘很频繁，不记住就会把写到一半的字冲掉。
-// open：哪些折叠块是展开的。整页 innerHTML 重绘很频繁（每次操作后、每 20 秒轮询一次），
-// 不记住展开状态的话，用户点开的课次每 20 秒自己收回去一次——"我什么都没动，它自己收了"。
-// key 用块自身的标识（课程名/课次 key/固定名），与 DOM 位置无关。
-var state = { status: null, balance: null, config: null, tab: 'overview', busy: false, requests: {}, uploads: {}, open: {} }
 var OPEN_KEY = 'course.admin.open'
-
+var SEL_KEY = 'course.admin.sel'
+var state = {
+  status: null, balance: null, config: null, storage: null,
+  tab: 'overview', busy: false, requests: {}, uploads: {}, open: {},
+  sel: { tag: '', year: 'all', course: '', lesson: '', sort: 'desc', rail: false },
+  preview: null
+}
 try {
   var savedOpen = JSON.parse(localStorage.getItem(OPEN_KEY) || '{}')
   if (savedOpen && typeof savedOpen === 'object') state.open = savedOpen
-} catch (e) { state.open = {} }
-
-function isOpen (key) { return state.open[key] === true }
-function foldAttrs (key) { return ' data-fold="' + esc(key) + '"' + (isOpen(key) ? ' open' : '') }
+  var savedSel = JSON.parse(localStorage.getItem(SEL_KEY) || '{}')
+  if (savedSel && typeof savedSel === 'object') state.sel = Object.assign(state.sel, savedSel)
+} catch (e) {}
 
 var LABELS = {
   discover: '扫描教学网', cycle: '跑一轮完整链路', 'cycle-all': '跑一轮完整链路',
   notify: '投递通知', doctor: '体检', backup: '备份账本', prune: '清理预演',
-  'prune-apply': '清理并删除原件', retry: '重跑这节课', republish: '重新发布',
+  'prune-apply': '清理并删除原件', retry: '放回队列', republish: '重新发布',
   revise: '按新要求重写模块', 'notify-retry': '重发失败通知'
 }
 var MODULE_TEXT = { approved: '已通过', draft: '草稿', reviewing: '审查中', revising: '重写中', pending: '待写', failed: '失败' }
@@ -220,6 +254,15 @@ var STAGE_TEXT = {
   notes_ready: '待发布', publishing: '发布中', published: '已发布',
   needs_attention: '卡住了', failed: '失败', completed: '已完成'
 }
+var STAGE_CLASS = { published: 'ok', completed: 'ok', needs_attention: 'bad', failed: 'bad', discovered: '', transcript_ready: 'warn', notes_ready: 'warn' }
+var INTEGRATION_KINDS = [
+  { key: 'integrated-note', label: '整合版笔记' },
+  { key: 'knowledge-map', label: '知识图谱（XMind）' },
+  { key: 'concept-track', label: '概念追踪表' },
+  { key: 'statute-reader', label: '法条精读表' },
+  { key: 'distinction-table', label: '辨析表' },
+  { key: 'case-library', label: '案例练习库' }
+]
 
 $('token').value = localStorage.getItem(KEY) || ''
 $('token').addEventListener('keydown', function (event) {
@@ -241,25 +284,44 @@ function money (value) {
   if (!amount) return '¥0'
   return amount < 1 ? '¥' + amount.toFixed(3) : '¥' + amount.toFixed(2)
 }
-function stagePill (stage) {
-  var cls = stage === 'published' ? 'ok' : stage === 'needs_attention' || stage === 'failed' ? 'bad' : ''
-  return '<span class="pill ' + cls + '"><span class="dot"></span>' + esc(STAGE_TEXT[stage] || stage) + '</span>'
+function bytes (value) {
+  var n = Number(value || 0)
+  if (!n) return '0'
+  var units = ['B', 'KB', 'MB', 'GB']
+  var i = 0
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i += 1 }
+  return (n < 10 && i > 0 ? n.toFixed(1) : Math.round(n)) + ' ' + units[i]
 }
-function taskByKey (key) {
-  var tasks = (state.status && state.status.ledger && state.status.ledger.tasks) || []
-  for (var i = 0; i < tasks.length; i += 1) if (tasks[i].replayKey === key) return tasks[i]
-  return null
+function icon (name) {
+  var paths = {
+    sort: '<path d="M4 7h10M4 12h7M4 17h4"/>',
+    chevron: '<path d="M9 6l6 6-6 6"/>',
+    rail: '<path d="M3 5h18v14H3z"/><path d="M9 5v14"/>',
+    up: '<path d="M12 19V5M6 11l6-6 6 6"/>',
+    file: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>',
+    plus: '<path d="M12 5v14M5 12h14"/>',
+    refresh: '<path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/>',
+    trash: '<path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/>'
+  }
+  return '<svg class="i" viewBox="0 0 24 24" aria-hidden="true">' + (paths[name] || '') + '</svg>'
 }
-function card (inner, cls) { return '<div class="card ' + (cls || '') + '">' + inner + '</div>' }
-
-/* ── 反馈：右下角提示 + 按钮置灰 + 顶部状态灯 ── */
-var toastTimer = null
+function setOpen (key, value) {
+  state.open[key] = value
+  try { localStorage.setItem(OPEN_KEY, JSON.stringify(state.open)) } catch (e) {}
+}
+function foldAttrs (key, forceOpen) {
+  var open = forceOpen === undefined ? state.open[key] === true : forceOpen
+  return ' data-fold="' + esc(key) + '"' + (open ? ' open' : '')
+}
+function saveSel () {
+  try { localStorage.setItem(SEL_KEY, JSON.stringify(state.sel)) } catch (e) {}
+}
 function toast (message, kind) {
   var el = $('toast')
   el.textContent = String(message)
   el.className = 'toast show ' + (kind || 'info')
-  clearTimeout(toastTimer)
-  if (kind !== 'error') toastTimer = setTimeout(function () { el.className = 'toast' }, 7000)
+  clearTimeout(toast.timer)
+  if (kind !== 'error') toast.timer = setTimeout(function () { el.className = 'toast' }, 7000)
 }
 function out (text) { $('out').textContent = String(text) }
 function setRunState (text, cls) {
@@ -268,10 +330,10 @@ function setRunState (text, cls) {
 }
 function busyButton (btn, text) {
   if (!btn || btn.tagName !== 'BUTTON') return function () {}
-  var old = btn.textContent
+  var old = btn.innerHTML
   btn.disabled = true
   btn.textContent = text || '处理中…'
-  return function () { btn.disabled = false; btn.textContent = old }
+  return function () { btn.disabled = false; btn.innerHTML = old }
 }
 function fail (error) {
   var text = (error && error.message) || String(error)
@@ -284,31 +346,23 @@ function run (fn) {
     if (pending && typeof pending.catch === 'function') pending.catch(fail)
   } catch (error) { fail(error) }
 }
-function isDirty () {
-  var active = document.activeElement
-  if (active && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName)) return true
-  var boxes = document.querySelectorAll('[data-request],[data-pw="next"]')
-  for (var i = 0; i < boxes.length; i += 1) if (boxes[i].value) return true
-  return false
+function taskByKey (key) {
+  var tasks = (state.status && state.status.ledger && state.status.ledger.tasks) || []
+  for (var i = 0; i < tasks.length; i += 1) if (tasks[i].replayKey === key) return tasks[i]
+  return null
 }
-function setStatus (key, text, kind) {
-  var el = document.querySelector('[data-status="' + key + '"]')
-  if (!el) return
-  el.className = 'status ' + (kind || '')
-  el.textContent = text
-}
+function tasks () { return (state.status && state.status.ledger && state.status.ledger.tasks) || [] }
+function tagsOf () { return (state.status && state.status.tags) || { order: [], courses: {}, lessons: {} } }
 
 async function load (options) {
   options = options || {}
   var res = await fetch('/api/admin/status', { headers: headers(false) })
-  var data = await res.json()
+  var data = await res.json().catch(function () { return {} })
   if (!res.ok) {
-    var reason = data.error === 'admin_token_unconfigured'
-      ? '服务端没有配置 COURSE_ADMIN_TOKEN，管理台已关闭。'
-      : data.error === 'too_many_attempts'
-        ? '凭据错误次数过多，请等 5 分钟再试。'
-        : $('token').value.trim() ? '凭据不对' : '未登录：点右上角 ··· 填入密码或主令牌'
-    $('tab-overview').innerHTML = card('<h2>需要登录</h2><p class="muted">' + reason + '</p>')
+    var reason = data.error === 'admin_token_unconfigured' ? '服务端没有配置 COURSE_ADMIN_TOKEN'
+      : data.error === 'too_many_attempts' ? '凭据错误次数过多，请等 5 分钟'
+      : $('token').value.trim() ? '凭据不对' : '未登录：点右上角 ··· 填入密码或主令牌'
+    $('tab-overview').innerHTML = card('<h2>需要登录</h2><p class="muted">' + esc(reason) + '</p>')
     setRunState('未登录', 'bad')
     return false
   }
@@ -320,6 +374,13 @@ async function load (options) {
   render()
   if (!state.balance && !options.quiet) refreshBalance()
   return true
+}
+function isDirty () {
+  var active = document.activeElement
+  if (active && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName)) return true
+  var boxes = document.querySelectorAll('[data-request],[data-pw="next"],[data-newtag]')
+  for (var i = 0; i < boxes.length; i += 1) if (boxes[i].value) return true
+  return false
 }
 function refreshBalance () {
   state.balance = null
@@ -333,77 +394,70 @@ function renderRunState () {
   var running = state.status && state.status.running
   setRunState(running ? '正在运行 ' + running.action : '空闲', running ? 'warn' : 'ok')
 }
+/** 重绘前把 DOM 里的折叠状态抄回来：程序性改 open 不一定及时触发 toggle 事件。 */
+function captureFolds () {
+  document.querySelectorAll('details[data-fold]').forEach(function (node) {
+    state.open[node.dataset.fold] = node.open
+  })
+}
 function render () {
+  captureFolds()
   document.querySelectorAll('.seg button').forEach(function (btn) {
     var on = btn.dataset.tab === state.tab
     btn.setAttribute('aria-selected', on ? 'true' : 'false')
     $('tab-' + btn.dataset.tab).hidden = !on
   })
   renderRunState()
-  renderOverview(); renderCourses(); renderNotes(); renderSettings()
+  renderOverview(); renderCourses(); renderSettings()
 }
+function card (inner, style) { return '<div class="card"' + (style ? ' style="' + style + '"' : '') + '>' + inner + '</div>' }
 
-/* ── 概览：先回答"现在要做什么" ── */
+/* ── 概览 ── */
 function renderOverview () {
   if (!state.status) return
   var s = state.status
   var t = s.todos || {}
-  var ledger = s.ledger || {}
-  var tasks = ledger.tasks || []
+  var all = tasks()
   var counts = { published: 0, running: 0, waiting: 0 }
-  tasks.forEach(function (task) {
+  all.forEach(function (task) {
     if (task.stage === 'published') counts.published += 1
     else if (task.stage === 'discovered') counts.waiting += 1
     else counts.running += 1
   })
-
-  // 待办：能点一下就去的，才放在第一屏
   var todos = []
   ;(t.stuck || []).forEach(function (item) {
-    todos.push({ title: item.courseName + ' · ' + item.title, note: '连续失败已停止重试：' + String(item.lastError || '').slice(0, 60), label: '去重跑', tab: 'courses' })
+    todos.push({ title: item.courseName + ' · ' + item.title, note: '已停止重试', label: '去处理', tab: 'courses' })
   })
   ;(t.missingMaterials || []).forEach(function (item) {
     todos.push({ title: item.courseName + ' · ' + item.title, note: '缺课件', label: '传课件', tab: 'courses' })
   })
-  var channel = s.channel || { ok: true }
-  if (channel.ok === false) {
-    todos.push({ title: '推送发不出去', note: '通道未就绪', label: '查看', tab: 'overview' })
-  }
-  if (t.failedDeliveries) {
-    todos.push({ title: t.failedDeliveries + ' 条通知发送失败', note: '未送达', label: '重发', tab: 'notes' })
-  }
+  if (s.channel && s.channel.ok === false) todos.push({ title: '推送发不出去', note: '通道未就绪', label: '查看', tab: 'overview' })
+  if (t.failedDeliveries) todos.push({ title: t.failedDeliveries + ' 条通知发送失败', note: '未送达', label: '重发', tab: 'settings' })
 
   var hero = todos.length
-    ? '<h1>' + todos.length + ' 件事待处理</h1>' +
-      todos.map(function (item) {
-        return '<div class="todo"><div class="t"><b>' + esc(item.title) + '</b><span>' + esc(item.note) + '</span></div>' +
-          '<button class="act" data-go="' + item.tab + '">' + esc(item.label) + '</button></div>'
-      }).join('')
+    ? '<h1>' + todos.length + ' 件事待处理</h1>' + todos.map(function (item) {
+      return '<div class="todo"><div class="t"><b>' + esc(item.title) + '</b><span>' + esc(item.note) + '</span></div>' +
+        '<button class="act" data-go="' + item.tab + '">' + esc(item.label) + '</button></div>'
+    }).join('')
     : '<h1>无待办</h1><div class="empty-ok"><span class="pill ok"><span class="dot"></span>一切正常</span></div>'
 
   var spend = s.spend || { asrCny: 0, notesCny: 0, totalCny: 0 }
   var pricing = s.pricing || {}
-
   $('tab-overview').innerHTML =
     card(hero) +
-    card(
-      '<div class="grid three">' +
+    card('<div class="grid three">' +
         '<div class="stat">' + counts.published + '<small>已发布</small></div>' +
         '<div class="stat">' + counts.running + '<small>进行中</small></div>' +
         '<div class="stat">' + counts.waiting + '<small>还没轮到</small></div>' +
-      '</div>',
-      ''
-    ) +
+      '</div>') +
     '<div class="grid two">' +
-      card('<h2>花费</h2><div class="stat">' + money(spend.totalCny) + '<small>已发生合计 · 转写 ' + money(spend.asrCny) + ' + 笔记 ' + money(spend.notesCny) + '</small></div>' +
+      card('<h2>花费</h2><div class="stat">' + money(spend.totalCny) + '<small>转写 ' + money(spend.asrCny) + ' + 笔记 ' + money(spend.notesCny) + '</small></div>' +
         '<div class="row" style="margin-top:14px;align-items:flex-start">' + balancesHtml() + '</div>' +
         '<div class="row" style="margin-top:8px"><button class="act quiet" data-act="refresh-balance">刷新余额</button></div>' +
-        '<div class="tiny muted" style="margin-top:10px">转写 ¥' + (pricing.asrPerHourCny || 0.288) + '/小时（按语音时长）· 笔记 ¥' + (pricing.noteInputPerMillionCny || 1) + ' / ¥' + (pricing.noteOutputPerMillionCny || 4) + ' 每百万 token（输入/输出）</div>') +
+        '<div class="tiny muted" style="margin-top:10px">转写 ¥' + (pricing.asrPerHourCny || 0.288) + '/小时（按语音时长）· 笔记 ¥' + (pricing.noteInputPerMillionCny || 1) + ' / ¥' + (pricing.noteOutputPerMillionCny || 4) + ' 每百万 token</div>') +
       card('<h2>推送通道</h2>' + channelHtml()) +
-    '</div>' +
-    card('<details class="d" style="border-top:0"' + foldAttrs('overview:runs') + '><summary><span class="ttl">最近运行</span><span class="muted small">' + ((s.runs || []).length) + ' 次</span></summary><div class="body">' + runsTable() + '</div></details>')
+    '</div>'
 }
-
 function balancesHtml () {
   var b = state.balance
   if (!b) return '<span class="muted small">余额加载中…</span>'
@@ -434,113 +488,194 @@ function channelHtml () {
   }
   var f = c.fallback || {}
   rows.push('<div style="margin-top:8px"><span class="pill ' + (f.configured ? 'ok' : '') + '"><span class="dot"></span>备用通道 ' + (f.configured ? esc(f.kind) : '未配置') + '</span></div>')
+  rows.push('<div style="margin-top:8px"><span class="pill ' + ((state.status.digest && state.status.digest.to) ? 'ok' : '') + '"><span class="dot"></span>邮件日报 ' + ((state.status.digest && state.status.digest.to) ? '每天 07:00' : '未配置') + '</span></div>')
   return rows.join('')
 }
-function runsTable () {
-  var runs = (state.status.runs || []).slice(0, 6)
-  if (!runs.length) return '<p class="muted small">还没有运行记录</p>'
-  return '<table><thead><tr><th>时间</th><th>运行</th><th>结果</th></tr></thead><tbody>' +
-    runs.map(function (r) {
-      var tasks = (r.summary && r.summary.tasks) || []
-      var ok = tasks.filter(function (x) { return x.ok }).length
-      return '<tr><td class="small">' + esc(String(r.at).slice(5, 16).replace('T', ' ')) + '</td><td class="small">' + esc(r.name) + '</td><td class="small">' +
-        (r.summary ? ok + ' 成功 / ' + (tasks.length - ok) + ' 失败' : '—') + '</td></tr>'
-    }).join('') + '</tbody></table>'
-}
 
-/* ── 课程：按课程折叠，课次再折叠 ── */
-function materialBlock (task) {
-  var list = (task.materials || []).map(function (m) {
-    return '<span class="pill">' + esc(m.name) + (m.scope === 'course' ? ' · 全课程' : '') + ' · ' + m.slideCount + ' 页</span>'
-  }).join(' ')
-  var key = task.replayKey
-  var status = state.uploads[key] || ''
-  return '<div class="drop" data-drop="' + esc(key) + '">' +
-    '<input class="hidden-file" type="file" data-file="' + esc(key) + '" accept=".pptx,.pdf,.docx,.xlsx,.md,.txt">' +
-    '<button class="act" data-act="pick" data-key="' + esc(key) + '">选择课件并上传</button>' +
-    '<span class="small muted">或拖入 .pptx / .pdf</span>' +
-    '</div>' +
-    '<div class="status ' + (status.indexOf('失败') === 0 ? 'bad' : status ? 'ok' : '') + '" data-status="' + esc(key) + '">' + esc(status) + '</div>' +
-    (list ? '<div style="margin-top:8px">' + list + '</div>' : '<p class="small muted" style="margin:8px 0 0">无课件</p>')
+/* ── 课程：访达分栏 ── */
+function lessonYear (task) {
+  var match = String(task.title || '').match(/(20\d{2})/)
+  return match ? match[1] : ''
 }
-
-function lessonDetails (task, index) {
-  var lesson = task.lesson || {}
-  var cost = task.cost || {}
-  var title = String(task.title || '') + (task.courseName ? '' : '')
-  var costText = cost.totalCny ? '转写 ' + money(cost.asrCny) + ' · 笔记 ' + money(cost.notesCny) : '还没花钱'
-  var actions = '<div class="row" style="margin-top:12px">' +
-    '<button class="act primary" data-act="cycle" data-key="' + esc(task.replayKey) + '">跑一轮</button>' +
-    '<button class="act" data-act="retry" data-key="' + esc(task.replayKey) + '">重跑</button>' +
-    (task.artifacts && task.artifacts.transcriptPath ? '<button class="act" data-act="republish" data-key="' + esc(task.replayKey) + '">重新发布</button>' : '') +
-    '</div>'
-  var metaBits = [esc(task.replayKey), '尝试 ' + task.attempts + ' 次']
-  if (task.updatedAt) metaBits.push('更新于 ' + esc(String(task.updatedAt).slice(5, 16).replace('T', ' ')))
-  if (lesson.finalChars) metaBits.push('成品 ' + lesson.finalChars + ' 字')
-  if (cost.usage) metaBits.push(cost.usage.calls + ' 次模型调用')
-  var meta = '<div class="tiny muted" style="margin-bottom:10px">' + metaBits.join(' · ') + '</div>'
-  var error = task.lastError ? '<p class="small" style="color:var(--danger);margin:10px 0 0">最近错误：' + esc(String(task.lastError).slice(0, 200)) + '</p>' : ''
-  var noteLine = ''
-  return '<details class="d"' + foldAttrs('lesson:' + task.replayKey) + '><summary><span class="ttl">' + esc(title) + '</span>' + stagePill(task.stage) +
-    '<span class="muted small">' + esc(costText) + '</span></summary>' +
-    '<div class="body">' + meta + noteLine + materialBlock(task) + error + actions + '</div></details>'
+function courseList () {
+  var groups = new Map()
+  tasks().forEach(function (task) {
+    var course = task.courseName || '未分类'
+    if (!groups.has(course)) groups.set(course, [])
+    groups.get(course).push(task)
+  })
+  return [...groups.entries()].map(function ([course, list]) {
+    var years = [...new Set(list.map(lessonYear).filter(Boolean))].sort()
+    return {
+      course: course,
+      lessons: list,
+      year: years[years.length - 1] || '',
+      tags: (tagsOf().courses || {})[course] || [],
+      published: list.filter(function (item) { return item.stage === 'published' }).length,
+      stuck: list.some(function (item) { return item.stage === 'needs_attention' || item.stage === 'failed' })
+    }
+  }).sort(function (a, b) { return String(a.course).localeCompare(String(b.course), 'zh') })
+}
+function visibleCourses () {
+  return courseList().filter(function (item) {
+    if (state.sel.year !== 'all' && item.year !== state.sel.year) return false
+    if (state.sel.tag && !(item.tags || []).includes(state.sel.tag)) return false
+    return true
+  })
+}
+function lessonsOf (course) {
+  var list = tasks().filter(function (task) { return (task.courseName || '未分类') === course })
+  list.sort(function (a, b) { return String(a.title).localeCompare(String(b.title)) })
+  return state.sel.sort === 'asc' ? list : list.reverse()
 }
 
 function renderCourses () {
-  var tasks = (state.status.ledger && state.status.ledger.tasks) || []
-  var groups = {}
-  tasks.forEach(function (t) {
-    var key = t.courseName || '未分类'
-    groups[key] = groups[key] || []
-    groups[key].push(t)
+  var all = courseList()
+  var shown = visibleCourses()
+  var tags = (tagsOf().order || [])
+  var years = [...new Set(all.map(function (item) { return item.year }).filter(Boolean))].sort().reverse()
+
+  // 左：筛选栏
+  var railItems = ['<div class="tag-row" data-act="filter-all"' + (state.sel.tag || state.sel.year !== 'all' ? '' : ' aria-selected="true"') + '>' +
+    '<span class="name">全部</span><span class="meta">' + all.length + '</span></div>']
+  years.forEach(function (year) {
+    railItems.push('<div class="tag-row" data-act="filter-year" data-value="' + esc(year) + '"' +
+      (state.sel.year === year ? ' aria-selected="true"' : '') + '><span class="name">' + esc(year) + '</span>' +
+      '<span class="meta">' + all.filter(function (item) { return item.year === year }).length + '</span></div>')
   })
-  var html = Object.keys(groups).map(function (course) {
-    var list = groups[course].slice().sort(function (a, b) { return String(b.title).localeCompare(String(a.title)) })
-    var done = list.filter(function (t) { return t.stage === 'published' }).length
-    var alert = list.some(function (t) { return t.stage === 'needs_attention' || t.stage === 'failed' })
-    return '<details class="d"' + foldAttrs('course:' + course) + '><summary><span class="ttl">' + esc(course) + '</span>' +
-      '<span class="muted small">' + done + ' / ' + list.length + ' 讲已发布</span>' +
-      (alert ? '<span class="pill bad"><span class="dot"></span>有卡住的</span>' : '') + '</summary>' +
-      '<div class="body">' + list.map(lessonDetails).join('') + '</div></details>'
+  if (tags.length) {
+    railItems.push('<h4>标签</h4>')
+    tags.forEach(function (tag, index) {
+      railItems.push('<div class="tag-row" draggable="true" data-tag="' + esc(tag) + '" data-index="' + index + '"' +
+        (state.sel.tag === tag ? ' aria-selected="true"' : '') + '>' +
+        '<span class="grip" title="拖动排序">⋮⋮</span><span class="name">' + esc(tag) + '</span></div>')
+    })
+  }
+  var rail = '<div class="col" id="rail">' +
+    '<div class="colhead">筛选<span class="spacer"></span></div><div class="rail">' + railItems.join('') + '</div></div>'
+
+  // 中一：课程
+  var courseItems = shown.map(function (item) {
+    var dot = item.stuck ? 'bad' : item.published === item.lessons.length ? 'ok' : 'warn'
+    return '<div class="item" data-act="pick-course" data-value="' + esc(item.course) + '"' +
+      (state.sel.course === item.course ? ' aria-selected="true"' : '') + '>' +
+      '<span class="dot ' + dot + '"></span><span class="name">' + esc(item.course) + '</span>' +
+      '<span class="meta">' + item.published + '/' + item.lessons.length + '</span></div>'
   }).join('')
-  var parked = state.status.unassigned || []
-  $('tab-courses').innerHTML = card(
-    (html || '<p class="muted">账本里还没有课次</p>')) +
-    (parked.length ? card('<h2>归属不明的课件</h2><div>' + parked.map(function (n) { return '<span class="pill warn">' + esc(n) + '</span>' }).join(' ') + '</div>' +
-      '<p class="small muted" style="margin-top:10px">改名成 课程__课次.pptx 放进收件箱，再跑一次归档</p>') : '')
+  var courses = '<div class="col" id="courses">' +
+    '<div class="colhead"><button class="icon" data-act="rail-toggle" title="筛选">' + icon('rail') + '</button>' +
+    '<span>课程 · ' + shown.length + '</span></div>' + (courseItems || '<div class="item muted">没有匹配的课程</div>') + '</div>'
+
+  // 中二：课次
+  var lessonItems = ''
+  if (state.sel.course) {
+    lessonItems = '<div class="item" data-act="pick-lesson" data-value="__multi__"' +
+      (state.sel.lesson === '__multi__' ? ' aria-selected="true"' : '') + '><span class="name">多节课程</span>' +
+      '<span class="meta">整合</span></div>'
+    lessonItems += lessonsOf(state.sel.course).map(function (task) {
+      return '<div class="item" data-act="pick-lesson" data-value="' + esc(task.replayKey) + '"' +
+        (state.sel.lesson === task.replayKey ? ' aria-selected="true"' : '') + '>' +
+        '<span class="dot ' + (STAGE_CLASS[task.stage] || '') + '"></span><span class="name">' + esc(task.title) + '</span></div>'
+    }).join('')
+  }
+  var lessons = '<div class="col" id="lessons">' +
+    '<div class="colhead"><span>课次</span><span class="spacer"></span>' +
+    (state.sel.course ? '<button class="icon" data-act="sort-toggle" title="' + (state.sel.sort === 'asc' ? '正序' : '倒序') + '">' + icon('sort') + '</button>' : '') +
+    '</div>' + lessonItems + '</div>'
+
+  // 右：详情
+  var detail = '<div class="col" id="detail"><div class="detail">' + detailHtml() + '</div></div>'
+  $('tab-courses').innerHTML = '<div class="board' + (state.sel.rail ? '' : ' rail-hidden') + '">' + rail + courses + lessons + detail + '</div>'
 }
 
-/* ── 笔记：逐模块重写 ── */
-function renderNotes () {
-  var tasks = (state.status.ledger && state.status.ledger.tasks) || []
-  var withNotes = tasks.filter(function (t) { return t.lesson && (t.lesson.modules || []).length })
-  var cards = withNotes.map(function (t) {
-    var rows = t.lesson.modules.map(function (m) {
-      var id = m.outlineNodeId || m.id
-      return '<tr><td>' + esc(m.title || m.id) + '</td><td class="small muted">' + m.chars + ' 字</td><td class="small muted">' + esc(MODULE_TEXT[m.status] || m.status) + '</td>' +
-        '<td style="text-align:right"><button class="act quiet" data-act="revise" data-key="' + esc(t.replayKey) + '" data-module="' + esc(id) + '">重写</button></td></tr>'
-    }).join('')
-    return '<details class="d"' + foldAttrs('note:' + t.replayKey) + '><summary><span class="ttl">' + esc(t.courseName + ' · ' + t.title) + '</span>' +
-      '<span class="muted small">成品 ' + t.lesson.finalChars + ' 字 · ' + t.lesson.modules.length + ' 个模块</span></summary>' +
-      '<div class="body">' +
-      '<table><thead><tr><th>模块</th><th>字数</th><th>状态</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>' +
-      '<div class="row" style="margin-top:12px"><input data-request="' + esc(t.replayKey) + '" value="' + esc(state.requests[t.replayKey] || '') + '" placeholder="修改要求（例如：这一段太长，压缩到 1200 字并拆成列表）">' +
-      '<button class="act primary" data-act="revise-first" data-key="' + esc(t.replayKey) + '">按这个要求重写</button></div>' +
-      '</div></details>'
+function detailHtml () {
+  if (!state.sel.course) return '<p class="muted">选一门课</p>'
+  if (state.sel.lesson === '__multi__') return integrationHtml()
+  var task = taskByKey(state.sel.lesson)
+  if (!task) return '<p class="muted">选一节课</p>'
+  var cost = task.cost || {}
+  var lesson = task.lesson || {}
+  var tags = ((tagsOf().lessons || {})[task.replayKey] || [])
+  var head = '<h2>' + esc(task.title) + '</h2>' +
+    '<p class="sub">' + esc(task.courseName) + ' · <span class="pill ' + (STAGE_CLASS[task.stage] || '') + '">' + esc(STAGE_TEXT[task.stage] || task.stage) + '</span>' +
+    ' · 尝试 ' + task.attempts + ' 次 · 转写 ' + money(cost.asrCny) + ' · 笔记 ' + money(cost.notesCny) + '</p>' +
+    (task.lastError ? '<p class="small" style="color:var(--danger)">' + esc(String(task.lastError).slice(0, 200)) + '</p>' : '')
+
+  var actions = '<div class="block"><h3>操作</h3><div class="row">' +
+    '<button class="act primary" data-act="cycle" data-key="' + esc(task.replayKey) + '">现在处理这一节</button>' +
+    '<button class="act" data-act="retry" data-key="' + esc(task.replayKey) + '">解除卡住，放回队列</button>' +
+    (task.artifacts && task.artifacts.transcriptPath ? '<button class="act" data-act="republish" data-key="' + esc(task.replayKey) + '">重新发布</button>' : '') +
+    (task.artifacts && task.artifacts.slug ? '<a class="act" target="_blank" rel="noopener" href="/' + esc(task.artifacts.slug) + '.html">看笔记</a>' : '') +
+    '</div></div>'
+
+  var files = (task.materials || []).map(function (material) {
+    var selected = state.preview && state.preview.course === task.courseName && state.preview.name === material.name
+    return '<div class="file" data-act="open-material" data-value="' + esc(material.name) + '"' + (selected ? ' aria-selected="true"' : '') + '>' +
+      icon('file') + '<span class="name">' + esc(material.name) + (material.scope === 'course' ? ' · 全课程' : '') + '</span>' +
+      '<span class="meta">' + material.slideCount + ' 页</span></div>'
   }).join('')
-  var deliveries = (state.status.ledger && state.status.ledger.deliveries) || []
-  var failed = (state.status.todos && state.status.todos.failedDeliveries) || 0
-  var rows = deliveries.slice(0, 12).map(function (x) {
-    var cls = x.status === 'sent' ? 'ok' : x.status === 'failed' ? 'bad' : ''
-    return '<tr><td class="small">' + esc(x.purpose) + '</td><td><span class="pill ' + cls + '">' + esc(x.status) + '</span></td>' +
-      '<td class="small muted">' + esc(String(x.sent_at || x.created_at || '').slice(5, 16).replace('T', ' ')) + '</td>' +
-      '<td class="tiny muted">' + esc(String(x.last_error || '').slice(0, 60)) + '</td></tr>'
+  var deck = '<div class="block"><h3>课件</h3>' + (files || '<p class="small muted">无课件</p>') +
+    '<div class="row" style="margin-top:8px">' +
+    '<input class="hidden-file" type="file" multiple data-file="' + esc(task.replayKey) + '" accept=".pptx,.pdf,.docx,.xlsx,.md,.txt">' +
+    '<button class="act" data-act="pick-file" data-key="' + esc(task.replayKey) + '">' + icon('plus') + '上传课件</button>' +
+    '<span class="status" data-status="' + esc(task.replayKey) + '">' + esc(state.uploads[task.replayKey] || '') + '</span>' +
+    '</div>' + previewHtml(task) + '</div>'
+
+  var tagBlock = '<div class="block"><h3>标签</h3>' +
+    (tags.length ? tags.map(function (tag) {
+      return '<span class="tag">' + esc(tag) + '<button data-act="remove-tag" data-key="' + esc(task.replayKey) + '" data-tag="' + esc(tag) + '" title="移除">×</button></span>'
+    }).join('') : '<span class="small muted">暂无标签</span>') +
+    '<div class="row" style="margin-top:8px"><input data-newtag="' + esc(task.replayKey) + '" placeholder="新增标签，回车确认" style="max-width:240px">' +
+    '<button class="act" data-act="add-tag" data-key="' + esc(task.replayKey) + '">添加</button></div></div>'
+
+  var modules = (lesson.modules || []).map(function (module) {
+    var id = module.outlineNodeId || module.id
+    return '<tr><td>' + esc(module.title || module.id) + '</td><td class="small muted">' + module.chars + ' 字</td>' +
+      '<td class="small muted">' + esc(MODULE_TEXT[module.status] || module.status) + '</td>' +
+      '<td style="text-align:right"><button class="act quiet" data-act="revise" data-key="' + esc(task.replayKey) + '" data-module="' + esc(id) + '">重写</button></td></tr>'
   }).join('')
-  $('tab-notes').innerHTML = card(
-      (cards || '<p class="muted">还没有带模块状态的笔记</p>') +
-      (failed ? '<div class="row" style="margin-top:14px"><button class="act primary" data-act="notify-retry">把 ' + failed + ' 条失败通知放回队列</button></div>' : '')) +
-    card('<details class="d" style="border-top:0"' + foldAttrs('notes:deliveries') + '><summary><span class="ttl">通知记录</span><span class="muted small">最近 ' + Math.min(12, deliveries.length) + ' 条</span></summary>' +
-      '<div class="body">' + (rows ? '<table><thead><tr><th>用途</th><th>状态</th><th>时间</th><th>错误</th></tr></thead><tbody>' + rows + '</tbody></table>' : '<p class="muted small">队列为空</p>') + '</div></details>')
+  var noteBlock = lesson.modules && lesson.modules.length
+    ? '<div class="block"><h3>笔记</h3><p class="small muted">成品 ' + lesson.finalChars + ' 字 · ' + lesson.modules.length + ' 个模块</p>' +
+      '<table><tbody>' + modules + '</tbody></table>' +
+      '<div class="row" style="margin-top:10px"><input data-request="' + esc(task.replayKey) + '" value="' + esc(state.requests[task.replayKey] || '') + '" placeholder="修改要求，回车重写第一个模块">' +
+      '<button class="act" data-act="revise-first" data-key="' + esc(task.replayKey) + '">按这个要求重写</button></div></div>'
+    : ''
+
+  return head + actions + deck + tagBlock + noteBlock
+}
+
+function previewHtml (task) {
+  var preview = state.preview
+  if (!preview || preview.course !== task.courseName || preview.loading) {
+    return preview && preview.loading ? '<div class="pages">加载中…</div>' : ''
+  }
+  var pages = (preview.pages || []).map(function (page) {
+    return '<div class="page"><div class="no">第 ' + page.slideNumber + ' 页</div>' + esc(page.text || '（本页无文字）') + '</div>'
+  }).join('')
+  return '<div class="pages" style="margin-top:8px">' +
+    '<div class="row" style="justify-content:space-between"><span class="tiny muted">' + esc(preview.name) + ' · 共 ' + preview.slideCount + ' 页</span>' +
+    '<button class="icon" data-act="close-material" title="关闭预览">×</button></div>' +
+    (pages || '<div class="muted small">没有文字</div>') + '</div>'
+}
+
+function integrationHtml () {
+  var course = state.sel.course
+  var items = INTEGRATION_KINDS.map(function (kind) {
+    return '<div class="item" data-act="integrate" data-value="' + esc(kind.key) + '">' +
+      '<span class="name">' + esc(kind.label) + '</span><span class="meta">未生成</span></div>'
+  }).join('')
+  return '<h2>' + esc(course) + ' · 多节课程</h2><p class="sub">' + tasks().filter(function (item) { return item.courseName === course }).length + ' 节 · 整合材料</p>' +
+    '<div class="block"><h3>整合材料</h3>' + items + '</div>' +
+    '<div class="block"><h3>课程标签</h3>' + courseTagHtml(course) + '</div>'
+}
+
+function courseTagHtml (course) {
+  var tags = ((tagsOf().courses || {})[course] || [])
+  return (tags.length ? tags.map(function (tag) {
+    return '<span class="tag">' + esc(tag) + '<button data-act="remove-course-tag" data-course="' + esc(course) + '" data-tag="' + esc(tag) + '" title="移除">×</button></span>'
+  }).join('') : '<span class="small muted">暂无标签</span>') +
+    '<div class="row" style="margin-top:8px"><input data-newcoursetag="' + esc(course) + '" placeholder="给这门课加标签，回车确认" style="max-width:260px">' +
+    '<button class="act" data-act="add-course-tag" data-course="' + esc(course) + '">添加</button></div>'
 }
 
 /* ── 设置 ── */
@@ -555,54 +690,72 @@ function renderSettings () {
         return '<option' + (String(value) === o ? ' selected' : '') + '>' + esc(o) + '</option>'
       }).join('') + '</select>'
     } else if (spec.type === 'boolean') {
-      input = '<select data-cfg="' + key + '">' +
-        '<option value=""' + (value === '' ? ' selected' : '') + '>跟随环境变量</option>' +
+      input = '<select data-cfg="' + key + '"><option value=""' + (value === '' ? ' selected' : '') + '>跟随环境变量</option>' +
         '<option value="true"' + (value === true ? ' selected' : '') + '>开启</option>' +
         '<option value="false"' + (value === false ? ' selected' : '') + '>关闭</option></select>'
     } else {
       input = '<input data-cfg="' + key + '" type="' + (spec.type === 'number' ? 'number' : 'text') + '" value="' + esc(value) + '" placeholder="跟随环境变量">'
     }
-    return '<div class="field"><label>' + esc(spec.label || key) + '</label>' + input +
-      (spec.hint ? '<div class="tiny muted" style="margin-top:4px">' + esc(spec.hint) + '</div>' : '') + '</div>'
+    return '<div class="field"><label>' + esc(spec.label || key) + '</label>' + input + '</div>'
   }).join('')
 
-  $('tab-settings').innerHTML = card(
-      '<div class="row"><button class="act primary" data-act="cycle-all">跑一轮完整链路</button>' +
-      '<button class="act" data-act="discover">扫描教学网</button>' +
-      '<button class="act" data-act="notify">投递通知</button>' +
-      '<button class="act" data-act="doctor">体检</button>' +
-      '<button class="act" data-act="backup">备份账本</button></div>' +
-      '') +
-    card('<details class="d" style="border-top:0"' + foldAttrs('settings:params') + '><summary><span class="ttl">运行参数</span><span class="muted small">篇幅、并发、成本窗口</span></summary>' +
+  var deliveries = (state.status.ledger && state.status.ledger.deliveries) || []
+  var failed = (state.status.todos && state.status.todos.failedDeliveries) || 0
+  var rows = deliveries.slice(0, 10).map(function (x) {
+    var cls = x.status === 'sent' ? 'ok' : x.status === 'failed' ? 'bad' : ''
+    return '<tr><td class="small">' + esc(x.purpose) + '</td><td><span class="pill ' + cls + '">' + esc(x.status) + '</span></td>' +
+      '<td class="small muted">' + esc(String(x.sent_at || x.created_at || '').slice(5, 16).replace('T', ' ')) + '</td>' +
+      '<td class="tiny muted">' + esc(String(x.last_error || '').slice(0, 60)) + '</td></tr>'
+  }).join('')
+
+  $('tab-settings').innerHTML =
+    card('<div class="row"><button class="act primary" data-act="cycle-all">跑一轮完整链路</button>' +
+      '<button class="act" data-act="discover">扫描教学网</button></div>') +
+    card('<details class="d"' + foldAttrs('settings:maintenance', false) + '><summary><span class="ttl">维护</span><span class="muted small">通知、体检、备份、清理</span></summary>' +
+      '<div class="body"><div class="row"><button class="act" data-act="notify">投递通知</button>' +
+      '<button class="act" data-act="doctor">体检</button><button class="act" data-act="backup">备份账本</button>' +
+      '<button class="act" data-act="prune">清理预演</button><button class="act danger" data-act="prune-apply">清理并删除</button></div></div></details>' +
+      '<details class="d"' + foldAttrs('settings:notify') + '><summary><span class="ttl">通知记录</span><span class="muted small">最近 ' + Math.min(10, deliveries.length) + ' 条</span></summary>' +
+      '<div class="body">' + (rows ? '<table><tbody>' + rows + '</tbody></table>' : '<p class="muted small">队列为空</p>') +
+      (failed ? '<div class="row" style="margin-top:10px"><button class="act primary" data-act="notify-retry">把 ' + failed + ' 条失败通知放回队列</button></div>' : '') + '</div></details>') +
+    card('<details class="d"' + foldAttrs('settings:storage') + '><summary><span class="ttl">存储占用</span><span class="muted small">' + (state.storage ? bytes(state.storage.totalBytes) : '点开查看') + '</span></summary>' +
+      '<div class="body" id="storageBody">' + storageHtml() + '</div></details>') +
+    card('<details class="d"' + foldAttrs('settings:params') + '><summary><span class="ttl">运行参数</span><span class="muted small">篇幅、并发、成本窗口</span></summary>' +
       '<div class="body">' + fields + '<div class="row"><button class="act primary" data-act="save-config">保存设置</button></div>' +
       '<div class="tiny muted" style="margin-top:8px">' + esc(c.path || '') + '</div></div></details>' +
-      '<details class="d"' + foldAttrs('settings:password') + '><summary><span class="ttl">登录密码</span><span class="muted small">' + ((state.status.auth && state.status.auth.passwordSet) ? '已设置' : '未设置') + '</span></summary>' +
-      '<div class="body">' + passwordPanel() + '</div></details>' +
-      '<details class="d"' + foldAttrs('settings:prune') + '><summary><span class="ttl">清理原件</span><span class="muted small">不可撤销</span></summary>' +
-      '<div class="body"><p class="small muted">只删通过校验的原始媒体与 PPT；转录稿、课件文字、笔记保留。</p>' +
-      '<div class="row"><button class="act" data-act="prune">清理预演</button><button class="act danger" data-act="prune-apply">清理并删除</button></div></div></details>')
+      '<details class="d"' + foldAttrs('settings:password') + '><summary><span class="ttl">登录密码</span><span class="muted small">' +
+      ((state.status.auth && state.status.auth.passwordSet) ? '已设置' : '未设置') + '</span></summary><div class="body">' + passwordPanel() + '</div></details>')
 }
 
+function storageHtml () {
+  if (!state.storage) {
+    return '<div class="row"><button class="act" data-act="storage-load">查看占用</button></div>'
+  }
+  var list = state.storage.categories || []
+  var total = state.storage.totalBytes || 1
+  var rows = list.map(function (item) {
+    var percent = Math.max(2, Math.round((item.bytes / total) * 100))
+    return '<div class="storage-row"><div>' + esc(item.label) + '</div><div class="muted small">' + bytes(item.bytes) + '</div>' +
+      '<div class="hint">' + esc(item.hint) + '</div>' +
+      '<div style="grid-column:1/-1"><div class="bar"><i style="width:' + percent + '%"></i></div></div></div>'
+  }).join('')
+  var disk = state.storage.disk
+  return rows + (disk ? '<p class="small muted" style="margin-top:12px">磁盘：已用 ' + bytes(disk.totalBytes - disk.freeBytes) + ' / 共 ' + bytes(disk.totalBytes) + '，可用 ' + bytes(disk.freeBytes) + '</p>' : '') +
+    '<div class="row" style="margin-top:10px"><button class="act quiet" data-act="storage-load">重新计算</button></div>'
+}
 function passwordPanel () {
   var auth = (state.status && state.status.auth) || {}
   return (auth.masterTokenSet ? '' : '<p class="small" style="color:var(--danger)">主令牌未配置：忘记密码只能去服务器重设。</p>') +
     '<div class="field"><label>新密码（至少 8 位）</label><input data-pw="next" type="password" autocomplete="new-password" placeholder="新密码"></div>' +
     '<div class="row"><button class="act primary" data-act="save-password">保存新密码</button>' +
-    '<button class="act" data-act="clear-password">清除密码（只留主令牌）</button></div>'
-}
-
-function go (tab) {
-  state.tab = tab
-  render()
-  window.scrollTo({ top: 0, behavior: 'smooth' })
+    '<button class="act" data-act="clear-password">清除密码</button></div>'
 }
 
 /* ── 动作 ── */
+function go (tab) { state.tab = tab; render(); window.scrollTo({ top: 0, behavior: 'smooth' }) }
+
 async function doAction (action, extra, btn) {
-  if (state.busy || (state.status && state.status.running)) {
-    toast('服务端已经有任务在跑，等它结束再点', 'error')
-    return
-  }
+  if (state.busy || (state.status && state.status.running)) { toast('服务端已经有任务在跑，等它结束再点', 'error'); return }
   var label = LABELS[action] || action
   var restore = busyButton(btn, '处理中…')
   state.busy = true
@@ -611,7 +764,7 @@ async function doAction (action, extra, btn) {
   toast('已开始：' + label, 'info')
   try {
     var res = await fetch('/api/admin/run', { method: 'POST', headers: headers(true), body: JSON.stringify(Object.assign({ action: action }, extra || {})) })
-    var data = await res.json()
+    var data = await res.json().catch(function () { return {} })
     out(JSON.stringify(data, null, 2))
     if (res.status === 409) toast('服务端正忙（' + (data.action || '别的任务') + '），稍后再点', 'error')
     else if (data.ok) toast('完成：' + label + '（退出码 ' + data.exitCode + '）', 'ok')
@@ -619,29 +772,58 @@ async function doAction (action, extra, btn) {
   } catch (error) {
     out('请求失败：' + error)
     toast('请求失败：' + error, 'error')
-  } finally {
-    state.busy = false
-    restore()
-  }
+  } finally { state.busy = false; restore() }
   load()
 }
 
-/**
- * 上传课件：选好文件就直接传，不需要再点一次按钮。
- *
- * 大文件走**分片**：Cloudflare 隧道会把大的请求体中途掐断（实测 20MB 传到 12MB
- * 就被关掉，服务端一个字节都没落盘），而课件动辄二三十兆。切成 1MB 一片之后
- * 每个请求都又小又快，顺便还能报进度——用户至少知道"正在传第几片"。
- */
-var CHUNK_SIZE = 1024 * 1024
+function setStatus (key, text, kind) {
+  var el = document.querySelector('[data-status="' + key + '"]')
+  if (!el) return
+  el.className = 'status ' + (kind || '')
+  el.textContent = text
+}
 
-/**
- * 传一片，失败自动重试两次。
- *
- * 网络抖动（隧道断一下、Wi-Fi 切换）会让 fetch 直接抛 TypeError: Failed to fetch——
- * 一个 25MB 的课件有二十多片，任何一片抖一下整包就白传，用户只看到"失败"。
- * 分片的意义之一就是可以单独重试，所以这里兜住。
- */
+async function uploadFiles (key, fileList, btn) {
+  var task = taskByKey(key)
+  if (!task || !task.courseName) { toast('找不到这条课次的课程名', 'error'); return }
+  var files = [].slice.call(fileList || [])
+  if (!files.length) { toast('先选文件', 'error'); return }
+  var restore = busyButton(btn, '上传中…')
+  for (var i = 0; i < files.length; i += 1) {
+    var file = files[i]
+    var sizeMb = (file.size / 1048576).toFixed(1)
+    try {
+      var data
+      if (file.size > 2 * CHUNK_SIZE) {
+        var uploadId = 'u' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10)
+        var total = Math.ceil(file.size / CHUNK_SIZE)
+        for (var index = 0; index < total; index += 1) {
+          setStatus(key, '上传中 ' + Math.round((index / total) * 100) + '%（' + file.name + '）')
+          await putChunk(uploadId, index, file.slice(index * CHUNK_SIZE, (index + 1) * CHUNK_SIZE))
+        }
+        setStatus(key, '解析中…（' + file.name + '）')
+        var res = await fetch('/api/admin/materials/commit', {
+          method: 'POST', headers: headers(true),
+          body: JSON.stringify({ uploadId: uploadId, course: task.courseName, lesson: task.title, scope: 'lesson', name: file.name, chunks: total })
+        })
+        data = await res.json().catch(function () { return {} })
+      } else {
+        var params = new URLSearchParams({ course: task.courseName, lesson: task.title, scope: 'lesson', name: file.name })
+        var single = await fetch('/api/admin/materials?' + params.toString(), { method: 'PUT', headers: headers(false), body: file })
+        data = await single.json().catch(function () { return {} })
+      }
+      if (data.ok) toast('已归档：' + data.name + '（' + data.slideCount + ' 页）', 'ok')
+      else { toast('上传失败：' + (data.message || data.error), 'error'); break }
+    } catch (error) {
+      toast('上传失败：' + error, 'error')
+      break
+    }
+  }
+  restore()
+  setStatus(key, '')
+  load()
+}
+
 async function putChunk (uploadId, index, blob) {
   var lastError = null
   for (var attempt = 1; attempt <= 3; attempt += 1) {
@@ -652,79 +834,105 @@ async function putChunk (uploadId, index, blob) {
       var data = await res.json().catch(function () { return {} })
       if (res.ok && data.ok) return data
       lastError = new Error(data.message || data.error || ('分片 ' + index + ' 失败（HTTP ' + res.status + '）'))
-    } catch (error) {
-      lastError = error
-    }
+    } catch (error) { lastError = error }
     await new Promise(function (done) { setTimeout(done, 600 * attempt) })
   }
   throw lastError
 }
 
-async function uploadDeck (key, file, btn) {
-  var task = taskByKey(key)
-  if (!task || !task.courseName) { toast('找不到这条课次的课程名，先刷新页面', 'error'); return }
-  if (!file) {
-    var input = document.querySelector('[data-file="' + key + '"]')
-    file = input && input.files && input.files[0]
-  }
-  if (!file) { toast('先选一个 .pptx / .ppt / .pdf 文件', 'error'); return }
-  var restore = busyButton(btn, '上传中…')
-  var sizeMb = (file.size / 1048576).toFixed(1)
-  state.uploads[key] = '上传中…（' + file.name + ' · ' + sizeMb + 'MB）'
-  setStatus(key, state.uploads[key])
-  toast('上传并解析：' + file.name, 'info')
+async function openMaterial (name) {
+  var task = taskByKey(state.sel.lesson)
+  if (!task) return
+  state.preview = { course: task.courseName, name: name, loading: true, pages: [] }
+  renderCourses()
   try {
-    var data
-    if (file.size > 2 * CHUNK_SIZE) {
-      var uploadId = 'u' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10)
-      var total = Math.ceil(file.size / CHUNK_SIZE)
-      for (var index = 0; index < total; index += 1) {
-        var percent = Math.round((index / total) * 100)
-        state.uploads[key] = '上传中 ' + percent + '%（' + file.name + ' · ' + sizeMb + 'MB · 第 ' + (index + 1) + '/' + total + ' 片）'
-        setStatus(key, state.uploads[key])
-        await putChunk(uploadId, index, file.slice(index * CHUNK_SIZE, (index + 1) * CHUNK_SIZE))
-      }
-      state.uploads[key] = '解析中…（' + file.name + '）'
-      setStatus(key, state.uploads[key])
-      var res = await fetch('/api/admin/materials/commit', {
-        method: 'POST', headers: headers(true),
-        body: JSON.stringify({ uploadId: uploadId, course: task.courseName, lesson: task.title, scope: 'lesson', name: file.name, chunks: total })
-      })
-      data = await res.json()
-    } else {
-      var params = new URLSearchParams({ course: task.courseName, lesson: task.title, scope: 'lesson', name: file.name })
-      var single = await fetch('/api/admin/materials?' + params.toString(), { method: 'PUT', headers: headers(false), body: file })
-      data = await single.json()
-    }
-    out(JSON.stringify(data, null, 2))
-    if (data.ok) {
-      var when = new Date().toTimeString().slice(0, 5)
-      state.uploads[key] = '已归档：' + data.name + '（' + data.slideCount + ' 页 · ' + when + '）'
-      toast('已归档：' + data.name + '（' + data.slideCount + ' 页）', 'ok')
-    } else {
-      state.uploads[key] = '失败：' + (data.message || data.error)
-      toast('上传失败：' + (data.message || data.error), 'error')
-    }
+    var params = new URLSearchParams({ course: task.courseName, lesson: task.title, name: name, pages: '8' })
+    var res = await fetch('/api/admin/material?' + params.toString(), { headers: headers(false) })
+    var data = await res.json().catch(function () { return {} })
+    if (!data.ok) throw new Error(data.message || data.error || '读不到课件')
+    state.preview = { course: task.courseName, name: data.name, slideCount: data.slideCount, pages: data.pages || [] }
   } catch (error) {
-    state.uploads[key] = '失败：' + error + '（可重试；仍失败就把文件放进服务器收件箱再跑一次归档）'
-    toast('上传失败：' + error, 'error')
-  } finally {
-    restore()
-    setStatus(key, state.uploads[key], state.uploads[key].indexOf('失败') === 0 ? 'bad' : 'ok')
+    state.preview = null
+    toast('预览失败：' + error, 'error')
   }
-  load()
+  renderCourses()
+}
+
+async function saveTags (patch) {
+  var current = tagsOf()
+  var next = {
+    order: patch.order || current.order || [],
+    courses: Object.assign({}, current.courses || {}, patch.courses || {}),
+    lessons: Object.assign({}, current.lessons || {}, patch.lessons || {})
+  }
+  if (patch.removals) {
+    patch.removals.forEach(function (item) {
+      var list = (item.scope === 'course' ? next.courses[item.key] : next.lessons[item.key]) || []
+      var kept = list.filter(function (tag) { return tag !== item.tag })
+      if (item.scope === 'course') { if (kept.length) next.courses[item.key] = kept; else delete next.courses[item.key] }
+      else { if (kept.length) next.lessons[item.key] = kept; else delete next.lessons[item.key] }
+    })
+  }
+  var res = await fetch('/api/admin/tags', { method: 'PUT', headers: headers(true), body: JSON.stringify(next) })
+  var data = await res.json().catch(function () { return {} })
+  if (!data.ok) throw new Error(data.message || data.error || '标签没保存')
+  state.status.tags = { order: data.order, courses: data.courses, lessons: data.lessons }
+  renderCourses()
+}
+
+function addTag (key, value, scope, course) {
+  var tag = String(value || '').trim()
+  if (!tag) { toast('先写标签名', 'error'); return }
+  var patch = scope === 'course' ? { courses: {} } : { lessons: {} }
+  if (scope === 'course') {
+    var list = ((tagsOf().courses || {})[course] || []).slice()
+    if (!list.includes(tag)) list.push(tag)
+    patch.courses[course] = list
+  } else {
+    var list2 = ((tagsOf().lessons || {})[key] || []).slice()
+    if (!list2.includes(tag)) list2.push(tag)
+    patch.lessons[key] = list2
+  }
+  return saveTags(patch).then(function () { toast('已加标签：' + tag, 'ok') })
+}
+
+function removeTag (key, tag, scope, course) {
+  return saveTags({ removals: [{ scope: scope, key: scope === 'course' ? course : key, tag: tag }] })
+    .then(function () { toast('已移除标签：' + tag, 'ok') })
+}
+
+function reorderTags (from, to) {
+  var order = (tagsOf().order || []).slice()
+  if (from < 0 || to < 0 || from >= order.length || to >= order.length) return
+  var moved = order.splice(from, 1)[0]
+  order.splice(to, 0, moved)
+  return saveTags({ order: order })
+}
+
+async function loadStorage (btn) {
+  var restore = busyButton(btn, '计算中…')
+  try {
+    var res = await fetch('/api/admin/storage', { headers: headers(false) })
+    state.storage = await res.json()
+    if (!state.storage.ok) throw new Error(state.storage.error || '读不到占用')
+    toast('已更新占用：' + bytes(state.storage.totalBytes), 'ok')
+  } catch (error) {
+    toast('计算失败：' + error, 'error')
+  } finally { restore() }
+  var box = $('storageBody')
+  if (box) box.innerHTML = storageHtml()
 }
 
 function reviseWith (key, module, btn) {
   var task = taskByKey(key)
-  if (!task) { toast('找不到这条课次，先点刷新', 'error'); return }
+  if (!task) { toast('找不到这条课次', 'error'); return }
   var box = document.querySelector('[data-request="' + key + '"]')
   var request = box && box.value.trim()
-  if (!request) { toast('先在输入框里写清要改什么', 'error'); if (box) box.focus(); return }
-  if (!task.artifacts || !task.artifacts.transcriptPath) { toast('这条课次还没有转录稿，无法重写模块', 'error'); return }
+  if (!request) { toast('先写清要改什么', 'error'); if (box) box.focus(); return }
+  if (!task.artifacts || !task.artifacts.transcriptPath) { toast('这条课次还没有转录稿', 'error'); return }
   if (!module) {
     var first = task.lesson && (task.lesson.modules || [])[0]
-    if (!first) { toast('还没有模块状态：先跑完一次笔记阶段', 'error'); return }
+    if (!first) { toast('还没有模块状态', 'error'); return }
     module = first.outlineNodeId || first.id
   }
   return doAction('revise', {
@@ -738,14 +946,11 @@ async function saveConfig (btn) {
   var restore = busyButton(btn, '保存中…')
   try {
     var res = await fetch('/api/admin/config', { method: 'PUT', headers: headers(true), body: JSON.stringify({ values: values }) })
-    var data = await res.json()
+    var data = await res.json().catch(function () { return {} })
     out(JSON.stringify(data, null, 2))
     if (data.ok) toast('设置已保存：' + (data.applied || []).join('、'), 'ok')
     else toast('没保存：' + ((data.errors || []).join('；') || data.error), 'error')
-  } catch (error) {
-    out('保存失败：' + error)
-    toast('保存失败：' + error, 'error')
-  } finally { restore() }
+  } catch (error) { toast('保存失败：' + error, 'error') } finally { restore() }
   state.config = null
   load()
 }
@@ -753,57 +958,62 @@ async function saveConfig (btn) {
 async function savePassword (clear, btn) {
   var next = document.querySelector('[data-pw="next"]')
   var body = clear ? { action: 'clear' } : { password: next && next.value }
-  if (!clear && (!body.password || body.password.length < 8)) { toast('密码至少 8 位', 'error'); if (next) next.focus(); return }
+  if (!clear && (!body.password || body.password.length < 8)) { toast('密码至少 8 位', 'error'); return }
   if (clear && !window.confirm('清除密码后只能用服务器上的主令牌登录，确定？')) return
   var restore = busyButton(btn, '处理中…')
   var done = false
   try {
     var res = await fetch('/api/admin/password', { method: 'PUT', headers: headers(true), body: JSON.stringify(body) })
-    var data = await res.json()
+    var data = await res.json().catch(function () { return {} })
     out(JSON.stringify(data, null, 2))
-    if (data.ok) { done = true; toast(clear ? '已清除密码，现在只能用主令牌登录' : '密码已更新，当前浏览器已换用新密码', 'ok') }
-    else toast('没成功：' + (data.message || data.error), 'error')
-    if (res.ok && !clear) {
-      $('token').value = body.password
-      localStorage.setItem(KEY, body.password)
-    }
-  } catch (error) {
-    out('请求失败：' + error)
-    toast('请求失败：' + error, 'error')
-  } finally { restore() }
+    if (data.ok) { done = true; toast(clear ? '已清除密码' : '密码已更新', 'ok') } else toast('没成功：' + (data.message || data.error), 'error')
+    if (res.ok && !clear) { $('token').value = body.password; localStorage.setItem(KEY, body.password) }
+  } catch (error) { toast('请求失败：' + error, 'error') } finally { restore() }
   if (done && clear) {
-    // 先试试手上这串还能不能用：本来就是主令牌的话，没必要把人踢出去重新登录
     var stillOk = await load()
-    if (stillOk) { toast('已清除密码；当前浏览器用的是主令牌，仍然有效', 'ok'); return }
-    try { localStorage.removeItem(KEY) } catch (e) {}
-    toast('已清除密码，现在需要用主令牌登录', 'error')
+    if (!stillOk) { try { localStorage.removeItem(KEY) } catch (e) {}; toast('已清除密码，现在需要用主令牌登录', 'error') }
     return
   }
   load()
 }
 
-/* ── 事件委托：界面里按钮很多，逐个绑定既容易漏也和引号打架 ── */
 function handleAct (act, btn) {
-  var key = btn.dataset.key || ''
   var menu = $('menu')
   if (menu && menu.open) menu.open = false
+  var key = btn.dataset.key || ''
+  var value = btn.dataset.value || ''
   if (act === 'save') {
-    var value = $('token').value.trim()
-    localStorage.setItem(KEY, value)
-    if (!value) { toast('先填密码或主令牌', 'error'); return }
+    var token = $('token').value.trim()
+    localStorage.setItem(KEY, token)
+    if (!token) { toast('先填密码或主令牌', 'error'); return }
     return load().then(function (ok) { if (ok) toast('已登录', 'ok') })
   }
   if (act === 'refresh') return load().then(function (ok) { if (ok) toast('已刷新', 'ok') })
   if (act === 'refresh-balance') { refreshBalance(); toast('正在查余额…', 'info'); return }
-  if (act === 'pick') {
-    var input = document.querySelector('[data-file="' + key + '"]')
-    if (input) input.click()
+  if (act === 'rail-toggle') { state.sel.rail = !state.sel.rail; saveSel(); renderCourses(); return }
+  if (act === 'sort-toggle') { state.sel.sort = state.sel.sort === 'asc' ? 'desc' : 'asc'; saveSel(); renderCourses(); return }
+  if (act === 'filter-all') { state.sel.tag = ''; state.sel.year = 'all'; saveSel(); renderCourses(); return }
+  if (act === 'filter-year') { state.sel.year = state.sel.year === value ? 'all' : value; state.sel.tag = ''; saveSel(); renderCourses(); return }
+  if (act === 'pick-course') {
+    state.sel.course = value; state.sel.lesson = ''; state.preview = null; saveSel(); renderCourses(); return
+  }
+  if (act === 'pick-lesson') { state.sel.lesson = value; state.preview = null; saveSel(); renderCourses(); return }
+  if (act === 'pick-file') { var input = document.querySelector('[data-file="' + key + '"]'); if (input) input.click(); return }
+  if (act === 'open-material') return openMaterial(value)
+  if (act === 'close-material') { state.preview = null; renderCourses(); return }
+  if (act === 'storage-load') return loadStorage(btn)
+  if (act === 'add-tag') { var box = document.querySelector('[data-newtag="' + key + '"]'); return addTag(key, box && box.value, 'lesson') }
+  if (act === 'remove-tag') return removeTag(key, btn.dataset.tag, 'lesson')
+  if (act === 'add-course-tag') { var cbox = document.querySelector('[data-newcoursetag="' + btn.dataset.course + '"]'); return addTag('', cbox && cbox.value, 'course', btn.dataset.course) }
+  if (act === 'remove-course-tag') return removeTag('', btn.dataset.tag, 'course', btn.dataset.course)
+  if (act === 'integrate') {
+    toast('整合材料生成还没做，下一步实现', 'error')
     return
   }
   if (act === 'retry') return doAction('retry', { replayKey: key }, btn)
   if (act === 'republish') {
     var task = taskByKey(key)
-    if (!task || !task.artifacts || !task.artifacts.transcriptPath) { toast('这条课次还没有转录稿，无法重新发布', 'error'); return }
+    if (!task || !task.artifacts || !task.artifacts.transcriptPath) { toast('这条课次还没有转录稿', 'error'); return }
     return doAction('republish', { transcriptPath: task.artifacts.transcriptPath, course: task.courseName, lesson: task.title, replayKey: key }, btn)
   }
   if (act === 'cycle') return doAction('cycle', { replayKey: key, maxTasks: 1 }, btn)
@@ -823,78 +1033,84 @@ function handleAct (act, btn) {
   toast('这个按钮还没有接上处理逻辑：' + act, 'error')
 }
 
+var CHUNK_SIZE = 1024 * 1024
+var dragFrom = null
+
 document.addEventListener('click', function (event) {
-  // 顶栏的 ··· 面板是浮层：点到别处就要收起来，
-  // 否则它会一直盖在内容上、把点击吃掉（看起来就像"按钮点不动"）
   var menu = $('menu')
   if (menu && menu.open && !event.target.closest('#menu')) menu.open = false
   var goLink = event.target.closest('[data-go]')
   if (goLink) { event.preventDefault(); go(goLink.dataset.go); return }
   var tab = event.target.closest('.seg button')
   if (tab) { go(tab.dataset.tab); return }
+  var tagRow = event.target.closest('.tag-row[data-tag]')
+  if (tagRow && !event.target.closest('.grip')) {
+    state.sel.tag = state.sel.tag === tagRow.dataset.tag ? '' : tagRow.dataset.tag
+    state.sel.year = 'all'
+    saveSel(); renderCourses(); return
+  }
   var btn = event.target.closest('[data-act]')
   if (!btn) return
   run(function () { return handleAct(btn.dataset.act, btn) })
 })
 
-// 选好文件就直接上传；拖进来也一样——不再要求"先选文件再点上传"
 document.addEventListener('change', function (event) {
   var input = event.target.closest ? event.target.closest('[data-file]') : null
   if (!input) return
-  var file = input.files && input.files[0]
-  if (file) run(function () { return uploadDeck(input.dataset.file, file) })
+  var files = input.files
+  if (files && files.length) run(function () { return uploadFiles(input.dataset.file, files, null) })
+  input.value = ''
+})
+
+document.addEventListener('dragstart', function (event) {
+  var row = event.target.closest ? event.target.closest('.tag-row[data-tag]') : null
+  if (!row) return
+  dragFrom = Number(row.dataset.index)
+  row.classList.add('dragging')
 })
 document.addEventListener('dragover', function (event) {
-  var zone = event.target.closest ? event.target.closest('[data-drop]') : null
-  if (!zone) return
-  event.preventDefault()
-  zone.classList.add('hot')
-})
-document.addEventListener('dragleave', function (event) {
-  var zone = event.target.closest ? event.target.closest('[data-drop]') : null
-  if (zone) zone.classList.remove('hot')
+  var row = event.target.closest ? event.target.closest('.tag-row[data-tag]') : null
+  if (row && dragFrom !== null) event.preventDefault()
 })
 document.addEventListener('drop', function (event) {
-  var zone = event.target.closest ? event.target.closest('[data-drop]') : null
-  if (!zone) return
+  var row = event.target.closest ? event.target.closest('.tag-row[data-tag]') : null
+  if (!row || dragFrom === null) return
   event.preventDefault()
-  zone.classList.remove('hot')
-  var file = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0]
-  if (file) run(function () { return uploadDeck(zone.dataset.drop, file) })
+  var to = Number(row.dataset.index)
+  var from = dragFrom
+  dragFrom = null
+  run(function () { return reorderTags(from, to) })
 })
+document.addEventListener('dragend', function () {
+  dragFrom = null
+  document.querySelectorAll('.tag-row.dragging').forEach(function (el) { el.classList.remove('dragging') })
+})
+
 document.addEventListener('input', function (event) {
   var box = event.target && event.target.closest ? event.target.closest('[data-request]') : null
   if (box) state.requests[box.dataset.request] = box.value
 })
-
-// 折叠块的展开状态记下来：下一次重绘（操作后或 20 秒轮询）要原样还原
 document.addEventListener('toggle', function (event) {
   var node = event.target
   if (!node || !node.dataset || !node.dataset.fold) return
-  state.open[node.dataset.fold] = node.open
-  try { localStorage.setItem(OPEN_KEY, JSON.stringify(state.open)) } catch (e) {}
+  setOpen(node.dataset.fold, node.open)
 }, true)
 document.addEventListener('keydown', function (event) {
-  if (event.key === 'Escape') {
-    var menu = $('menu')
-    if (menu && menu.open) menu.open = false
-    return
-  }
+  if (event.key === 'Escape') { var menu = $('menu'); if (menu && menu.open) menu.open = false; return }
   if (event.key !== 'Enter') return
   var target = event.target
   if (!target || !target.dataset) return
+  if (target.dataset.newtag) { event.preventDefault(); run(function () { return addTag(target.dataset.newtag, target.value, 'lesson') }); return }
+  if (target.dataset.newcoursetag) { event.preventDefault(); run(function () { return addTag('', target.value, 'course', target.dataset.newcoursetag) }); return }
   if (target.dataset.request) {
     event.preventDefault()
     run(function () { return reviseWith(target.dataset.request, '', document.querySelector('[data-act="revise-first"][data-key="' + target.dataset.request + '"]')) })
-  } else if (target.dataset.pw === 'next') {
-    event.preventDefault()
-    run(function () { return savePassword(false, document.querySelector('[data-act="save-password"]')) })
+    return
   }
+  if (target.dataset.pw === 'next') { event.preventDefault(); run(function () { return savePassword(false, document.querySelector('[data-act="save-password"]')) }) }
 })
 
 load()
-// 定时任务也会自己跑起来，界面得跟着动：空闲时 20 秒刷一次，
-// 但只在没有正在编辑的内容时才重绘（否则会把输入框里的字冲掉）
 setInterval(function () {
   if (state.busy || document.hidden) return
   run(function () { return load({ quiet: true }) })

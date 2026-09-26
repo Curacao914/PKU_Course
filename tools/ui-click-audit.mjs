@@ -168,7 +168,11 @@ const EXPECTED = {
   'prune-apply': '完成',
   'save-config': '设置已保存',
   'save-password': '密码已更新',
-  'clear-password': '已清除密码'  // 「已清除密码；当前浏览器用的是主令牌，仍然有效」也匹配
+  'clear-password': '已清除密码',  // 「已清除密码；当前浏览器用的是主令牌，仍然有效」也匹配
+  // 整合材料生成还没实现：按钮点了要如实说自己没做，这不算缺陷（下一步实现）
+  'pick-file': '已归档',
+  integrate: '还没做',
+  'add-tag': '先写标签名'   // 审计不填标签输入框：这条分支本来就要说"先写标签名"
 }
 
 /** 管理台：把每个按钮点一遍，要求「立刻有反馈」且发出的命令正确。 */
@@ -184,10 +188,39 @@ async function auditAdmin(page, site, calls, dialogs, failures) {
   const openAll = () => page.$$eval('main details, .card details', nodes => nodes.forEach(node => { node.open = true }))
   await openAll()
 
-  const tabNames = ['overview', 'courses', 'notes', 'settings']
+  const tabNames = ['overview', 'courses', 'settings']
   for (const tab of tabNames) {
     await openAll()
     await page.click('.seg button[data-tab="' + tab + '"]')
+    // 课程区是分栏：详情面板里的按钮要先选中课程与课次才会出现；
+    // 筛选栏默认收起，也要先展开——"藏在收起栏里的按钮点不动"正是要测的东西。
+    if (tab === 'courses') {
+      // 收起筛选栏之后右侧要向左补齐（用户：'不然整体左边是空白的也很难受'）。
+      // 这一条同时是给一个真 bug 立的桩：早先用 display:none 收起，栅格少一格，
+      // 后面的列各自顶到前一格上，课程列落进 0 宽的那一格——按钮看得见却点不动。
+      const measure = () => page.evaluate(() => {
+        const board = document.querySelector('.board')
+        const courses = document.querySelector('#courses')
+        return {
+          collapsed: document.querySelector('.board').className.includes('rail-hidden'),
+          boardLeft: board.getBoundingClientRect().left,
+          coursesLeft: courses.getBoundingClientRect().left,
+          coursesWidth: courses.getBoundingClientRect().width
+        }
+      })
+      const before = await measure()
+      if (!before.collapsed) await page.click('#tab-courses [data-act="rail-toggle"]')
+      const collapsed = await measure()
+      if (!collapsed.collapsed) failures.push('管理台 · 筛选栏收不起来')
+      else if (Math.abs(collapsed.coursesLeft - collapsed.boardLeft) > 2 || collapsed.coursesWidth < 120) {
+        failures.push('管理台 · 收起筛选栏后列没有向左补齐：课程列 left=' + Math.round(collapsed.coursesLeft) +
+          '（栅格 left=' + Math.round(collapsed.boardLeft) + '）宽=' + Math.round(collapsed.coursesWidth))
+      }
+      await page.click('#courses .item[data-act="pick-course"]')
+      // 选一节**有转录稿**的课次：详情面板里的"重新发布/只重写这个模块"只在有产物时出现
+      await page.click('#lessons .item[data-act="pick-lesson"][data-value="replay-audit-1"]')
+      await page.waitForTimeout(150)
+    }
     // 切页也是"点了要有反应"的一份：选中态与内容区显隐都要跟着动
     const selected = await page.getAttribute('.seg button[data-tab="' + tab + '"]', 'aria-selected')
     const visible = await page.isVisible('#tab-' + tab)
@@ -201,6 +234,24 @@ async function auditAdmin(page, site, calls, dialogs, failures) {
       const selector = '#tab-' + tab + ' [data-act="' + act + '"]'
       // 每次操作后界面会重绘（折叠层又合上），所以每点一个按钮前都先展开
       await openAll()
+      // 分栏界面里详情面板的按钮要"先选中课程与课次"才存在：每次点之前重新选一遍，
+      // 否则前一个动作重绘之后，后面的按钮就找不到了（不是缺陷，是审计自己的前提）
+      if (tab === 'courses' && !(await page.$(selector))) {
+        const pickCourse = await page.$('#courses .item[data-act="pick-course"]')
+        if (pickCourse) await pickCourse.click()
+        const pickLesson = await page.$('#lessons .item[data-act="pick-lesson"][data-value="replay-audit-1"]')
+        if (pickLesson) await pickLesson.click()
+        await page.waitForTimeout(120)
+      }
+      // 筛选栏里的按钮在收起状态下是看不见的（那是上面专门断言过的行为）：
+      // 要测它们就得先把栏展开
+      if (tab === 'courses') {
+        const target = await page.$(selector)
+        if (!target || !(await target.isVisible())) {
+          const toggle = await page.$('#tab-courses [data-act="rail-toggle"]')
+          if (toggle) { await toggle.click(); await page.waitForTimeout(120) }
+        }
+      }
       // 点之前把该填的填好，否则测到的是「参数没填」那条分支
       if (act === 'revise' || act === 'revise-first') {
         await page.fill('#tab-' + tab + ' [data-request]', '把这一节压缩到 1200 字并拆成列表')
@@ -209,7 +260,17 @@ async function auditAdmin(page, site, calls, dialogs, failures) {
 
       await openAll()
       const before = calls.length
-      if (act === 'pick') {
+      if (act === 'pick-file') {
+        // 「上传课件」唤起文件框；选完直接上传（多选也走同一条路）
+        const chooser = page.waitForEvent('filechooser', { timeout: 5000 })
+        await page.click(selector, { timeout: 5000 })
+        const fileChooser = await chooser
+        await fileChooser.setFiles({
+          name: '第5-6节课件.json',
+          mimeType: 'application/json',
+          buffer: Buffer.from(JSON.stringify({ slides: [{ slideNumber: 1, text: '执行程序' }] }))
+        })
+      } else if (act === 'pick') {
         // 「选择课件并上传」会唤起系统文件框，然后**直接开始上传**（不再点第二次）
         const chooser = page.waitForEvent('filechooser', { timeout: 5000 })
         await page.click(selector, { timeout: 5000 })
@@ -263,19 +324,19 @@ async function auditAdmin(page, site, calls, dialogs, failures) {
 
   // 折叠状态必须跨重绘保持：用户点开一栏之后，轮询重绘不能把它收回去
   // （用户报过"我什么都没动，点开的栏目自己收回去"）
-  await page.click('.seg button[data-tab="courses"]')
+  await page.click('.seg button[data-tab="settings"]')
   await openAll()
-  const foldKeys = await page.$$eval('#tab-courses details[data-fold]', nodes => nodes.map(node => node.dataset.fold))
-  if (!foldKeys.length) failures.push('管理台 · 课程区的折叠块没有 data-fold 标记：展开状态无法保持')
+  const foldKeys = await page.$$eval('#tab-settings details[data-fold]', nodes => nodes.map(node => node.dataset.fold))
+  if (!foldKeys.length) failures.push('管理台 · 设置区的折叠块没有 data-fold 标记：展开状态无法保持')
   else {
-    await page.$$eval('#tab-courses details[data-fold]', nodes => nodes.forEach(node => { node.open = true }))
+    await page.$$eval('#tab-settings details[data-fold]', nodes => nodes.forEach(node => { node.open = true }))
     await page.evaluate(() => window.load({ quiet: true }))
     await page.waitForTimeout(400)
-    const stillOpen = await page.$$eval('#tab-courses details[data-fold]', nodes => nodes.filter(node => node.open).length)
+    const stillOpen = await page.$$eval('#tab-settings details[data-fold]', nodes => nodes.filter(node => node.open).length)
     if (stillOpen !== foldKeys.length) {
       failures.push('管理台 · 重绘之后折叠块被收回：' + stillOpen + '/' + foldKeys.length + ' 仍然展开')
     } else {
-      console.log('  [课程] 重绘后折叠状态保持 ✓（' + stillOpen + ' 个）')
+      console.log('  [设置] 重绘后折叠状态保持 ✓（' + stillOpen + ' 个）')
     }
   }
 
