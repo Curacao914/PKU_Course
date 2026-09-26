@@ -45,7 +45,7 @@ export function collectDigest({ date, index = {}, tasks = [], timeZone = DIGEST_
       courseName: note.courseName || '',
       lessonTitle: note.lessonTitle || '',
       slug: note.slug || '',
-      chars: String(note.markdown || '').length,
+      chars: Number(note.chars ?? String(note.markdown || '').length) || 0,
       readMinutes: note.readMinutes || 0,
       briefing: (note.brief && note.brief.briefing) || note.summary || '',
       keyPoints: (note.brief && note.brief.keyPoints) || []

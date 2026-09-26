@@ -927,7 +927,8 @@ export function writeSite({ records = [], outputDir, siteOrigin = '' } = {}) {
     siteName: SITE_NAME,
     generatedAt: new Date().toISOString(),
     count: sorted.length,
-    notes: sorted.map(({ markdown, ...rest }) => rest)
+    // 索引里带一个 chars：日报与列表页要显示"多少字"，而 markdown 本身不进索引（太大）
+    notes: sorted.map(({ markdown, ...rest }) => ({ ...rest, chars: String(markdown || '').length }))
   }, null, 2)}\n`)
 
   return { outputDir: root, count: sorted.length, written }

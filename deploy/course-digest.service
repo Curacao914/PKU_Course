@@ -1,0 +1,11 @@
+[Unit]
+Description=course.law-tech.dev 每日邮件日报
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/course-runtime
+Environment=COURSE_WORKER_SCRATCH_DIR=%h/.course-worker
+ExecStart=/usr/bin/env node %h/course-runtime/apps/worker/bin/course.mjs digest
+StandardOutput=journal
+StandardError=journal
