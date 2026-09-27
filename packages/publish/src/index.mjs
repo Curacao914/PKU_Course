@@ -8,6 +8,12 @@ export {
 } from './markdown.mjs'
 
 export {
+  DEFAULT_ZONE_ID,
+  cdnTokenFrom,
+  purgeCloudflareCache
+} from './purge.mjs'
+
+export {
   SITE_CSS,
   SITE_NAME,
   buildNoteRecord,

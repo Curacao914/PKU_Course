@@ -7,6 +7,7 @@ import { checkFreeSpace, createValidatedAcquisitionRuntime, formatBytes } from '
 import {
   addMaterial, guessMaterialIdentity, listMaterials, ocrMaterial, parseInboxName, pendingOcrMaterials, readDecks, unassignedDir
 } from '@course/materials'
+import { purgeCloudflareCache } from '@course/publish'
 
 import { hashPassword, validatePassword } from '@course/core'
 
@@ -668,6 +669,21 @@ export function createCommands(context) {
    * 也不会出现删掉的笔记还挂在索引里的状态漂移。发布库本身是一份 JSON，
    * 因此重新生成站点不需要重新跑模型。
    */
+  /**
+   * 发布成功后清一次 CDN 缓存。
+   *
+   * 边缘缓存是这个站点的命脉（读者在国内，一天 TTL 让页面快得多），但"改完要等一天"
+   * 不能接受。清不掉也只是晚一点生效：这里永远返回结果，不抛错。
+   */
+  async function purgeCache(options, { reason }) {
+    if (options.flags?.has('no-purge')) return { ok: false, skipped: 'flag' }
+    const result = await purgeCloudflareCache({ env: process.env })
+    if (result.ok) stderr(`已清除 CDN 缓存（${reason}）`)
+    else if (result.skipped === 'no_token') stderr('没有 CLOUDFLARE_PURGE_TOKEN，跳过清缓存（改版后可能要等边缘 TTL 到期）')
+    else stderr(`清缓存失败（${reason}）：${result.error || result.status || '原因不明'}——页面本身已经写好，只是边缘要等 TTL 到期`)
+    return result
+  }
+
   async function publish(options) {
     const siteRoot = path.resolve(options.options.out || path.join(config.scratchRoot, 'site'))
     const libraryForRebuild = path.join(siteRoot, 'library.json')
@@ -688,7 +704,15 @@ export function createCommands(context) {
         siteOrigin: options.options.origin || 'https://course.law-tech.dev'
       })
       const index = readSiteIndex(siteRoot)
-      emit({ rebuilt: true, notes: index.count ?? library.length, siteRoot, pages: (site.written || []).length }, options)
+      const purge = await purgeCache(options, { reason: '重建站点' })
+      emit({
+        rebuilt: true,
+        notes: index.count ?? library.length,
+        siteRoot,
+        pages: (site.written || []).length,
+        cachePurged: purge.ok === true,
+        cache: purge
+      }, options)
       return 0
     }
 
@@ -732,6 +756,7 @@ export function createCommands(context) {
       siteOrigin: options.options.origin || 'https://course.law-tech.dev'
     })
     const index = readSiteIndex(siteRoot)
+    const purge = purgeCache(options, { reason: `发布 ${record.slug}` })
 
     // 同一条笔记只通知一次；内容变化时才重新通知
     let delivery = null
@@ -771,7 +796,10 @@ export function createCommands(context) {
         siteDir: site.outputDir,
         written: site.written,
         delivery: delivery ? { inserted: delivery.inserted, dedupeKey: `course-note:${record.slug}` } : null,
-        task: task ? { id: task.id, to: task.stage === 'published' || task.stage === 'completed' ? task.stage : 'published' } : null
+        task: task ? { id: task.id, to: task.stage === 'published' || task.stage === 'completed' ? task.stage : 'published' } : null,
+        // 首页 / 索引页每发一篇都会变，清了边缘缓存读者才立刻看得到
+        cachePurged: (await purge).ok === true,
+        cache: await purge
       }, options)
       return 0
     } finally {
@@ -2012,7 +2040,7 @@ export const USAGE = `用法：course <命令> [选项]
                                            忘记密码时在服务器上跑这个（见 docs/10）
   balance    [--threshold <元>]                   查两个付费 API 的余额（DeepSeek 官方接口；
                                            阿里云余额需账号 AK/SK，见 docs/07）
-  publish    --from <笔记目录> [--course <名称>] [--lesson <课次>] [--out <站点目录>] [--origin <域名>]
+  publish    --from <笔记目录> [--course <名称>] [--lesson <课次>] [--out <站点目录>] [--origin <域名>] [--no-purge]
              --rebuild                     只按发布库重写站点（换模板/改样式后重建，
                                            不跑模型、不发通知）
              --no-notify                   更新站点但这一次不排推送
