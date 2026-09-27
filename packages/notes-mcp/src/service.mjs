@@ -1,5 +1,5 @@
 import { ResourceNotFoundError, ToolError } from './errors.mjs'
-import { clip, extractHeadings, findSection, splitSections } from './records.mjs'
+import { clip, extractHeadings, findSection, lessonDateOf, splitSections } from './records.mjs'
 import { COURSES_URI, courseUri, noteUri, parseResourceUri, termsUri } from './uris.mjs'
 
 /**
@@ -17,7 +17,9 @@ import { COURSES_URI, courseUri, noteUri, parseResourceUri, termsUri } from './u
 export const DEFAULT_NOTE_MAX_CHARS = 12_000
 export const NOTE_MAX_CHARS_LIMIT = 200_000
 
-const byPublishedAsc = (left, right) => String(left.publishedAt).localeCompare(String(right.publishedAt))
+// 课次顺序按上课日期（老记录退回发布日期的日期部分），同一天按课次标题稳定排序
+const byLessonAsc = (left, right) =>
+  lessonDateOf(left).localeCompare(lessonDateOf(right)) || String(left.lessonTitle).localeCompare(String(right.lessonTitle))
 const norm = value => String(value ?? '').normalize('NFKC').trim().toLowerCase()
 const collapse = value => String(value ?? '').replace(/\s+/g, ' ').trim()
 const uniqueCount = values => new Set(values.map(norm).filter(Boolean)).size
@@ -124,7 +126,7 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
     const wanted = norm(query)
     const courses = []
     for (const [courseName, list] of groups) {
-      const sorted = [...list].sort(byPublishedAsc)
+      const sorted = [...list].sort(byLessonAsc)
       const latest = sorted[sorted.length - 1]
       const teacher = [...sorted].reverse().find(record => record.teacher)?.teacher || ''
       if (wanted && !(norm(courseName).includes(wanted) || norm(teacher).includes(wanted))) continue
@@ -132,7 +134,7 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
         courseName,
         teacher,
         lessonCount: sorted.length,
-        latestPublishedAt: latest?.publishedAt || '',
+        latestLessonDate: lessonDateOf(latest),
         latestLessonTitle: latest?.lessonTitle || '',
         themes: [...sorted].reverse().filter(record => record.theme).slice(0, 3)
           .map(record => ({ lessonTitle: record.lessonTitle, theme: record.theme })),
@@ -145,7 +147,7 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
       })
     }
     courses.sort((left, right) =>
-      String(right.latestPublishedAt).localeCompare(String(left.latestPublishedAt)) ||
+      String(right.latestLessonDate).localeCompare(String(left.latestLessonDate)) ||
       left.courseName.localeCompare(right.courseName, 'zh'))
     return {
       total: courses.length,
@@ -160,13 +162,13 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
   async function getCourse({ course = '', limit = 100, order = 'asc', includeOutline = false } = {}) {
     const records = await source.listNotes()
     const courseName = resolveCourse(records, course)
-    const list = records.filter(record => record.courseName === courseName).sort(byPublishedAsc)
+    const list = records.filter(record => record.courseName === courseName).sort(byLessonAsc)
     const teacher = [...list].reverse().find(record => record.teacher)?.teacher || ''
     const ordered = order === 'desc' ? [...list].reverse() : list
     const lessons = ordered.slice(0, limit).map(record => ({
       slug: record.slug,
       lessonTitle: record.lessonTitle,
-      publishedAt: record.publishedAt,
+      lessonDate: lessonDateOf(record),
       readMinutes: record.readMinutes,
       theme: record.theme,
       keywords: record.keywords.slice(0, 6),
@@ -233,7 +235,7 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
         slug: record.slug,
         courseName: record.courseName,
         lessonTitle: record.lessonTitle,
-        publishedAt: record.publishedAt,
+        lessonDate: lessonDateOf(record),
         kind: best.kind,
         kinds: [...new Set(matched.map(item => item.kind))],
         location: matched.map(item => item.location).find(Boolean) || null,
@@ -242,7 +244,7 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
       })
     }
 
-    hits.sort((left, right) => right.score - left.score || String(right.publishedAt).localeCompare(String(left.publishedAt)))
+    hits.sort((left, right) => right.score - left.score || String(right.lessonDate).localeCompare(String(left.lessonDate)))
     return {
       query: text,
       course: course ? scoped[0]?.courseName || String(course) : '',
@@ -265,7 +267,7 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
       if (!record) throw new ToolError(`找不到 slug=${wantedSlug} 的笔记。先用 list_courses / get_course 取准确 slug。`)
     } else if (String(course || '').trim() && String(lesson || '').trim()) {
       const courseName = resolveCourse(records, course)
-      const inCourse = records.filter(item => item.courseName === courseName).sort(byPublishedAsc)
+      const inCourse = records.filter(item => item.courseName === courseName).sort(byLessonAsc)
       const wantedLesson = norm(lesson)
       const exact = inCourse.filter(item => norm(item.lessonTitle) === wantedLesson)
       const partial = exact.length ? exact : inCourse.filter(item =>
@@ -302,7 +304,7 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
       courseName: record.courseName,
       teacher: record.teacher,
       lessonTitle: record.lessonTitle,
-      publishedAt: record.publishedAt,
+      lessonDate: lessonDateOf(record),
       readMinutes: record.readMinutes,
       theme: record.theme,
       keywords: record.keywords,
@@ -375,7 +377,7 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
       metadata: {
         course: note.courseName || '',
         lesson: note.lessonTitle || '',
-        date: String(note.publishedAt || '').slice(0, 10),
+        date: lessonDateOf(note),
         section: note.section?.title || section || '',
         slug: note.slug,
         theme: note.theme || '',
@@ -391,7 +393,7 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
   async function listTerms({ course = '', kind = 'all', limit = 50 } = {}) {
     const records = await source.listNotes()
     const courseName = resolveCourse(records, course)
-    const scoped = records.filter(record => record.courseName === courseName).sort(byPublishedAsc)
+    const scoped = records.filter(record => record.courseName === courseName).sort(byLessonAsc)
     const buckets = {}
     for (const bucket of ['concepts', 'statutes', 'cases', 'keywords']) {
       const terms = new Map()
@@ -442,8 +444,9 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
       annotations: { audience: ['assistant', 'user'], priority: 0.9 }
     }]
     for (const [courseName, list] of groups) {
-      const sorted = [...list].sort(byPublishedAsc)
-      const lastModified = isoOrUndefined(sorted[sorted.length - 1]?.publishedAt)
+      const sorted = [...list].sort(byLessonAsc)
+      // 资源时间戳问的是"这份内容最近有没有变"，所以用 updatedAt（退回首次进站时间）
+    const lastModified = isoOrUndefined(sorted[sorted.length - 1]?.updatedAt) ?? isoOrUndefined(sorted[sorted.length - 1]?.firstPublishedAt)
       resources.push({
         uri: courseUri(courseName),
         name: `${courseName} 课次清单`,
@@ -462,7 +465,7 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
       })
     }
     for (const record of records) {
-      const lastModified = isoOrUndefined(record.publishedAt)
+      const lastModified = isoOrUndefined(record.updatedAt) ?? isoOrUndefined(record.firstPublishedAt)
       resources.push({
         uri: noteUri(record.slug),
         name: record.slug,

@@ -13,7 +13,7 @@
 | 层 | 工具 | 返回什么 | 典型体量 |
 |---|---|---|---|
 | 1 | `list_courses` | 课程名、课次数、最新课次时间、该课 theme/keywords 汇总 | 一门课 3—5 行 |
-| 2 | `get_course` | 某门课的课次清单：lessonTitle、publishedAt、readMinutes、theme、keywords、摘要 | 一节 4—6 行 |
+| 2 | `get_course` | 某门课的课次清单：lessonTitle、lessonDate、readMinutes、theme、keywords、摘要 | 一节 4—6 行 |
 | 2.5 | `search_notes` | 跨课程/跨课次命中的**片段 + 定位**（哪一节），可选扫正文 | 每条 2—3 行 |
 | 3 | `get_note` | 整篇 Markdown；`section` 只取一节，`maxChars` 限长 | 一节 1—3k 字 |
 | 3.5 | `list_terms` | 某门课的概念/法条/案例清单（带次数与落点） | 复习型问题一次看全 |
@@ -87,12 +87,13 @@ keywords：国家责任、归因、反措施、国际法院
 | 优先级 | 来源 | 配置 | 有什么 | 刷新策略 |
 |---|---|---|---|---|
 | 1 | 本地发布库 `library.json` | `COURSE_LIBRARY` 或 `--library` | 全部字段 + **正文 markdown** | 每次调用 `stat`，mtime/size 变了就重读（进程启动时**不**读死） |
-| 2 | 远程站点 | `COURSE_SITE_ORIGIN` 或 `--origin`（默认 `https://course.law-tech.dev`） | `/api/notes` 索引（无正文）+ `/md/<文件名>.md` 正文 | 短 TTL 缓存，默认 60 秒（`COURSE_MCP_TTL_SECONDS` / `--ttl`）；`/api/notes` 本身是 `no-store` |
+| 2 | 远程站点 | `COURSE_SITE_ORIGIN` 或 `--origin`（默认 `https://course.law-tech.dev`） | `/api/notes` 索引（无正文）+ `/md/<课程>/<课次>.md` 正文 | 短 TTL 缓存，默认 60 秒（`COURSE_MCP_TTL_SECONDS` / `--ttl`）；`/api/notes` 本身是 `no-store` |
 
 - 两者同时配置时**本地优先**，因为只有本地库带正文（`search_notes includeBody` 与
   `get_note` 都不用走网络），且完全离线。
 - 本地库配置了但读不到时**直接报错**，不悄悄回落远程——静默降级会让人以为「数据就是旧的」。
-- 远程正文路径用的是 `/md/<slug 最后一段>.md`（与站点生成时一致）；站点这边静态文件
+- 远程正文路径用的是 `/md/<课程>/<课次>.md`（与站点生成时一致，唯一实现见 @course/publish 的
+  markdown-path.mjs，notes-mcp 里是镜像实现）；站点这边静态文件
   带 `max-age=3600`，所以远程数据最坏情况会晚一小时，本地库没有这个问题。
 
 ## 4. 协议：stdio + initialize 生命周期
@@ -314,7 +315,7 @@ printf '%s\n' \
 | 客户端显示服务器启动失败 / 没有任何工具 | 先手工跑上面那条命令；`course mcp --help` 能打印用法说明配置能解析 |
 | 工具返回「读不到发布库 …」 | `COURSE_LIBRARY` 路径不对（或发布库还没生成：先 `course publish`）；也可临时用 `--origin` |
 | 数据是旧的 | 本地库按 mtime 即时刷新；远程是短 TTL（默认 60 秒）+ 站点静态文件 `max-age`，`--ttl 0` 可每次重取 |
-| 正文读不到（远程） | 站点缺 `/md/<文件名>.md`（老站点没生成 md）；本地发布库不受影响 |
+| 正文读不到（远程） | 站点缺 `/md/<课程>/<课次>.md`（老站点写的是平铺的 `/md/<课次>.md`，跑一次 `course publish --rebuild` 即可）；本地发布库不受影响 |
 | 资源列表看不到新笔记 | 资源每次请求现算，客户端可能缓存了 `resources/list`；重连会话即可 |
 | ssh 桥接报「Invalid JSON」 | 少了 `-T`，协议流里混进了 `\r` 或 ssh 横幅 |
 | stderr 里有 `ExperimentalWarning: SQLite` | 经 `course mcp` 启动时会加载 worker 的账本模块；警告只在 stderr，不影响协议（直接跑 `packages/notes-mcp/bin/notes-mcp.mjs` 则不会出现） |

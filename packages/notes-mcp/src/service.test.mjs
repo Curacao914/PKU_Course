@@ -15,7 +15,9 @@ test('list_courses：课程名 + 课次数 + 最新时间 + theme/keywords 汇�
   assert.deepEqual(data.courses.map(course => course.courseName), ['国际法学', '刑法总论', '民法总论'])
   const intl = data.courses[0]
   assert.equal(intl.lessonCount, 3)
-  assert.equal(intl.latestPublishedAt, '2026-03-12T09:00:00.000Z')
+  // 展示的是"这节课哪天上的"（lessonDate），不是"什么时候发布的"（publishedAt）
+  assert.equal(intl.latestLessonDate, '2026-03-08')
+  assert.equal('latestPublishedAt' in intl, false, '发布日期不再出现在课次清单里')
   assert.equal(intl.latestLessonTitle, '第三课 国际法院的管辖')
   assert.equal(intl.teacher, '张老师')
   assert.deepEqual(intl.themes.map(item => item.theme), ['管辖与可受理性的两道门', '反措施的可逆性与相称性', '国家责任的三层结构'])
@@ -24,6 +26,17 @@ test('list_courses：课程名 + 课次数 + 最新时间 + theme/keywords 汇�
   assert.deepEqual(intl.termCounts, { concepts: 10, statutes: 4, cases: 2 })
   // 列表本身不含正文——这是"不把笔记灌进上下文"的关键
   assert.equal(JSON.stringify(data).includes('有效控制'), false)
+})
+
+test('老发布库（没有 lessonDate）退回发布日期的日期部分，不会显示空白', async () => {
+  // 线上真出现过：发布库换成三个时间字段之后，MCP 这边没跟着透传，日期整列变成空白。
+  const course = await service.getCourse({ course: '国际法学' })
+  const legacy = course.lessons.find(lesson => lesson.lessonTitle === '第一课 国家责任的构成')
+  assert.equal(legacy.lessonDate, '2026-02-20', '老记录用 publishedAt 的日期部分')
+  const modern = course.lessons.find(lesson => lesson.lessonTitle === '第三课 国际法院的管辖')
+  assert.equal(modern.lessonDate, '2026-03-08', '新记录用课次日期')
+  const note = await service.getNote({ slug: 'notes/国际法学/第一课-国家责任的构成' })
+  assert.equal(note.lessonDate, '2026-02-20')
 })
 
 test('list_courses：按课程名或教师名过滤，并给 limit 上限', async () => {

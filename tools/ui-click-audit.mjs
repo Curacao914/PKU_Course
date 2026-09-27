@@ -128,7 +128,7 @@ function buildFixture() {
     courseName: '刑事执行法',
     teacher: '张三',
     lessonTitle: '第5-6节 · 执行程序与执行措施',
-    publishedAt: '2026-09-25T10:00:00.000Z',
+    lessonDate: '2026-09-25',
     // 要够长：进度条、回到顶部、位置记忆都按滚动位置工作，短页面根本触发不到
     markdown: buildFixtureMarkdown()
   })
@@ -145,7 +145,7 @@ function buildFixture() {
     notes: [{
       slug: record.slug, lessonTitle: record.lessonTitle, courseName: record.courseName,
       summary: record.summary, readMinutes: record.readMinutes, headings: record.headings,
-      publishedAt: record.publishedAt, metadata: record.metadata
+      lessonDate: record.lessonDate, metadata: record.metadata
     }]
   }))
 
@@ -153,7 +153,7 @@ function buildFixture() {
   const execSecond = buildNoteRecord({
     courseName: '刑事执行法',
     lessonTitle: '第7-8节 减刑与假释',
-    publishedAt: '2026-09-23T10:00:00.000Z',
+    lessonDate: '2026-09-23',
     // 这一节配了一页纸：首页那门课的第一行与课次行里的入口都要有东西可点
     onepage: {
       title: '减刑与假释的适用条件',
@@ -185,7 +185,7 @@ function buildFixture() {
     courseName: '商法概论',
     teacher: '李四',
     lessonTitle: '第1-2节 公司法总论',
-    publishedAt: '2026-09-26T10:00:00.000Z',
+    lessonDate: '2026-09-26',
     markdown: [
       '# 第1-2节 公司法总论',
       '',
@@ -212,7 +212,7 @@ function buildFixture() {
   const empiricalRecord = buildNoteRecord({
     courseName: '法律实证分析',
     lessonTitle: '第3节 抽样与变量',
-    publishedAt: '2026-09-24T10:00:00.000Z',
+    lessonDate: '2026-09-24',
     markdown: [
       '# 第3节 抽样与变量',
       '',
@@ -231,7 +231,7 @@ function buildFixture() {
   const companySecond = buildNoteRecord({
     courseName: '商法概论',
     lessonTitle: '第3-4节 公司治理',
-    publishedAt: '2026-09-27T10:00:00.000Z',
+    lessonDate: '2026-09-27',
     markdown: [
       '# 第3-4节 公司治理',
       '',

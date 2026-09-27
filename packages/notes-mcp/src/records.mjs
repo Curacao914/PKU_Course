@@ -102,6 +102,16 @@ const strings = value => {
 }
 
 /**
+ * 展示与排序用的课次日期（YYYY-MM-DD）。
+ *
+ * 发布库自 Phase 1 起有 lessonDate（这节课哪天上的）；老库没有它，退回发布日期的日期部分。
+ * 展示与排序只认这一处，免得"MCP 里显示的是发布日期、站点上显示的是课次日期"这种分裂。
+ */
+export function lessonDateOf(record = {}) {
+  return str(record.lessonDate) || str(record.publishedAt).slice(0, 10)
+}
+
+/**
  * 把一条发布库记录补成固定形状。
  *
  * 字段全给默认值（而不是留 undefined）：站点索引（远程数据源）本来就不含 markdown，
@@ -119,7 +129,17 @@ export function normalizeRecord(raw = {}) {
     teacher: str(raw.teacher),
     lessonTitle: str(raw.lessonTitle),
     replayKey: str(raw.replayKey),
-    publishedAt: str(raw.publishedAt),
+    /**
+     * 三个时间（发布库自 Phase 1 起就是这个形状）：
+     *   lessonDate        这节课是哪天上的 —— 展示与排序都用它
+     *   firstPublishedAt  第一次进站的时间 —— 订阅/资源时间戳用它
+     *   updatedAt         最近一次改动
+     * publishedAt 保留成"首次进站时间"的别名：老发布库只有它，调用方不必到处写兼容分支。
+     */
+    lessonDate: str(raw.lessonDate),
+    firstPublishedAt: str(raw.firstPublishedAt) || str(raw.publishedAt),
+    updatedAt: str(raw.updatedAt) || str(raw.firstPublishedAt) || str(raw.publishedAt),
+    publishedAt: str(raw.publishedAt) || str(raw.firstPublishedAt),
     readMinutes: Number(raw.readMinutes) || 0,
     summary: str(raw.summary),
     brief: brief ? { briefing: str(brief.briefing), keyPoints: strings(brief.keyPoints) } : null,

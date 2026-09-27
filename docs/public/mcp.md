@@ -93,8 +93,9 @@
 
 - `https://course.law-tech.dev/llms.txt`：站点摘要与全部入口清单（AI 的第一站）
 - `https://course.law-tech.dev/api/notes`：笔记索引 JSON（标题、主题、关键词、摘要、目录；不含正文）
-- `https://course.law-tech.dev/md/<课次>.md`：单篇笔记的 Markdown 原文
-- `https://course.law-tech.dev/md/<课次>-一页纸.md`：一页纸摘要
+- `https://course.law-tech.dev/md/<课程>/<课次>.md`：单篇笔记的 Markdown 原文（路径带课程，
+  两门课同一天同名课次不会互相覆盖）
+- `https://course.law-tech.dev/md/<课程>/<课次>-一页纸.md`：一页纸摘要
 
 ## 六、已知限制
 

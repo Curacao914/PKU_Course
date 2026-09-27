@@ -6,6 +6,8 @@
  * 约定：先给 theme/keywords/摘要，正文永远最后、且写明截断情况。
  */
 
+import { lessonDateOf } from './records.mjs'
+
 const line = (...parts) => parts.filter(part => part !== undefined && part !== null && part !== '').join('｜')
 
 export function renderCourses(data) {
@@ -17,7 +19,7 @@ export function renderCourses(data) {
     lines.push(`- ${line(
       course.courseName,
       course.lessonCount ? `${course.lessonCount} 课次` : '0 课次',
-      course.latestPublishedAt ? `最新 ${course.latestPublishedAt.slice(0, 10)}${course.latestLessonTitle ? `（${course.latestLessonTitle}）` : ''}` : '',
+      course.latestLessonDate ? `最新 ${course.latestLessonDate}${course.latestLessonTitle ? `（${course.latestLessonTitle}）` : ''}` : '',
       course.teacher ? `教师 ${course.teacher}` : ''
     )}`)
     if (course.themes.length) {
@@ -44,7 +46,7 @@ export function renderCourse(data) {
   )]
   for (const lesson of data.lessons) {
     lines.push(`- ${lesson.lessonTitle}`)
-    lines.push(`  slug: ${line(lesson.slug, lesson.publishedAt ? lesson.publishedAt.slice(0, 10) : '', lesson.readMinutes ? `${lesson.readMinutes} 分钟` : '')}`)
+    lines.push(`  slug: ${line(lesson.slug, lessonDateOf(lesson), lesson.readMinutes ? `${lesson.readMinutes} 分钟` : '')}`)
     if (lesson.theme) lines.push(`  theme：${lesson.theme}`)
     if (lesson.keywords.length) lines.push(`  keywords：${lesson.keywords.join('、')}`)
     if (lesson.summary) lines.push(`  摘要：${lesson.summary}`)
@@ -61,7 +63,7 @@ export function renderSearch(data) {
   const lines = [`查询「${data.query}」命中 ${data.total} 处（scope：${scope}；扫描 ${data.scanned} 篇）`]
   data.hits.forEach((hit, index) => {
     lines.push(`${index + 1}. [${hit.kinds.join('+')}] ${hit.courseName} · ${hit.lessonTitle}`)
-    lines.push(`   slug: ${line(hit.slug, hit.publishedAt ? hit.publishedAt.slice(0, 10) : '')}`)
+    lines.push(`   slug: ${line(hit.slug, lessonDateOf(hit))}`)
     if (hit.location?.title || hit.location?.id) {
       lines.push(`   位置：${line(hit.location.title, hit.location.id ? `#${hit.location.id}` : '')}`)
     }
@@ -80,7 +82,7 @@ export function renderNote(data) {
     `${data.courseName} · ${data.lessonTitle}`,
     line(
       `slug：${data.slug}`,
-      data.publishedAt ? data.publishedAt.slice(0, 10) : '',
+      lessonDateOf(data),
       data.readMinutes ? `${data.readMinutes} 分钟` : '',
       data.teacher ? `教师 ${data.teacher}` : ''
     )

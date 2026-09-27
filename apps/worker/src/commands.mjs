@@ -1595,7 +1595,10 @@ export function createCommands(context) {
           ...common,
           from: path.dirname(artifacts.notePath || ''),
           // 站点目录只在显式指定时才传，避免与 discover 的 --out 混淆
-          ...(options.options.out ? { out: options.options.out } : {})
+          ...(options.options.out ? { out: options.options.out } : {}),
+          // 课次日期：自动链路里通常能从课次标题解析出来，但标题没带日期时
+          // （老的"第10-12节"）只有人工知道，所以让这个选项透传下去
+          ...(options.options['lesson-date'] ? { 'lesson-date': options.options['lesson-date'] } : {})
         }
       }
       const commandOptions = {
