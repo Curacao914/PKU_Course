@@ -22,6 +22,7 @@ import {
   callCourseModel,
   createInitialLesson,
   generateBrief,
+  generateBriefFromMarkdown,
   getCourseLlmWindowDecision,
   normalizeCourseLlmSchedule,
   pptForRange,
@@ -580,10 +581,12 @@ export function createCommands(context) {
             lesson: lessonTitle,
             briefing: brief.briefing,
             keyPoints: brief.keyPoints,
+            // 首页课次表那一列用的就是它：写简报的这一次调用顺手挑的，不额外花钱
+            keywords: brief.keywords || [],
             detail: brief.detail,
             trace: brief.trace
           }, null, 2)}\n`)
-          stderr(`简报已生成（${brief.words} 字，${brief.keyPoints.length} 条要点）`)
+          stderr(`简报已生成（${brief.words} 字，${brief.keyPoints.length} 条要点，${(brief.keywords || []).length} 个关键词）`)
         } catch (error) {
           briefError = error instanceof Error ? error.message : String(error)
           stderr(`简报生成失败：${briefError}（笔记本身不受影响）`)
@@ -682,6 +685,136 @@ export function createCommands(context) {
     else if (result.skipped === 'no_token') stderr('没有 CLOUDFLARE_PURGE_TOKEN，跳过清缓存（改版后可能要等边缘 TTL 到期）')
     else stderr(`清缓存失败（${reason}）：${result.error || result.status || '原因不明'}——页面本身已经写好，只是边缘要等 TTL 到期`)
     return result
+  }
+
+  /**
+   * 简报（含关键词）单独重跑。
+   *
+   * 为什么需要它：简报这一步的产物后来多了一列"关键词"，而笔记跑完后的中间状态通常
+   * 已经被清理掉了。为了补一列关键词把笔记流水线整个重跑一遍是几十次模型调用；
+   * 这里只重跑简报这一步——读成品笔记的小节标题与开头，输出几百字，一节课一次调用。
+   */
+  async function briefRun(options) {
+    const from = path.resolve(requireOption(options.options, 'from', 'brief'))
+    const course = requireOption(options.options, 'course', 'brief')
+    const lesson = requireOption(options.options, 'lesson', 'brief')
+    const lessonFile = path.join(from, `${safeFileName(lesson)}.md`)
+    const notePath = fs.existsSync(from) && fs.statSync(from).isFile()
+      ? from
+      : (fs.existsSync(lessonFile) ? lessonFile : path.join(from, 'final-note.md'))
+    if (!fs.existsSync(notePath)) throw new Error(`找不到笔记正文：${notePath}（--from 传笔记文件或它所在的目录）`)
+    const markdown = fs.readFileSync(notePath, 'utf8')
+
+    const modelConfig = {
+      apiKey: config.ai.apiKey || 'unset',
+      baseUrl: config.ai.baseUrl,
+      provider: config.ai.provider,
+      source: 'environment',
+      models: config.ai.models
+    }
+    const callModel = injectedCallModel ||
+      (payload => callCourseModel({ ...payload, config: { ...modelConfig, ...(payload.config || {}) } }))
+
+    const result = await generateBriefFromMarkdown({
+      markdown,
+      courseName: course,
+      lessonTitle: lesson,
+      courseSpec: { courseName: course, teacher: options.options.teacher || '' },
+      callModel,
+      modelConfig
+    })
+    const outDir = path.resolve(options.options.out || path.dirname(notePath))
+    fs.mkdirSync(outDir, { recursive: true })
+    const briefPath = path.join(outDir, 'brief.json')
+    const previous = fs.existsSync(briefPath) ? JSON.parse(fs.readFileSync(briefPath, 'utf8')) : {}
+    fs.writeFileSync(briefPath, `${JSON.stringify({
+      ...previous,
+      schemaVersion: 1,
+      generatedAt: new Date().toISOString(),
+      course,
+      lesson,
+      briefing: result.briefing,
+      keyPoints: result.keyPoints,
+      keywords: result.keywords,
+      detail: result.detail,
+      trace: result.trace
+    }, null, 2)}\n`)
+    emit({
+      course,
+      lesson,
+      note: notePath,
+      briefPath,
+      words: result.words,
+      keyPoints: result.keyPoints.length,
+      keywords: result.keywords,
+      usage: result.trace?.usage || null
+    }, options)
+    return 0
+  }
+
+  /**
+   * 简报（含关键词）单独重跑。
+   *
+   * 为什么需要它：简报这一步的产物后来多了一列「关键词」，而笔记跑完后的中间状态通常
+   * 已经被清理掉了。为了补一列关键词把笔记流水线整个重跑一遍是几十次模型调用；
+   * 这里只重跑简报这一步——读成品笔记的小节标题与开头，输出几百字，一节课一次调用。
+   */
+  async function briefRun(options) {
+    const from = path.resolve(requireOption(options.options, 'from', 'brief'))
+    const course = requireOption(options.options, 'course', 'brief')
+    const lesson = requireOption(options.options, 'lesson', 'brief')
+    const lessonFile = path.join(from, `${safeFileName(lesson)}.md`)
+    const notePath = fs.existsSync(from) && fs.statSync(from).isFile()
+      ? from
+      : (fs.existsSync(lessonFile) ? lessonFile : path.join(from, 'final-note.md'))
+    if (!fs.existsSync(notePath)) throw new Error(`找不到笔记正文：${notePath}（--from 传笔记文件或它所在的目录）`)
+    const markdown = fs.readFileSync(notePath, 'utf8')
+
+    const modelConfig = {
+      apiKey: config.ai.apiKey || 'unset',
+      baseUrl: config.ai.baseUrl,
+      provider: config.ai.provider,
+      source: 'environment',
+      models: config.ai.models
+    }
+    const callModel = injectedCallModel ||
+      (payload => callCourseModel({ ...payload, config: { ...modelConfig, ...(payload.config || {}) } }))
+
+    const result = await generateBriefFromMarkdown({
+      markdown,
+      courseName: course,
+      lessonTitle: lesson,
+      courseSpec: { courseName: course, teacher: options.options.teacher || '' },
+      callModel,
+      modelConfig
+    })
+    const outDir = path.resolve(options.options.out || path.dirname(notePath))
+    fs.mkdirSync(outDir, { recursive: true })
+    const briefPath = path.join(outDir, 'brief.json')
+    const previous = fs.existsSync(briefPath) ? JSON.parse(fs.readFileSync(briefPath, 'utf8')) : {}
+    fs.writeFileSync(briefPath, `${JSON.stringify({
+      ...previous,
+      schemaVersion: 1,
+      generatedAt: new Date().toISOString(),
+      course,
+      lesson,
+      briefing: result.briefing,
+      keyPoints: result.keyPoints,
+      keywords: result.keywords,
+      detail: result.detail,
+      trace: result.trace
+    }, null, 2)}\n`)
+    emit({
+      course,
+      lesson,
+      note: notePath,
+      briefPath,
+      words: result.words,
+      keyPoints: result.keyPoints.length,
+      keywords: result.keywords,
+      usage: result.trace?.usage || null
+    }, options)
+    return 0
   }
 
   async function publish(options) {
@@ -1990,7 +2123,7 @@ export function createCommands(context) {
   // 键名必须与 CLI 命令名一致：'admin-passwd' 带连字符，不能用标识符简写
   return {
     doctor, discover, download, transcribe, notes, materials, balance, publish,
-    notify, cycle, verify, status, retry, prune, backup, digest,
+    notify, cycle, verify, status, retry, prune, backup, digest, brief: briefRun,
     'admin-passwd': adminPassword
   }
 }
@@ -2040,6 +2173,9 @@ export const USAGE = `用法：course <命令> [选项]
                                            忘记密码时在服务器上跑这个（见 docs/10）
   balance    [--threshold <元>]                   查两个付费 API 的余额（DeepSeek 官方接口；
                                            阿里云余额需账号 AK/SK，见 docs/07）
+  brief      --from <笔记.md 或所在目录> --course <名称> --lesson <课次> [--out <目录>]
+                                           只重跑简报这一步：产出简报与首页用的关键词
+                                           （笔记跑完后再补关键词时用，不必重跑整条流水线）
   publish    --from <笔记目录> [--course <名称>] [--lesson <课次>] [--out <站点目录>] [--origin <域名>] [--no-purge]
              --rebuild                     只按发布库重写站点（换模板/改样式后重建，
                                            不跑模型、不发通知）

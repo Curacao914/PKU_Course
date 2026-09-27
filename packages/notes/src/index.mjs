@@ -29,7 +29,10 @@ export {
 export {
   BRIEF_SCHEMA,
   buildBriefSource,
+  buildBriefSourceFromMarkdown,
+  cleanKeywords,
   generateBrief,
+  generateBriefFromMarkdown,
   renderBriefMessage,
   validateBrief
 } from './brief.mjs'

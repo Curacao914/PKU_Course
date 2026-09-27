@@ -17,6 +17,8 @@ export {
   SITE_CSS,
   SITE_NAME,
   buildNoteRecord,
+  deriveKeywords,
+  keywordFields,
   extractNoteMetadata,
   noteSlug,
   parseStatute,

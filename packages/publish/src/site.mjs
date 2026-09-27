@@ -208,18 +208,26 @@ article .brief li { margin: 5px 0; }
 .index-group > h2 { font-size: 16px; margin: 0 0 2px; color: var(--ink-soft); }
 .index-row[hidden], .index-group[hidden], .index-notes a[hidden] { display: none; }
 
-/* ── 首页：一门课一组，课次一行一节 ── */
-.band { margin: 0 0 26px; }
-.band > h2 { margin: 0 0 8px; font-size: 17px; letter-spacing: -.01em; }
-.lesson-list { border-top: 1px solid var(--line); }
-.lesson-row { display: grid; grid-template-columns: minmax(0, 1fr) 92px 108px; gap: 14px;
-  align-items: baseline; padding: 9px 10px; border-bottom: 1px solid var(--line); }
-.lesson-row:hover { background: var(--bg-soft); }
-.lesson-title { color: var(--ink); font-size: 15.5px; }
-.lesson-meta, .lesson-date { color: var(--muted); font-size: 12.5px; text-align: right; font-family: var(--sans); }
+/* ── 首页：一门课一张表，一行一节课 ── */
+.band { margin: 0 0 30px; }
+.band > h2 { margin: 0 0 10px; font-size: 17px; letter-spacing: -.01em; }
+.lesson-table { width: 100%; border-collapse: collapse; font-family: var(--sans); }
+.lesson-table th { text-align: left; font-size: 12px; font-weight: 500; color: var(--muted);
+  letter-spacing: .06em; padding: 0 10px 8px; border-bottom: 1px solid var(--line-strong); }
+.lesson-table th.num, .lesson-table td.num { text-align: right; }
+.lesson-table td { padding: 10px; border-bottom: 1px solid var(--line); vertical-align: baseline; }
+.lesson-table tbody tr:hover { background: var(--bg-soft); }
+.lesson-table .lesson-title a { color: var(--ink); font-size: 15.5px; }
+.lesson-table .lesson-title a:hover { color: var(--accent-ink); }
+.lesson-keywords { display: flex; flex-wrap: wrap; gap: 4px 6px; }
+.lesson-table .lesson-keywords { border-bottom: 1px solid var(--line); }
+.kw { display: inline-block; padding: 1px 8px; border-radius: 999px; background: var(--bg-soft);
+  color: var(--ink-soft); font-size: 12.5px; line-height: 1.7; }
+.lesson-meta, .lesson-date { color: var(--muted); font-size: 12.5px; text-align: right; white-space: nowrap; }
 @media (max-width: 720px) {
-  .lesson-row { grid-template-columns: minmax(0, 1fr); gap: 2px; }
-  .lesson-meta, .lesson-date { text-align: left; }
+  /* 窄屏先保课次与关键词：时长与日期可以点进去看 */
+  .lesson-table .lesson-meta, .lesson-table .lesson-date,
+  .lesson-table th:nth-child(3), .lesson-table th:nth-child(4) { display: none; }
 }
 @media (max-width: 720px) {
   .index-shell { grid-template-columns: minmax(0, 1fr); gap: 16px; }
@@ -399,8 +407,9 @@ export function noteSlug({ courseName, lessonTitle }) {
  * 这样索引页与笔记生成彼此独立，任何一边改了都不会把另一边弄坏。
  */
 export function extractNoteMetadata(markdown = '') {
-  const buckets = { concepts: [], statutes: [], cases: [] }
-  const kindOf = { CONCEPT: 'concepts', PROVISION: 'statutes', CASE: 'cases' }
+  const buckets = { concepts: [], statutes: [], cases: [], keywords: [] }
+  // KEYWORD 是留给"模型自己挑关键词"的口子：写了就用它的判断，没写就按概念排序挑
+  const kindOf = { CONCEPT: 'concepts', PROVISION: 'statutes', CASE: 'cases', KEYWORD: 'keywords' }
   const seen = new Set()
   for (const line of String(markdown ?? '').split('\n')) {
     const match = line.match(/^\s*META:\s*(CONCEPT|PROVISION|CASE):\s*(.+?)\s*$/)
@@ -580,6 +589,14 @@ export function buildNoteRecord({
     metadata: extractNoteMetadata(body),
     // 索引页点进来要落在正文里那一节，而不是笔记开头
     anchors: termAnchors(body),
+    // 首页表格里那列关键词。首选写笔记时模型自己挑的（简报那一步顺手产出的），
+    // 老笔记没有这份判断时，退回到"从概念清单里按出现频次与标题命中排序"。
+    ...keywordFields({
+      brief,
+      markdown: body,
+      concepts: extractNoteMetadata(body).keywords.length ? extractNoteMetadata(body).keywords : extractNoteMetadata(body).concepts,
+      courseName: String(courseName || '').trim()
+    }),
     markdown: body
   }
 }
@@ -693,6 +710,112 @@ ${scripts}
 /** 笔记正文里是否真的有 Mermaid 图（没有就不加载 3.5MB 的绘图库）。 */
 function hasMermaid(markdown = '') {
   return /```mermaid/.test(String(markdown))
+}
+
+/** 泛得没信息量的词：单拎出来当关键词等于没说。 */
+const GENERIC_TERMS = new Set([
+  '概念', '问题', '内容', '理论', '制度', '方法', '原则', '分析', '研究', '总结', '概述', '介绍',
+  '其他', '相关', '基本', '一般', '主要', '特点', '意义', '作用', '关系', '区别', '比较', '案例',
+  '法条', '要点', '重点', '难点', '背景', '现状', '发展', '影响', '评价', '讨论', '思考', '复习'
+])
+
+/**
+ * 与课堂内容无关的杂项：开学第一节课的概念清单里常混着这些（教室、考核、助教……）。
+ * 它们确实是那节课讲过的事，但放在"关键词"这一列毫无信息量——读者要的是这节课讲了什么。
+ */
+const ADMIN_TERMS = /教室|地点|课程安排|课程大纲|考核|签到|点名|考试|开卷|闭卷|助教|参考书目|教材|推荐书|选修|学分|作业|预习|上课|课间|通知|设备|教学网|知识库|回放|录制|时间安排|成绩|分组|自我介绍|课程介绍/
+
+/**
+ * 骨架型小节标题：它们说明的是"这一页长什么样"，不是"这节课讲了什么"。
+ * 概念不够时用它兜底，就得把这些先剔掉，否则关键词会变成一串目录名。
+ */
+const STRUCTURE_HEADINGS = /核心问题|应当能够|课程脉络|概览|知识连接|附录|术语汇总|时间轴|课堂事务|课间|杂音|课程定位|课程性质|教师信息|学习方法|下节预告|承接/
+
+/**
+ * 关键词：从这篇笔记已有的概念清单里挑最重要的几个。
+ *
+ * 关键取舍：**不再拉一次模型调用**。每节课的概念本来就是模型在写作时按节点抽出来的
+ * （task-runner 的 concepts → 文末 META 清单），再让它"挑 5 个"是花两份钱买同一件事。
+ * 这里只做筛选与排序：
+ *   排除课程名（"商法"之于《商法概论》）、泛词、行政杂项、以及过长的句子片段；
+ *   然后按 标题里出现过 > 正文里反复出现 > 更具体 排序。
+ * 概念实在太少时（有的课第一节只抽到一两条）退回到小节标题——标题同样说明这节课讲了什么。
+ * 已发布的笔记重建时会重算，所以老笔记一样有效果。
+ *
+ * 若将来模型自己在 META 里写了 KEYWORD 行，那份判断优先——见 extractNoteMetadata。
+ */
+export function deriveKeywords(markdown = '', { concepts = [], courseName = '', limit = 6 } = {}) {
+  const body = String(markdown ?? '').split('\n').filter(line => !/^\s*META:\s/.test(line)).join('\n')
+  const headings = extractHeadings(body)
+  const headingText = headings.map(heading => heading.text).join(' ')
+  const course = String(courseName || '').trim()
+
+  const countOf = needle => {
+    if (!needle) return 0
+    let count = 0
+    let at = body.indexOf(needle)
+    while (at >= 0) { count += 1; at = body.indexOf(needle, at + needle.length) }
+    return count
+  }
+
+  /** 能不能当关键词：短、像术语、不是杂项。 */
+  const usable = term => {
+    const value = String(term || '').trim()
+    if (value.length < 2 || value.length > 12) return ''
+    if (/[：:，,。；;、！？\[\]（）()「」《》"'']/.test(value)) return ''
+    // 整词是泛词，或者"去掉泛词后不剩什么"（法律制度、重点内容）——但
+    // "犯罪记录封存制度"这类真术语要留下：它去掉"制度"还剩五个字
+    let rest = value
+    for (const word of GENERIC_TERMS) rest = rest.split(word).join('')
+    if (rest.length < 3) return ''
+    if (ADMIN_TERMS.test(value)) return ''
+    if (course && (value === course || course.includes(value))) return ''
+    return value
+  }
+
+  const ranked = new Map()
+  for (const raw of concepts) {
+    const term = usable(String(raw || '').split(/[（(]/)[0])
+    if (!term) continue
+    const entry = {
+      term,
+      occurrences: countOf(term),
+      inHeading: headingText.includes(term),
+      detail: Math.min(term.length, 8)
+    }
+    const previous = ranked.get(term)
+    if (!previous || entry.occurrences > previous.occurrences) ranked.set(term, entry)
+  }
+
+  const list = [...ranked.values()].sort((a, b) =>
+    Number(b.inHeading) - Number(a.inHeading) ||
+    b.occurrences - a.occurrences ||
+    b.detail - a.detail ||
+    a.term.localeCompare(b.term, 'zh'))
+  // 正文里一次都没提到的概念多半是顺手写上的，只在前面的词够用时排除
+  const mentioned = list.filter(item => item.occurrences > 0)
+  const chosen = (mentioned.length >= 3 ? mentioned : list).map(item => item.term)
+
+  // 概念太少时（例如开学第一节课）用小节标题补：标题同样说明这节课讲了什么
+  if (chosen.length < 3) {
+    const fromHeadings = headings
+      // 二级标题也算：概念一条都没有时（有的课第一节只抽到"教室安排"），
+      // 话题名是唯一能说明这节课讲了什么的东西
+      .filter(heading => !STRUCTURE_HEADINGS.test(String(heading.text || '')))
+      .map(heading => usable(String(heading.text)
+        .replace(/^[（(]?[一二三四五六七八九十\d]+[）)、.]?\s*/, '')
+        .replace(/[★☆]+\s*$/, '')
+        .split(/[：:]/)[0]
+        .trim()))
+      .filter(Boolean)
+    for (const term of fromHeadings) {
+      if (chosen.includes(term)) continue
+      chosen.push(term)
+      if (chosen.length >= limit) break
+    }
+  }
+
+  return chosen.slice(0, limit)
 }
 
 /** 中文阅读时长：约 400 字/分钟；表格与图另外加权（表格扫读快，图要停下来看）。 */
@@ -1313,8 +1436,8 @@ export function renderIndexPage(records, { siteOrigin = '' } = {}) {
     groups.get(key).push(record)
   }
 
-  // 一门课一组，课次按行排：一行一节（标题 + 时长 + 日期）。
-  // 大卡片一屏放不下三门课，而这一页真正要回答的只是"这门课讲到哪儿了、点哪一节"。
+  // 表格：一行一节课，列是 课次 | 关键词 | 时长 | 日期。关键词是「这节课讲了什么」的最短
+  // 表达——写笔记时由模型顺手挑出来的那五六个词，没有它这一页就只是一串标题。
   const courses = [...groups.keys()]
   const rail = [
     '<aside class="filter-rail" id="course-rail" data-kind="home">',
@@ -1325,6 +1448,15 @@ export function renderIndexPage(records, { siteOrigin = '' } = {}) {
     '</aside>'
   ].join('\n')
 
+  const rowOf = record => [
+    '<tr>',
+    `<td class="lesson-title"><a href="${escapeHtml(record.slug)}.html">${escapeHtml(record.lessonTitle)}</a></td>`,
+    `<td class="lesson-keywords">${(record.keywords || []).map(term => `<span class="kw">${escapeHtml(term)}</span>`).join('')}</td>`,
+    record.readMinutes ? `<td class="lesson-meta">约 ${record.readMinutes} 分钟</td>` : '<td class="lesson-meta"></td>',
+    record.publishedAt ? `<td class="lesson-date">${escapeHtml(String(record.publishedAt).slice(0, 10))}</td>` : '<td class="lesson-date"></td>',
+    '</tr>'
+  ].join('')
+
   const body = [
     '<div class="index-shell">',
     rail,
@@ -1333,15 +1465,9 @@ export function renderIndexPage(records, { siteOrigin = '' } = {}) {
       ? [...groups.entries()].map(([course, items]) => [
         `<section class="band" data-course="${escapeHtml(course)}">`,
         `<h2>${escapeHtml(course)}</h2>`,
-        '<div class="lesson-list">',
-        items.map(record => [
-          `<a class="lesson-row" href="${escapeHtml(record.slug)}.html">`,
-          `<span class="lesson-title">${escapeHtml(record.lessonTitle)}</span>`,
-          record.readMinutes ? `<span class="lesson-meta">约 ${record.readMinutes} 分钟</span>` : '',
-          record.publishedAt ? `<span class="lesson-date">${escapeHtml(String(record.publishedAt).slice(0, 10))}</span>` : '',
-          '</a>'
-        ].join('')),
-        '</div>',
+        '<table class="lesson-table"><thead><tr><th>课次</th><th>关键词</th><th class="num">时长</th><th class="num">日期</th></tr></thead><tbody>',
+        items.map(rowOf).join('\n'),
+        '</tbody></table>',
         '</section>'
       ].join('\n')).join('\n')
       : '<div class="empty">还没有已发布的笔记。</div>',
@@ -1407,6 +1533,14 @@ export function renderFeed(records = [], { siteOrigin = '', siteName = SITE_NAME
  * --rebuild 只读发布库，不重跑模型——那就得在这里把派生字段按正文重算一遍，
  * 否则模板改了、字段加了，重建出来的站点却还是老的。
  */
+/** 关键词的两个字段：词本身，以及它是谁挑的（模型挑的下次重建不能被排序结果覆盖）。 */
+export function keywordFields({ brief = null, markdown = '', concepts = [], courseName = '', limit = 6 } = {}) {
+  const chosen = (Array.isArray(brief?.keywords) ? brief.keywords : [])
+    .map(term => String(term || '').trim()).filter(Boolean).slice(0, limit)
+  if (chosen.length) return { keywords: chosen, keywordsSource: 'brief' }
+  return { keywords: deriveKeywords(markdown, { concepts, courseName, limit }), keywordsSource: 'ranked' }
+}
+
 export function refreshRecord(record = {}) {
   const markdown = String(record.markdown ?? '')
   if (!markdown.trim()) return record
@@ -1415,7 +1549,15 @@ export function refreshRecord(record = {}) {
     headings: extractHeadings(markdown),
     readMinutes: record.readMinutes || estimateReadMinutes(markdown),
     metadata: extractNoteMetadata(markdown),
-    anchors: termAnchors(markdown)
+    anchors: termAnchors(markdown),
+    // 模型挑过的关键词是判断，不是可重算的派生值——重建时原样保留
+    ...(record.keywordsSource === 'brief' && record.keywords?.length
+      ? { keywords: record.keywords, keywordsSource: 'brief' }
+      : keywordFields({
+        markdown,
+        concepts: (record.metadata?.keywords?.length ? record.metadata.keywords : (record.metadata?.concepts || [])),
+        courseName: record.courseName || ''
+      }))
   }
 }
 

@@ -13,6 +13,7 @@ import {
   readSiteIndex,
   renderIndexPage,
   renderKnowledgeMapPage,
+  refreshRecord,
   renderFeed,
   renderNotePage,
   renderSearchPage,
@@ -408,6 +409,41 @@ test('the home page and the index pages share one course filter', () => {
   assert.match(concepts, /querySelectorAll\('\.term-course'\)/, '按课程区块显隐')
 })
 
+test('keywords chosen while writing the brief win over the ranked fallback', () => {
+  const markdown = [
+    '# 第1-2节 有限责任',
+    '',
+    '## 一、法人人格否认',
+    '',
+    '法人人格否认是揭开公司面纱的手段。资本维持要求不得抽逃出资，资本维持也保护债权人。',
+    '',
+    '<details><summary>元数据</summary>',
+    '<pre><code>',
+    'META: CONCEPT: 法人人格否认',
+    'META: CONCEPT: 资本维持',
+    'META: CONCEPT: 抽逃出资',
+    'META: CONCEPT: 制度',
+    '</code></pre>',
+    '</details>'
+  ].join('\n')
+
+  // 没有简报时：按出现频次与标题命中排序，泛词与课程名被挡掉
+  const ranked = record({ markdown, courseName: '商法概论' })
+  assert.equal(ranked.keywordsSource, 'ranked')
+  assert.ok(ranked.keywords.includes('资本维持'), '正文里反复出现的词要进来')
+  assert.ok(!ranked.keywords.includes('制度'), '泛词不进来')
+
+  // 有简报时：模型挑的那几个词优先，重建也不覆盖
+  const chosen = record({
+    markdown,
+    courseName: '商法概论',
+    brief: { briefing: '这一节讲有限责任的两条主线。'.repeat(4), keyPoints: ['a', 'b', 'c'], keywords: ['法人人格否认', '资本维持', '风险外部化'] }
+  })
+  assert.equal(chosen.keywordsSource, 'brief')
+  assert.deepEqual(chosen.keywords, ['法人人格否认', '资本维持', '风险外部化'])
+  assert.deepEqual(refreshRecord(chosen).keywords, ['法人人格否认', '资本维持', '风险外部化'], '模型挑的关键词是判断，重建时不能退回排序结果')
+})
+
 test('a corrupt index is reported rather than silently treated as empty', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-site-'))
   fs.writeFileSync(path.join(dir, 'notes.json'), '{ broken')
@@ -485,9 +521,10 @@ test('the home page lays every course out as a horizontal strip of lessons', () 
     record({ lessonTitle: '第10-12节 共犯与罪数', publishedAt: '2026-09-25T00:00:00.000Z' })
   ])
   assert.match(html, /<section class="band" data-course="刑法分论">/)
-  assert.match(html, /<a class="lesson-row" href="notes\/刑法分论\/第10-12节-共犯与罪数\.html">/)
-  assert.match(html, /<span class="lesson-title">/)
-  assert.ok(!html.includes('class="card"'), '大卡片换成了一行一节')
+  assert.match(html, /<table class="lesson-table">/)
+  assert.match(html, /<th>课次<\/th><th>关键词<\/th>/, '表格第一列课次、第二列关键词')
+  assert.match(html, /<td class="lesson-title"><a href="notes\/刑法分论\/第10-12节-共犯与罪数\.html">/)
+  assert.ok(!html.includes('class="card"'), '大卡片换成了表格')
   assert.ok(!html.includes('个概念'), '卡片上那串"几个概念几条法条"不再显示')
   assert.ok(!html.includes('共 3 篇'), '顶部那行统计不需要')
 })

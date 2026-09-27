@@ -151,7 +151,21 @@ function buildFixture() {
     courseName: '刑事执行法',
     lessonTitle: '第7-8节 减刑与假释',
     publishedAt: '2026-09-23T10:00:00.000Z',
-    markdown: ['# 第7-8节 减刑与假释', '', '## 一、减刑的条件', '', '减刑要经过报请与裁定两个环节。'].join('\n')
+    brief: { briefing: '本节讲减刑与假释的适用条件：减刑的报请与裁定、假释的实质条件与考验期。', keyPoints: ['减刑要经过报请与裁定', '假释看没有再犯危险'], keywords: ['减刑', '假释', '报请与裁定', '考验期'] },
+    markdown: [
+      '# 第7-8节 减刑与假释',
+      '',
+      '## 一、减刑的条件',
+      '',
+      '减刑要经过报请与裁定两个环节。假释看的是没有再犯危险。',
+      '',
+      '<details><summary>元数据</summary>',
+      '<pre><code>',
+      'META: CONCEPT: 减刑',
+      'META: CONCEPT: 假释',
+      '</code></pre>',
+      '</details>'
+    ].join('\n')
   })
   const companyRecord = buildNoteRecord({
     courseName: '商法概论',
@@ -1066,16 +1080,24 @@ async function auditIndexPages(page, site, failures) {
   }
   console.log('首页与索引页')
 
-  // 首页：一门课一组，课次一行一节（比大卡片密得多），左侧有课程筛选
+  // 首页：一门课一张表，一行一节课，列是 课次 | 关键词 | 时长 | 日期
   await page.goto(site.url + '/index.html', { waitUntil: 'domcontentloaded' })
-  await page.waitForSelector('.band', { timeout: 8000 })
+  await page.waitForSelector('.lesson-table', { timeout: 8000 })
   const bands = await page.$$eval('.band', nodes => nodes.map(node => ({
     course: node.getAttribute('data-course'),
-    lessons: node.querySelectorAll('.lesson-row').length
+    lessons: node.querySelectorAll('.lesson-table tbody tr').length,
+    headers: [...node.querySelectorAll('.lesson-table th')].map(th => th.textContent),
+    keywords: [...node.querySelectorAll('.lesson-table tbody tr')]
+      .map(row => [...row.querySelectorAll('.kw')].map(kw => kw.textContent))
   })))
   await record('一门课一组', bands.length === 3, '共 ' + bands.length + ' 组：' + bands.map(band => band.course).join(' / '))
-  await record('课次一行一节', bands.every(band => band.lessons >= 1) && !(await page.$('.card')),
+  await record('课次按表格排', bands.every(band => band.lessons >= 1) && !(await page.$('.card')),
     bands.map(band => band.course + ' ' + band.lessons + ' 节').join('，'))
+  await record('表头是课次/关键词/时长/日期', bands[0].headers.join('|') === '课次|关键词|时长|日期', bands[0].headers.join(' · '))
+  const keywordCounts = bands.flatMap(band => band.keywords.map(list => list.length))
+  const keywordSample = bands[0].keywords[0] || []
+  await record('每节课都有关键词', keywordCounts.every(count => count >= 2 && count <= 6),
+    '关键词条数 ' + keywordCounts.join('/') + '，例如：' + keywordSample.join('、'))
   await page.click('#course-rail button[data-course="商法概论"]')
   await page.waitForTimeout(150)
   const visibleBands = await page.$$eval('.band', nodes => nodes.filter(node => !node.hidden).length)
