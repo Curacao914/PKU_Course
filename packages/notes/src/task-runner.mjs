@@ -314,6 +314,9 @@ export async function executeCourseTask(task, options = {}) {
   if (!task || task.type === 'idle') return null
   const callModel = options.callModel || callCourseModel
   const modelConfig = options.modelConfig
+  // 同一门课此前讲到哪：由调用方（apps/worker）从发布库提炼后传进来，
+  // 这里只负责放进大纲/写作/接缝三步的提示词——它是"承接什么"的依据。
+  const courseContext = options.courseContext || ''
 
   if (task.type === 'plan-nodes') {
     return { type: 'plan-nodes', lessonKey: task.lessonKey, taskKey: task.taskKey }
@@ -343,6 +346,7 @@ export async function executeCourseTask(task, options = {}) {
         role: 'splicer',
         promptVersion: task.courseSpec?.promptVersion,
         courseSpec: task.courseSpec,
+        courseContext,
         lessonBlueprint: {
           title: task.lesson?.title,
           mainLine: task.lesson?.blueprint?.mainLine || '',
@@ -356,6 +360,7 @@ export async function executeCourseTask(task, options = {}) {
           })),
           instruction: [
             '只生成接缝段与体系层，不得改写或概括替代任何节点正文。',
+            'CourseSoFar 是同一门课此前成品笔记的摘要：知识连接的"承接什么"以它为依据并落到具体概念或论证线；它没有的内容不许编成承接关系。',
             // 系统层没有预算时会把整段解释塞进索引表格，成品直接翻倍（实测 7,460 字的复习层）。
             `体系层与接缝段合计控制在 ${Number(task.courseSpec?.systemLayerChars || 2500)} 字以内：索引表格每格不超过 40 字、每张表不超过 12 行；章节总结 2—3 句；自测题 3—5 题、答案控制在 2 句以内。`,
             'sectionSummaries 与 sectionQuizzes 的键必须使用上述 outline id；threads[].sections 必须使用上述 outline id。',
@@ -473,6 +478,7 @@ export async function executeCourseTask(task, options = {}) {
             }
             : {})
         },
+        courseContext,
         sourceText: numberTranscript(task.lesson.transcript),
         pptText: JSON.stringify([...(task.lesson.pptText || []), ...(task.lesson.supplements || [])]),
         schema: {
@@ -550,6 +556,7 @@ export async function executeCourseTask(task, options = {}) {
           revisionRequests: task.node.revisionRequests || [],
           reviewerIssues: task.node.reviewerReports?.at?.(-1)?.value?.issues || []
         },
+        courseContext,
         sourceText: task.node.sourceText,
         pptText: task.node.pptText,
         previousNodeSummary: task.node.writerBrief?.previousNodeSummary,

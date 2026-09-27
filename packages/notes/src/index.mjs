@@ -45,6 +45,12 @@ export {
 } from './brief.mjs'
 
 export {
+  COURSE_CONTEXT_BUDGET,
+  buildCourseContext,
+  lessonDateOfRecord
+} from './course-context.mjs'
+
+export {
   SPLICE_EVIDENCE,
   draftsByOutline,
   isVerbatimCopy,

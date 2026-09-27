@@ -148,6 +148,8 @@ export function applyTaskAction(lesson, action, { courseSpec = {}, autoApproveOu
 export async function runLessonNotes({
   lesson,
   courseSpec = {},
+  // 同一门课此前讲到哪（course-context.mjs 的产物）：调用方从发布库提炼后传进来。
+  courseContext = '',
   modelConfig,
   callModel,
   autoApproveOutline = true,
@@ -183,7 +185,7 @@ export async function runLessonNotes({
 
     const results = await Promise.all(tasks.map(async task => {
       try {
-        return { task, action: await executeCourseTask(task, { modelConfig, callModel }) }
+        return { task, action: await executeCourseTask(task, { modelConfig, callModel, courseContext }) }
       } catch (error) {
         return { task, error: error instanceof Error ? error.message : String(error) }
       }

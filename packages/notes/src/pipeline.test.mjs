@@ -82,6 +82,37 @@ test('a clean run drives the lesson from transcript to a completed note', async 
   assert.equal(result.lesson.finalNoteVersions.length, 1)
 })
 
+test('跨课次上下文进大纲、写作与接缝三步的提示词，且不进简报那类只读成品的步骤', async () => {
+  const { callModel, calls } = scriptedModel()
+  const context = [
+    '## 课程进行到哪里了（刑法总论，此前的成品笔记摘要）',
+    '用法：判断本节课承接什么、哪些内容已经讲过（不要重复讲授、也不要照抄这里的话）。',
+    '### 第9讲（2026-09-14）',
+    '主题：违法性',
+    '概念：正当防卫、紧急避险'
+  ].join('\n')
+  const result = await runLessonNotes({
+    lesson: lesson(),
+    courseSpec: {},
+    courseContext: context,
+    callModel,
+    modelConfig: { apiKey: 'sk' }
+  })
+
+  assert.equal(result.stopReason, 'completed')
+  const promptOf = role => calls.filter(call => call.role === role).map(call => call.prompt.user).join('\n')
+  for (const role of ['outline', 'writer', 'splicer']) {
+    assert.ok(promptOf(role).includes('第9讲（2026-09-14）'), `${role} 的提示词里要有此前讲到哪`)
+    assert.ok(promptOf(role).includes('## CourseSoFar'), `${role} 的提示词要带上这一块（有标签才知道它是依据）`)
+  }
+  assert.equal(promptOf('reviewer').includes('第9讲（2026-09-14）'), false, '审查只看当前草稿，不塞跨课次上下文')
+
+  // 没有上下文的课（第一讲）不出现空块：给一个空标签只会让模型猜
+  const empty = scriptedModel()
+  await runLessonNotes({ lesson: lesson(), courseSpec: {}, courseContext: '', callModel: empty.callModel, modelConfig: {} })
+  assert.ok(!empty.calls.some(call => String(call.prompt.user).includes('## CourseSoFar')), '空上下文不该出现这一块')
+})
+
 test('manual mode stops at the outline gate instead of auto-approving', async () => {
   const { callModel } = scriptedModel()
   const result = await runLessonNotes({

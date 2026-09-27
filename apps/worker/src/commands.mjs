@@ -22,6 +22,8 @@ import {
 import {
   // 简报与来源正文的绑定：生成侧写字段、发布侧校验都走 @course/notes 这一套
   checkBriefBinding,
+  // 同一门课此前讲到哪：从发布库提炼的受控摘要（见 course-context.mjs）
+  buildCourseContext,
   callCourseModel,
   createInitialLesson,
   ONEPAGE_TARGET_CHARS,
@@ -660,9 +662,26 @@ export function createCommands(context) {
       const callModel = injectedCallModel ||
         (payload => callCourseModel({ ...payload, config: { ...modelConfig, ...(payload.config || {}) } }))
 
+      /**
+       * 跨课次上下文：同一门课此前讲到哪。
+       *
+       * 从**已发布的成品笔记**（站点发布库）提炼，不额外花模型调用；只取本节课之前的课次。
+       * 课上讲到一半的课次（还没发布）不会出现在这里——那正是它没进发布库的原因，
+       * 不是缺陷：宁可少给依据，也不给一份与成品笔记不一致的"记忆"。
+       */
+      const courseContext = readCourseContext({
+        courseName: course,
+        lessonTitle,
+        lessonDate: options.options['lesson-date'] || ''
+      })
+      if (courseContext.text) {
+        stderr(`跨课次上下文：${courseContext.lessonCount} 节（${courseContext.chars} 字）`)
+      }
+
       const result = await runLessonNotes({
         lesson,
         courseSpec,
+        courseContext: courseContext.text,
         modelConfig,
         callModel,
         autoApproveOutline,
@@ -810,6 +829,25 @@ export function createCommands(context) {
       return ''
     } finally {
       try { store?.close() } catch {}
+    }
+  }
+
+  /**
+   * 从站点发布库提炼"同一门课此前讲到哪"。
+   *
+   * 读不到发布库（第一次跑、或站点还没建）不算错误：返回空上下文，流水线照常走——
+   * 第一讲本来就没有"之前"。读得到时按课次日期只取本节之前的课次。
+   */
+  function readCourseContext({ courseName = '', lessonTitle = '', lessonDate = '' } = {}) {
+    const libraryPath = path.join(path.resolve(config.scratchRoot, 'site'), 'library.json')
+    try {
+      if (!fs.existsSync(libraryPath)) return { text: '', chars: 0, lessonCount: 0, previous: null }
+      const records = JSON.parse(fs.readFileSync(libraryPath, 'utf8'))
+      if (!Array.isArray(records)) return { text: '', chars: 0, lessonCount: 0, previous: null }
+      return buildCourseContext({ records, courseName, lessonTitle, lessonDate })
+    } catch (error) {
+      stderr(`跨课次上下文读取失败（不影响笔记）：${error instanceof Error ? error.message : String(error)}`)
+      return { text: '', chars: 0, lessonCount: 0, previous: null }
     }
   }
 
