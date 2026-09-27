@@ -11,6 +11,7 @@
     "course-site": "./bin/serve.mjs"
   },
   "dependencies": {
+    "@course/notes-mcp": "*",
     "@course/publish": "*"
   }
 }

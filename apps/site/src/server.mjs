@@ -69,7 +69,17 @@ export function createRequestHandler({
   workerEnv = {},
   assetsDir = '',
   materialsRoot = '',
-  runCommand
+  runCommand,
+  siteOrigin = 'https://course.law-tech.dev',
+  /**
+   * Remote MCP：把笔记 MCP 挂到 `POST /mcp`。
+   *
+   * 数据源就是**同一个发布库**（站点根目录下的 library.json，由 course publish 写出）：
+   * 没有第二份数据、不需要人工同步。本地库数据源按 mtime 判断是否重读，所以新笔记发布后
+   * 不用重启服务、不用重新部署，最多等一个短缓存周期就能被 AI 看到。
+   */
+  mcp = true,
+  mcpOrigin = siteOrigin
 } = {}) {
   const normalizedRoot = path.resolve(root)
   const normalizedAssets = assetsDir ? path.resolve(assetsDir) : ''
@@ -82,6 +92,30 @@ export function createRequestHandler({
     runCommand
   })
 
+  // MCP 处理器懒加载：没装 notes-mcp 包（或明确关掉）时，站点照常工作
+  let mcpHandler = null
+  let mcpFailed = ''
+  const mcpPath = '/mcp'
+  const ensureMcp = async () => {
+    if (mcpHandler || mcpFailed) return mcpHandler
+    try {
+      const { createMcpHttpHandler, createNotesService, createLocalLibrarySource } = await import('@course/notes-mcp')
+      const libraryPath = path.join(normalizedRoot, 'library.json')
+      const service = createNotesService({
+        source: createLocalLibrarySource({ file: libraryPath }),
+        siteOrigin: mcpOrigin
+      })
+      mcpHandler = createMcpHttpHandler({
+        service,
+        log: line => process.stderr.write(`${line}\n`)
+      })
+    } catch (error) {
+      mcpFailed = error instanceof Error ? error.message : String(error)
+      process.stderr.write(`[site] MCP 不可用：${mcpFailed}\n`)
+    }
+    return mcpHandler
+  }
+
   return async function handle(req, res) {
     let url
     try {
@@ -91,6 +125,24 @@ export function createRequestHandler({
       return
     }
     const pathname = url.pathname
+
+    // Remote MCP：长期在线的 HTTP 入口（POST 为主，所以必须在方法检查之前）
+    if (mcp && (pathname === mcpPath || pathname === `${mcpPath}/`)) {
+      const handler = await ensureMcp()
+      if (!handler) {
+        sendJson(res, 503, { ok: false, error: 'mcp_unavailable', message: mcpFailed || 'MCP 未启用' })
+        return
+      }
+      try {
+        await handler(req, res)
+      } catch (error) {
+        process.stderr.write(`[site] MCP 处理失败：${error instanceof Error ? error.message : String(error)}\n`)
+        if (!res.headersSent) {
+          sendJson(res, 500, { jsonrpc: '2.0', id: null, error: { code: -32603, message: '服务器内部错误' } })
+        }
+      }
+      return
+    }
 
     // 管理台先接管：它要处理 POST，因此必须排在方法检查之前
     try {
@@ -155,6 +207,13 @@ export function createRequestHandler({
     const target = resolveInsideRoot(normalizedRoot, candidate)
     if (!target) {
       send(res, 403, 'forbidden')
+      return
+    }
+
+    // 站点内部产物不给静态下载：library.json 是发布库（几 MB，含全部正文），
+    // 对外已经有 /api/notes（索引）、/md/*.md（单篇正文）与 /mcp 三个正当入口。
+    if (/^(library|\.?[^/]*\.tmp)\.json$/.test(candidate) || candidate.startsWith('library.json')) {
+      send(res, 404, 'not found', { 'cache-control': 'no-store' })
       return
     }
 

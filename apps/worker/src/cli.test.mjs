@@ -74,6 +74,39 @@ function harness(overrides = {}) {
   return { deps, lines, errors, calls, ledger }
 }
 
+/**
+ * 造一份归档课件（meta.json + 解析结果），供课件相关的断言使用。
+ *
+ * 形状与 packages/materials 的归档一致：<root>/<课程>/<课次>/meta.json 里一条记录，
+ * slides/<名>.json 是解析出来的文字。列表判据（listMaterials）与笔记读盘（readDecks）
+ * 走的都是这两个文件，所以夹具必须是这个形状，不能只丢一个空目录。
+ */
+function writeDeckFixture(scratchRoot, {
+  course = '刑法分论', lesson = '第10-12节', replayKey = 'replay-1', name = '讲座课件.pptx', scope = 'lesson'
+} = {}) {
+  const dir = scope === 'course'
+    ? path.join(scratchRoot, 'materials', course, 'course')
+    : path.join(scratchRoot, 'materials', course, lesson)
+  fs.mkdirSync(path.join(dir, 'slides'), { recursive: true })
+  const parsedPath = path.join(dir, 'slides', `${name}.json`)
+  fs.writeFileSync(parsedPath, JSON.stringify({
+    slideCount: 2,
+    slides: [{ slideNumber: 1, text: '共同故意' }, { slideNumber: 2, text: '共同行为' }],
+    images: [],
+    ocr: { pending: 0 }
+  }))
+  const metaPath = path.join(dir, 'meta.json')
+  const meta = fs.existsSync(metaPath) ? JSON.parse(fs.readFileSync(metaPath, 'utf8')) : { materials: [] }
+  meta.materials = [...(meta.materials || []), {
+    name, scope, course, lesson: scope === 'course' ? '' : lesson,
+    replayKey: scope === 'course' ? '' : replayKey, appliesTo: [],
+    bytes: 4, checksum: `fixture-${name}`, slideCount: 2, imageCount: 0, ocrPending: 0,
+    parsedPath, addedAt: '2026-09-25T00:00:00.000Z'
+  }]
+  fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2))
+  return { dir, metaPath, parsedPath }
+}
+
 test('brief --from 把主题与关键词写进 brief.json（曾经只进了 stdout，页面那一列一直是空的）', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-brief-'))
   const notePath = path.join(dir, '第10-12节.md')
@@ -834,6 +867,10 @@ test('cycle drives one task through every stage and delivers the notification', 
   const mediaPath = path.join(scratch, 'replays', 'replay-1', 'output', 'media.mp4')
   fs.mkdirSync(path.dirname(mediaPath), { recursive: true })
   fs.writeFileSync(mediaPath, 'fake media')
+  // 这一节有课件：默认规则（--require-materials 1）下，没课件的课次整轮不跑。
+  // 课次要写 discover 之后的标题（cycle 会先扫描一遍，用教学网上的标题刷新账本），
+  // 归档是按课次标题找的——写错标题就等于"没传课件"。
+  writeDeckFixture(scratch, { lesson: '2026-05-27第10-12节' })
 
   ledger.discoverReplays([{ replay_key: 'replay-1', course_key: 'course-abc', course_name: '刑法分论', title: '第10-12节' }])
   ledger.reportStage({
@@ -859,11 +896,13 @@ test('cycle reports a missing prerequisite instead of crashing', async () => {
   // 注入一个可用发送器，避免把「未配置微信」的错误混进这条断言
   const okSender = { target: 'wxid', probe: async () => ({ ok: true }), send: async () => ({ externalId: 'x' }) }
   const { deps, lines, ledger } = harness({ sender: okSender })
-  // 阶段是 transcript_ready，但没有 transcriptPath 产物
-  ledger.discoverReplays([{ replay_key: 'replay-1', course_key: 'course-abc' }])
+  // 阶段是 transcript_ready，但没有 transcriptPath 产物（课件齐备，走的才是"缺前置产物"这条路）
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  writeDeckFixture(scratch, { lesson: '2026-05-27第10-12节' })
+  ledger.discoverReplays([{ replay_key: 'replay-1', course_key: 'course-abc', course_name: '刑法分论', title: '2026-05-27第10-12节' }])
   ledger.reportStage({ id: ledger.getTask('replay-1').id, stage: 'transcript_ready' })
 
-  const code = await runCli(['cycle', '--max-tasks', '2'], deps)
+  const code = await runCli(['cycle', '--max-tasks', '2'], { ...deps, env: { ...deps.env, COURSE_WORKER_SCRATCH_DIR: scratch } })
   const summary = parse(lines.at(-1))
   assert.equal(summary.tasks[0].note, '缺少前置产物，跳过')
   assert.equal(code, 1, '跳过不等于成功')
@@ -954,10 +993,11 @@ test('verify runs a real cycle and asserts each acceptance criterion', async () 
     COURSE_AI_API_KEY: 'sk-ai'
   }
 
-  // 预备一节课：媒体已下载，等转录
+  // 预备一节课：媒体已下载，等转录；课件也已上传（否则默认规则会让 cycle 跳过它）
   const mediaPath = path.join(dir, 'replays', 'replay-1', 'output', 'media.mp4')
   fs.mkdirSync(path.dirname(mediaPath), { recursive: true })
   fs.writeFileSync(mediaPath, 'fake media')
+  writeDeckFixture(dir, { lesson: '2026-05-27第10-12节' })
   ledger.discoverReplays([{ replay_key: 'replay-1', course_key: 'course-abc', course_name: '刑法分论', title: '第10-12节' }])
   ledger.reportStage({ id: ledger.getTask('replay-1').id, stage: 'downloaded', data: { artifacts: { mediaPath } } })
 
@@ -1066,6 +1106,130 @@ test('run history keeps only the most recent entries', async () => {
 
   // 本次运行又加了一个；上限 50，因此 5 个旧目录应全部保留
   assert.equal(fs.readdirSync(runsDir).length, 6)
+})
+
+test('没有课件就不自动跑：跳过、留一行日志、账本一点都不动', async () => {
+  const okSender = { target: 'wxid', probe: async () => ({ ok: true }), send: async () => ({ externalId: 'x' }) }
+  const { deps, errors, lines, ledger } = harness({ sender: okSender })
+  // 账本里有这节课，但课件归档里一份都没有（默认规则下就该整轮不处理）
+  ledger.discoverReplays([{ replay_key: 'replay-1', course_key: 'course-abc' }])
+  const before = ledger.getTask('replay-1')
+
+  const code = await runCli(['cycle', '--max-tasks', '3'], deps)
+  const summary = parse(lines.at(-1))
+
+  assert.equal(summary.materials.required, true, '默认 --require-materials 1')
+  assert.deepEqual(summary.materials.skipped.map(item => item.replayKey), ['replay-1'])
+  assert.equal(summary.tasks.length, 1)
+  assert.equal(summary.tasks[0].action, 'skip')
+  assert.equal(summary.tasks[0].note, '没有课件，本轮不跑（不推进阶段）')
+  assert.match(errors.join('\n'), /没有课件，本轮不跑/, 'stderr 要留下一行可见痕迹')
+  assert.match(errors.join('\n'), /立即跑这一节/, '要告诉用户怎么强制跑')
+
+  const after = ledger.getTask('replay-1')
+  assert.equal(after.stage, before.stage, '阶段不得推进（只是本轮不处理）')
+  assert.equal(after.attempts, 0, '也不得消耗重试次数——否则几轮之后它会被误判成"停下等你"')
+  assert.equal(after.lease_expires_at, before.lease_expires_at, '不该领取（否则会占住一小时租约）')
+  assert.equal(code, 0, '缺课件跳过是策略，不是失败')
+})
+
+test('--require-materials 0：无课件也照跑，结果里写明是显式放开的', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const okSender = { target: 'wxid', probe: async () => ({ ok: true }), send: async () => ({ externalId: 'x' }) }
+  const { deps, lines, ledger } = harness({
+    sender: okSender,
+    runPython: async payload => {
+      const outputDir = payload.args[payload.args.indexOf('--output-dir') + 1]
+      fs.mkdirSync(outputDir, { recursive: true })
+      fs.writeFileSync(path.join(outputDir, 'raw-transcript.md'), '[00:00:01 – 00:00:05] 第一句')
+      fs.writeFileSync(path.join(outputDir, 'run-summary.json'), JSON.stringify({ chunkCount: 1, sentenceCount: 1 }))
+      return { code: 0, stdout: '', stderr: '' }
+    }
+  })
+  const env = { ...deps.env, COURSE_WORKER_SCRATCH_DIR: dir }
+  const mediaPath = path.join(dir, 'replays', 'replay-1', 'output', 'media.mp4')
+  fs.mkdirSync(path.dirname(mediaPath), { recursive: true })
+  fs.writeFileSync(mediaPath, 'fake media')
+  ledger.discoverReplays([{ replay_key: 'replay-1', course_key: 'course-abc', course_name: '刑法分论', title: '2026-05-27第10-12节' }])
+  ledger.reportStage({ id: ledger.getTask('replay-1').id, stage: 'downloaded', data: { artifacts: { mediaPath } } })
+
+  const code = await runCli(['cycle', '--max-tasks', '1', '--require-materials', '0'], { ...deps, env })
+  const summary = parse(lines.at(-1))
+
+  assert.equal(summary.materials.required, false)
+  assert.deepEqual(summary.materials.skipped, [])
+  const transcribe = summary.tasks.find(item => item.action === 'transcribe')
+  assert.ok(transcribe, '关掉开关后应当照跑：' + JSON.stringify(summary.tasks))
+  assert.equal(transcribe.ok, true)
+  assert.equal(transcribe.materialCount, 0)
+  assert.equal(transcribe.note, '无课件也照跑（--require-materials 0）', '结果里要看得出来是"无课件也照跑"')
+  assert.equal(ledger.getTask('replay-1').stage, 'transcript_ready', '真的往前走了')
+  assert.equal(code, 0)
+})
+
+test('指定 --replay-key 的单节课不受"缺课件"限制（显式点名就是"我现在就要跑"）', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const okSender = { target: 'wxid', probe: async () => ({ ok: true }), send: async () => ({ externalId: 'x' }) }
+  const { deps, lines, ledger } = harness({
+    sender: okSender,
+    runPython: async payload => {
+      const outputDir = payload.args[payload.args.indexOf('--output-dir') + 1]
+      fs.mkdirSync(outputDir, { recursive: true })
+      fs.writeFileSync(path.join(outputDir, 'raw-transcript.md'), '[00:00:01 – 00:00:05] 第一句')
+      fs.writeFileSync(path.join(outputDir, 'run-summary.json'), JSON.stringify({ chunkCount: 1, sentenceCount: 1 }))
+      return { code: 0, stdout: '', stderr: '' }
+    }
+  })
+  const env = { ...deps.env, COURSE_WORKER_SCRATCH_DIR: dir }
+  const mediaPath = path.join(dir, 'replays', 'replay-1', 'output', 'media.mp4')
+  fs.mkdirSync(path.dirname(mediaPath), { recursive: true })
+  fs.writeFileSync(mediaPath, 'fake media')
+  ledger.discoverReplays([{ replay_key: 'replay-1', course_key: 'course-abc', course_name: '刑法分论', title: '2026-05-27第10-12节' }])
+  ledger.reportStage({ id: ledger.getTask('replay-1').id, stage: 'downloaded', data: { artifacts: { mediaPath } } })
+
+  // 默认的 --require-materials 还是 1，但显式点名这一节时不再拦
+  const code = await runCli(['cycle', '--replay-key', 'replay-1', '--max-tasks', '1'], { ...deps, env })
+  const summary = parse(lines.at(-1))
+
+  assert.equal(summary.materials.required, true, '开关本身还是默认值')
+  const transcribe = summary.tasks.find(item => item.action === 'transcribe')
+  assert.ok(transcribe, '显式点名必须照跑：' + JSON.stringify(summary.tasks))
+  assert.equal(transcribe.note, '无课件也照跑（显式指定这一节）')
+  assert.equal(ledger.getTask('replay-1').stage, 'transcript_ready')
+  assert.equal(code, 0)
+})
+
+test('微信会话过期时如实记录"不能自动激活"，不假装试过', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'openclaw-state-'))
+  const accounts = path.join(stateDir, 'openclaw-weixin', 'accounts')
+  fs.mkdirSync(accounts, { recursive: true })
+  const tokens = path.join(accounts, 'bot.context-tokens.json')
+  fs.writeFileSync(tokens, JSON.stringify({ 'user@im.wechat': 'token' }))
+  // 固定时钟 + 23 小时前的互动记录：超过 12 小时的阈值就是"已过期"
+  const fixed = new Date('2026-09-25T00:30:00Z')
+  fs.utimesSync(tokens, new Date(fixed.getTime() - 23 * 3600 * 1000), new Date(fixed.getTime() - 23 * 3600 * 1000))
+
+  const okSender = { target: 'wxid', probe: async () => ({ ok: true }), send: async () => ({ externalId: 'x' }) }
+  const { deps, errors, lines } = harness({ sender: okSender, now: () => fixed })
+  const env = {
+    ...deps.env,
+    COURSE_WORKER_SCRATCH_DIR: dir,
+    OPENCLAW_STATE_DIR: stateDir,
+    OPENCLAW_HOME: stateDir
+  }
+
+  const code = await runCli(['cycle', '--max-tasks', '1'], { ...deps, env })
+  const summary = parse(lines.at(-1))
+
+  assert.equal(summary.wechat.expired, true)
+  assert.equal(summary.wechat.needed, true)
+  assert.equal(summary.wechat.attempted, false, '没有可用的非交互式入口，就不要假装试过')
+  assert.equal(summary.wechat.ok, false)
+  assert.match(summary.wechat.session.summary, /已过期（超过 12 小时）：最近互动 23 小时前/)
+  assert.match(errors.join('\n'), /微信会话不可用/)
+  assert.match(errors.join('\n'), /给微信机器人发一条消息/)
+  assert.equal(code, 0)
 })
 
 test('cycle skips media work when the disk is full but still delivers notifications', async () => {

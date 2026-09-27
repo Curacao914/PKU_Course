@@ -15,7 +15,7 @@ function pythonAvailable() {
   return spawnSync('python3', ['-c', 'import sys;print(sys.version)'], { encoding: 'utf8' }).status === 0
 }
 
-function fixture({ runCommand, spawnOcr } = {}) {
+function fixture({ runCommand, spawnOcr, now } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-admin-'))
   const scratchRoot = path.join(dir, 'scratch')
   fs.mkdirSync(scratchRoot, { recursive: true })
@@ -37,6 +37,8 @@ function fixture({ runCommand, spawnOcr } = {}) {
     workerPath: '/repo/apps/worker/bin/course.mjs',
     workerEnv: { COURSE_WORKER_SCRATCH_DIR: scratchRoot },
     spawnOcr,
+    // 时钟可注入：会话"多久没互动"要能用固定时间断言，不能跟着挂钟走
+    ...(now ? { now } : {}),
     runCommand: runCommand || (async (args, options) => {
       calls.push({ args, options })
       return { code: 0, stdout: JSON.stringify({ ok: true, args: args.slice(1) }), stderr: '' }
@@ -661,6 +663,53 @@ test('the console reports whether wechat can actually push right now', async () 
   }
 })
 
+test('推送通道把"已过期（超过 12 小时）"直接写出来，并给一句可执行提示', async () => {
+  // 用户的原话是"那个『最近互动 23 小时前』我得自己算"——所以判断结论由服务端给出，
+  // 界面只负责显示，不要求人做减法。时钟固定，年龄才是确定的。
+  const fixed = new Date('2026-09-28T12:00:00Z')
+  const { handler } = fixture({ now: () => fixed.getTime() })
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'openclaw-state-'))
+  const previous = process.env.OPENCLAW_STATE_DIR
+  try {
+    process.env.OPENCLAW_STATE_DIR = home
+    const accounts = path.join(home, 'openclaw-weixin', 'accounts')
+    fs.mkdirSync(accounts, { recursive: true })
+    const tokens = path.join(accounts, 'bot.context-tokens.json')
+    fs.writeFileSync(tokens, JSON.stringify({ 'user@im.wechat': 'token' }))
+
+    const old = new Date(fixed.getTime() - 23 * 3600 * 1000)
+    fs.utimesSync(tokens, old, old)
+    const expired = await call(handler, { url: '/api/admin/status' })
+    assert.equal(expired.body.channel.ok, true)
+    assert.equal(expired.body.channel.fresh, false)
+    assert.equal(expired.body.channel.expired, true, '23 小时 > 12 小时，要判为已过期')
+    assert.equal(expired.body.channel.limitHours, 12)
+    assert.equal(expired.body.channel.ageText, '23 小时前')
+    assert.equal(expired.body.channel.summary, '已过期（超过 12 小时）：最近互动 23 小时前')
+    assert.match(expired.body.channel.hint, /给微信机器人发一条消息/, '要给出可执行的动作')
+    // 自动激活做不到，这一点也要露出来（依据在 apps/worker/src/wechat.mjs 与 deploy/README.md）
+    assert.equal(expired.body.channel.activation.supported, false)
+    assert.match(expired.body.channel.activation.reason, /没有可自动重建会话的入口/)
+
+    const freshAt = new Date(fixed.getTime() - 3600 * 1000)
+    fs.utimesSync(tokens, freshAt, freshAt)
+    const fresh = await call(handler, { url: '/api/admin/status' })
+    assert.equal(fresh.body.channel.expired, false)
+    assert.equal(fresh.body.channel.summary, '最近互动 1 小时前')
+    assert.equal(fresh.body.channel.hint, '', '没过期就不要给恢复会话的提示')
+  } finally {
+    if (previous === undefined) delete process.env.OPENCLAW_STATE_DIR
+    else process.env.OPENCLAW_STATE_DIR = previous
+  }
+})
+
+test('过期这件事在界面上写清楚了（不是只丢一个"23 小时前"）', async () => {
+  // 服务端给结论、界面显示结论：卡片上要能直接看到"已过期"和恢复办法
+  assert.match(ADMIN_HTML, /微信机器人 ' \+ \(c\.fresh \? '可用' : '已过期'\)/, '通道卡片要直接写"已过期"')
+  assert.match(ADMIN_HTML, /esc\(summary\)/, '把服务端那句结论（含阈值）原样显示出来')
+  assert.match(ADMIN_HTML, /esc\(c\.hint \|\| '需要重新扫码\/重新登录 OpenClaw'\)/, '过期时要给一句可执行提示')
+})
+
 test('non-admin paths are left to the static handler', async () => {
   const { handler } = fixture()
   const req = fakeRequest({ url: '/notes/x.html' })
@@ -763,7 +812,10 @@ test('each console action produces a CLI command that really exists', async () =
     ['doctor', {}, ['doctor']],
     ['backup', {}, ['backup']],
     ['notify', {}, ['notify']],
-    ['cycle', { replayKey: 'replay-1', maxTasks: 1 }, ['cycle', '--max-tasks', '1', '--replay-key', 'replay-1']],
+    // 课次行里的「立即跑这一节」：显式点击＝"我就是要跑"，所以带上 --require-materials 0
+    // （整轮那个按钮不带：它做的事与定时任务一样，缺课件就该跳过）
+    ['cycle', { replayKey: 'replay-1', maxTasks: 1 },
+      ['cycle', '--max-tasks', '1', '--replay-key', 'replay-1', '--require-materials', '0']],
     ['cycle', { maxTasks: 5 }, ['cycle', '--max-tasks', '5']],
     ['republish', { transcriptPath: '/tmp/replay-1/output/transcript.txt', course: '刑法分论', lesson: '第10-12节', replayKey: 'replay-1' },
       ['publish', '--from', '/tmp/replay-1/output', '--course', '刑法分论', '--lesson', '第10-12节', '--replay-key', 'replay-1']]

@@ -187,6 +187,33 @@ sendWeixinOutbound: contextToken missing for to=o9cq…@im.wechat, sending witho
 **直接改走备用通道**——而不是先往微信试一次（那会继续产生"账本说成功、手机没有消息"的假记录）。
 管理台「概览 → 推送通道」把两个通道的状态都显示出来。
 
+### 会话过期：先显示清楚，再谈自动（结论：**自动激活做不到**，2026-09-28）
+
+管理台「概览 → 推送通道」不再只写"最近互动 23 小时前"让人自己算，而是把结论写出来：
+
+| 状态 | 显示 |
+|---|---|
+| 12 小时内有互动 | `微信机器人 可用` ＋ `最近互动 2 小时前` |
+| 超过 12 小时 | `微信机器人 已过期`（warn 色）＋ `已过期（超过 12 小时）：最近互动 23 小时前` ＋ 一句恢复办法 |
+
+**能不能自动重新激活？不能。** 依据（本机核实过 CLI 与官方文档）：
+
+1. `openclaw channels login --channel openclaw-weixin` 是**扫码登录**——OpenClaw 官方文档
+   （`docs/channels/wechat.md`）写明要用手机扫码并确认；放在定时任务里跑它只会一直挂着等。
+2. 出站要带的那份 `context_token` 由微信随**用户的入站消息**下发、存在网关进程里；
+   CLI 没有刷新/重建它的子命令（`message send|read`、`sessions`、`devices`、`pairing` 都不行）。
+3. 本机 CLI 因**设备授权未批准**而回退到本地处理（见上面的诊断），本地实例根本没有这份凭证。
+
+所以代码里做的是**判定 + 记录**，不假装尝试：`apps/worker/src/wechat.mjs` 给出结论、依据与提示，
+`cycle` 与 `notify` 每轮都会把结果写进 stderr 与运行摘要（运行历史里能看到 `wechat.attempted = false`
+与 `wechat.evidence`）。恢复会话的动作仍然由人完成：
+
+- 最省事：**给微信机器人发一条消息**，窗口立刻打开；
+- 通道整体不可用（设备授权被撤销）：在服务器上重新扫码登录
+  `openclaw channels login --channel openclaw-weixin`，或按 `docs/03` 用 SSH 隧道打开 Control UI
+  批准待处理设备；
+- 长期方案仍是配一条不依赖会话的备用通道（见上面「两手处理」第 2 条）。
+
 ### 顺带发现：既有 relay 一直在失败
 
 `law-tech-wechat-relay.service` 的日志里密集出现 `[wechat-outbound] fetch failed`——
@@ -198,7 +225,7 @@ sendWeixinOutbound: contextToken missing for to=o9cq…@im.wechat, sending witho
 
 ```
 course-cycle.timer  →  course-cycle.service  →  course cycle --max-tasks 5
-                      （每天 08:20 / 14:20 / 20:20，错过的轮次恢复后补跑）
+                      （每天 07:30 / 19:30，错过的轮次恢复后补跑）
 ```
 
 一轮 `cycle` 做的事：扫描教学网并幂等登记 → 按账本阶段逐条推进（下载 → 转录 → 笔记 → 发布）
@@ -211,6 +238,7 @@ course-cycle.timer  →  course-cycle.service  →  course cycle --max-tasks 5
 | 已发布任务不再领取 | `published` / `notifying` 不在可领取阶段里——否则 worker 会反复领到已完成的任务空转 |
 | 跳过即失败 | 前置产物缺失时不静默跳过，而是记为 `ok: false`，让整轮以非零退出码结束 |
 | 单 worker 自我续租 | 编排循环先领取、内部阶段命令再领取一次，同一 worker 重复领取视为续租而非冲突 |
+| **没有课件就不自动跑** | 自动选任务时跳过"该课次没有任何课件"的课次（默认 `--require-materials 1`） |
 
 **当前状态**：定时器已启用，但每轮都会在第一步停下并报告：
 
@@ -234,6 +262,57 @@ course-cycle.timer  →  course-cycle.service  →  course cycle --max-tasks 5
 
 磁盘不足时 `cycle` 会跳过扫描与媒体处理，**但仍然把已排队的通知发出去**——
 投递不占磁盘，没有理由一起停。`doctor` 会报告当前可用空间与下限。
+
+### 没有课件就不自动跑（2026-09-28）
+
+用户的要求是「没有上传课件就默认不跑，除非我在管理页点『立即跑这一节』」。实现如下：
+
+| 情形 | 行为 |
+|---|---|
+| 定时 `cycle`（自动选任务） | 该课次没有任何课件 → **本轮不处理**：stderr 留一行说明，账本阶段一点都不推进（不领取、不消耗重试次数、不占租约），下一轮仍会重新判定 |
+| 补传课件之后 | 下一轮 `cycle` 自动开始，不需要点任何东西 |
+| 管理台课次行的「立即跑这一节」 | 带 `--require-materials 0`，**无课件也照跑**；结果里写明「无课件也照跑（显式指定这一节）」 |
+| 管理台「跑一轮完整链路」 | 与定时任务一致，缺课件照样跳过（这个按钮做的事与定时器完全相同） |
+
+判据是 `packages/materials` 的 `listMaterials`：本课次目录、`course/` 下的**全课程通用**
+课件、以及别的课次用 `--applies-to` 声明**跨课次共用**的课件，**都算有课件**。
+
+> 归档是按**课次标题**找的，而 `discover` 每轮都会用教学网上的标题刷新账本——
+> 老师改了课次名之后，之前传的课件会对不上，系统就会当成"没有课件"（补传一次即可）。
+
+显式开关：`course cycle --require-materials 0|1`（默认 `1`；`0` = 无课件也照跑）。
+跳过与"跳过即失败"不是一回事：缺课件是策略，整轮退出码仍然是 0。
+
+### 缺课件提醒（每晚 20:00）
+
+```
+course-ppt-reminder.timer  →  course-ppt-reminder.service  →  course ppt-reminder
+```
+
+列出**所有还没有课件的课次**（课程 · 课次 · 状态 · 管理台链接），正文只有一张表；
+**一节都不缺就不发**（与 07:00 日报同一条原则：没变化就不打扰）。20:00 发出，
+离 07:30 那一轮 cycle 还有一整晚，来得及上传。
+
+安装（在服务器上，仓库已同步到 `~/course-runtime`）：
+
+```bash
+cp ~/course-runtime/deploy/course-ppt-reminder.service ~/course-runtime/deploy/course-ppt-reminder.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now course-ppt-reminder.timer
+systemctl --user list-timers course-ppt-reminder.timer         # 看下次触发时间
+systemctl --user start course-ppt-reminder.service             # 立刻跑一次（有缺的才发）
+journalctl --user -u course-ppt-reminder.service -n 30         # 看结果
+```
+
+手动跑（测试时先干跑，不会发信）：
+
+```bash
+node apps/worker/bin/course.mjs ppt-reminder --dry-run
+node apps/worker/bin/course.mjs ppt-reminder --to you@example.com
+```
+
+发信走与 07:00 日报**同一套** Resend 配置与邮件样式：
+`RESEND_API_KEY` / `COURSE_DIGEST_FROM` / `COURSE_DIGEST_TO`（都在 `~/.course-worker/env`）。
 
 ### 配置传递的两个坑（已修）
 
@@ -264,6 +343,10 @@ node apps/worker/bin/course.mjs admin-passwd --status   # 看密码是否已设
 | 课程 | 课次表；每行可**重跑**（按已有产物推断回到哪一步）、**重新发布**、**跑一轮**；行内直接**上传课件并解析** |
 | 笔记 | 逐模块状态（字数/状态/重写次数）+ **只重写这个模块**（可写要求） + 通知队列与失败重发 |
 | 设置 | 扫描 / 跑一轮完整链路 / 投递通知 / 体检 / 备份 / 清理预演 / 清理并删除；运行参数表单；登录密码设置与清除 |
+
+课次行里的「立即跑这一节」是**显式**跑这一节：它等价于
+`course cycle --replay-key <键> --require-materials 0`，因此**不受**"缺课件就不自动跑"的限制；
+「跑一轮完整链路」则与定时任务完全一致（缺课件跳过）。
 
 **点下去必须当场有反应**：按钮置灰改字、顶部状态灯切到"正在运行"、右下角弹提示，
 跑完再弹一条明确结果。清单里说"点了没反应"的是这一类问题，见 `docs/09` §9。

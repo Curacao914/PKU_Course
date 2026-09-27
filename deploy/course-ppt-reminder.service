@@ -1,0 +1,14 @@
+[Unit]
+Description=course.law-tech.dev 缺课件提醒（列出所有还没有课件的课次）
+Documentation=https://course.law-tech.dev
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/course-runtime
+Environment=COURSE_WORKER_SCRATCH_DIR=%h/.course-worker
+# Resend 的密钥与收件人从 ~/.course-worker/env 读（入口处统一加载，
+# 与 07:00 日报同一个文件、同一套变量：RESEND_API_KEY / COURSE_DIGEST_FROM / COURSE_DIGEST_TO）
+ExecStart=/usr/bin/env node %h/course-runtime/apps/worker/bin/course.mjs ppt-reminder
+StandardOutput=journal
+StandardError=journal

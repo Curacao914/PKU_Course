@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import { escapeHtml, extractHeadings, renderMarkdown, slugify, summarizeMarkdown } from './markdown.mjs'
-import { READER_SCRIPT, courseNav, svgIcon, toolBar } from './reader.mjs'
+import { PREF_MENU_SCRIPT, READER_SCRIPT, courseNav, settingsMenu, svgIcon, toolBar } from './reader.mjs'
 import { ONEPAGE_CSS, renderOnepagePage } from './onepage.mjs'
 import { renderDocPage, renderLlmsTxt, usePageShell } from './docs.mjs'
 
@@ -97,6 +97,10 @@ a:hover { color: var(--accent-ink); }
 .topbar nav a:hover { color: var(--ink); }
 
 .wrap { max-width: 760px; margin: 0 auto; padding: 40px 24px 96px; }
+/* 内容区的基准字号跟着阅读设置走（宽版的首页/索引/地图也用 .wrap）：里面的字号都写成
+   em，字号滑块才真的改得动表格、词条与搜索结果——否则它只是改了一个没人看的变量。
+   1em 取父级（body）的字号，窄屏那处 17px 的上调不会被这里吃掉。 */
+.wrap { font-size: calc(1em * var(--font-scale)); }
 /* 表格页（首页/索引/地图）用宽版：一行里有课次、关键词、时长、日期，760px 会挤成一团 */
 .wrap.wide { max-width: 1360px; padding: 30px 22px 96px; }
 .wrap.wide .index-shell { grid-template-columns: 164px minmax(0, 1fr); gap: 22px; }
@@ -180,21 +184,21 @@ article .brief li { margin: 5px 0; }
 /* ── 索引页：条目 + 出处 ── */
 /* 索引按 课程 → 课次 切分，每条术语只是一个可点的词 */
 .term-course { margin: 0 0 30px; }
-.term-course > h2 { margin: 0 0 10px; font-size: 17px; }
+.term-course > h2 { margin: 0 0 10px; font-size: 1.06em; }
 .term-group { margin: 0 0 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius);
   background: var(--card-bg); }
-.term-group > h3 { margin: 0 0 8px; font-size: 14px; font-weight: 600; display: flex; gap: 8px; align-items: baseline; }
+.term-group > h3 { margin: 0 0 8px; font-size: .875em; font-weight: 600; display: flex; gap: 8px; align-items: baseline; }
 .term-group > h3 a { color: var(--ink); }
 .term-group > h3 a:hover { color: var(--accent-ink); }
-.term-count { color: var(--muted); font-size: 12.5px; font-weight: 400; }
+.term-count { color: var(--muted); font-size: .78em; font-weight: 400; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .chip { display: inline-block; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line);
-  background: var(--bg-soft); color: var(--ink-soft); font-size: 13.5px; line-height: 1.6; }
+  background: var(--bg-soft); color: var(--ink-soft); font-size: .84em; line-height: 1.6; }
 .chip:hover { border-color: var(--accent); color: var(--accent-ink); background: var(--accent-soft); }
 /* 知识地图 */
 .map-head { margin: 0 0 14px; }
-.map-head h2 { margin: 0 0 4px; font-size: 17px; }
-.map-legend { margin: 0; color: var(--muted); font-size: 12.5px; }
+.map-head h2 { margin: 0 0 4px; font-size: 1.06em; }
+.map-legend { margin: 0; color: var(--muted); font-size: .78em; }
 .map-holder { overflow-x: auto; padding: 10px; border: 1px solid var(--line); border-radius: var(--radius);
   background: var(--card-bg); }
 .map-holder svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
@@ -206,36 +210,40 @@ article .brief li { margin: 5px 0; }
 .index-shell { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 30px; align-items: start; }
 .filter-rail { position: sticky; top: calc(var(--header-h) + 20px); display: flex; flex-direction: column; gap: 2px;
   font-family: var(--sans); }
-.filter-rail button { display: flex; justify-content: space-between; gap: 10px; font: inherit; font-size: 14px;
+.filter-rail button { display: flex; justify-content: space-between; gap: 10px; font: inherit; font-size: .875em;
   padding: 7px 10px; border: 0; border-radius: 8px; background: none; color: var(--ink-soft); cursor: pointer; text-align: left; }
 .filter-rail button:hover { background: var(--bg-soft); color: var(--ink); }
 .filter-rail button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-ink); font-weight: 600; }
-.filter-rail .filter-count { color: var(--muted); font-size: 12.5px; }
+.filter-rail .filter-count { color: var(--muted); font-size: .78em; }
 .index-group { margin-bottom: 28px; }
-.index-group > h2 { font-size: 16px; margin: 0 0 2px; color: var(--ink-soft); }
+.index-group > h2 { font-size: 1em; margin: 0 0 2px; color: var(--ink-soft); }
 .index-row[hidden], .index-group[hidden], .index-notes a[hidden] { display: none; }
 
 /* ── 首页：一门课一张表，一行一节课 ── */
 .band { margin: 0 0 30px; }
-.band > h2 { margin: 0 0 10px; font-size: 17px; letter-spacing: -.01em; }
+.band > h2 { margin: 0 0 10px; font-size: 1.06em; letter-spacing: -.01em; }
 .lesson-table { width: 100%; border-collapse: collapse; font-family: var(--sans); }
-.lesson-table th { text-align: left; font-size: 12px; font-weight: 500; color: var(--muted);
+.lesson-table th { text-align: left; font-size: .75em; font-weight: 500; color: var(--muted);
   letter-spacing: .06em; padding: 0 10px 8px; border-bottom: 1px solid var(--line-strong); }
 .lesson-table th.num, .lesson-table td.num { text-align: right; }
 .lesson-table td { padding: 10px; border-bottom: 1px solid var(--line); vertical-align: baseline; }
 .lesson-table tbody tr:hover { background: var(--bg-soft); }
-.lesson-table .lesson-title a { color: var(--ink); font-size: 15.5px; }
+.lesson-table .lesson-title a { color: var(--ink); font-size: .97em; }
 .lesson-table .lesson-title a:hover { color: var(--accent-ink); }
 .lesson-keywords { display: flex; flex-wrap: wrap; gap: 4px 6px; }
 .lesson-table .lesson-keywords { border-bottom: 1px solid var(--line); }
 .kw { display: inline-block; padding: 1px 8px; border-radius: 999px; background: var(--bg-soft);
-  color: var(--ink-soft); font-size: 12.5px; line-height: 1.7; }
+  color: var(--ink-soft); font-size: .78em; line-height: 1.7; }
 /* 主题句：一行说清这节课在讲什么，关键词跟在它后面 */
-.lesson-theme { display: block; color: var(--ink); font-size: 13.5px; margin-bottom: 5px; }
-.onepage-link { margin-left: 8px; font-size: 12.5px; color: var(--accent); border-bottom: 1px solid var(--accent-soft); }
+.lesson-theme { display: block; color: var(--ink); font-size: .84em; margin-bottom: 5px; }
+/* 一页纸入口：一张带折角的纸。原来写的是「一页纸」三个字，在这张表里会被挤成两行 */
+.onepage-link { display: inline-flex; align-items: center; vertical-align: -3px; margin-left: 6px; color: var(--accent); }
+.onepage-link:hover { color: var(--accent-ink); }
+.onepage-link svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 1.7;
+  stroke-linecap: round; stroke-linejoin: round; }
 .onepage-row .lesson-title a { font-weight: 600; }
 .onepage-row td { background: var(--bg-soft); }
-.lesson-meta, .lesson-date { color: var(--muted); font-size: 12.5px; text-align: right; white-space: nowrap; }
+.lesson-meta, .lesson-date { color: var(--muted); font-size: .78em; text-align: right; white-space: nowrap; }
 @media (max-width: 720px) {
   /* 窄屏先保课次与关键词：时长与日期可以点进去看 */
   .lesson-table .lesson-meta, .lesson-table .lesson-date,
@@ -273,13 +281,13 @@ details.note-meta pre { background: var(--bg-soft); border-radius: var(--radius)
 .card { display: block; padding: 20px 22px; margin: 12px 0; background: var(--card-bg);
   border: 1px solid var(--line); border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); }
 .card:hover { border-color: var(--line-strong); box-shadow: var(--shadow-md); }
-.card h3 { margin: 0 0 6px; font-size: 17px; color: var(--ink); }
-.card p { margin: 0; color: var(--muted); font-size: 14.5px; line-height: 1.7; }
-.card .card-meta { margin-top: 10px; color: var(--muted); font-size: 13px; display: flex; gap: 12px; flex-wrap: wrap; }
-.search { width: 100%; padding: 12px 16px; font-size: 16px; font-family: var(--sans);
+.card h3 { margin: 0 0 6px; font-size: 1.06em; color: var(--ink); }
+.card p { margin: 0; color: var(--muted); font-size: .9em; line-height: 1.7; }
+.card .card-meta { margin-top: 10px; color: var(--muted); font-size: .81em; display: flex; gap: 12px; flex-wrap: wrap; }
+.search { width: 100%; padding: 12px 16px; font-size: 1em; font-family: var(--sans);
   border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--bg); color: var(--ink); }
 .search:focus { outline: 3px solid var(--accent-soft); outline-offset: 1px; border-color: var(--accent); }
-.search-hint { color: var(--muted); font-size: 13px; margin: 10px 2px 0; }
+.search-hint { color: var(--muted); font-size: .81em; margin: 10px 2px 0; }
 .empty { color: var(--muted); background: var(--bg-soft); border: 1px dashed var(--line-strong);
   border-radius: var(--radius); padding: 22px; text-align: center; }
 /* 阅读进度与回到顶部 */
@@ -371,6 +379,29 @@ details.note-meta pre { background: var(--bg-soft); border-radius: var(--radius)
   background: var(--card-bg); box-shadow: var(--shadow-md); z-index: 50; }
 .navmenu .nav-pop a { padding: 7px 10px; border-radius: 8px; font-size: 14px; color: var(--ink-soft); }
 .navmenu .nav-pop a:hover { background: var(--bg-soft); color: var(--ink); }
+/* 阅读设置下拉：与站点导航共用 .navmenu 的下拉样式，内容换成三个控件。
+   非阅读页（首页 / 索引 / 地图 / 文档 / 搜索）顶栏没有工具栏图标，这三项就靠它。 */
+.prefmenu .pref-pop { min-width: 168px; gap: 10px; padding: 10px 12px; }
+.pref-pop [data-pref="theme"] { width: 100%; height: 30px; border: 0; border-radius: 8px; background: none;
+  color: var(--ink-soft); display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+.pref-pop [data-pref="theme"]:hover { background: var(--bg-soft); color: var(--ink); }
+.pref-pop [data-pref="theme"][aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-ink); }
+.pref-pop .dot-row { display: flex; gap: 8px; justify-content: space-between; }
+.pref-pop .paper { width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--line-strong); cursor: pointer; padding: 0; }
+.pref-pop .paper[aria-pressed="true"] { outline: 2px solid var(--accent); outline-offset: 2px; }
+.pref-pop input[type="range"] { width: 100%; }
+/* 当前是白天显示太阳、夜间显示月亮：与工具栏那两个按钮同一套 class，规则各写一条 */
+:root[data-theme="dark"] .pref-pop [data-pref="theme"] .icon-sun { display: none; }
+:root:not([data-theme="dark"]) .pref-pop [data-pref="theme"] .icon-moon { display: none; }
+/* 窄屏：顶栏那一排本来就挤，收紧间距免得把最右边的设置按钮挤出屏幕；
+   下拉自身也要收在视口内（它靠右对齐在按钮下方，一旦按钮出屏下拉就跟着出屏） */
+@media (max-width: 720px) {
+  .topbar .inner { gap: 10px; padding: 0 12px; }
+  .topbar .brand { font-size: 15px; }
+  .topbar nav { gap: 10px; font-size: 12.5px; }
+  .navmenu .nav-pop { max-width: calc(100vw - 24px); }
+  .prefmenu .pref-pop { min-width: 0; width: min(170px, calc(100vw - 24px)); }
+}
 .tools .pop a { width: auto; height: auto; border-radius: 8px; padding: 6px 8px; justify-content: flex-start; gap: 8px; font-size: 13.5px; color: var(--ink-soft); }
 
 /* ── 锚点高亮：跳过去闪一下，然后留着底色 ── */
@@ -703,11 +734,14 @@ function pageShell({ title, description, body, canonical = '', scripts = '', lay
     '<a href="/search/">搜索</a>'
   ].join('')
   // 阅读页顶栏要放工具栏，站点导航就收进一个下拉（读者在正文页最不需要的就是这四个链接）；
-  // 其余页面照旧平铺。
+  // 其余页面照旧平铺，末尾挂一个「阅读设置」下拉——深浅/底色/字号在这几页以前完全没有入口。
+  // 排序上它就是这一排的最后一项，也就是页面右上角。
   const navHtml = topRight
     ? `<details class="navmenu"><summary title="站点导航" aria-label="站点导航">${svgIcon('menu')}</summary>` +
       `<div class="nav-pop">${navLinks}</div></details>`
-    : `<nav>${navLinks}</nav>`
+    : `<nav>${navLinks}</nav>` + settingsMenu()
+  // 阅读页/一页纸页的这三个设置由工具栏图标排负责，不再挂第二个入口（否则一页上有两套同样的控件）
+  const shellScripts = topRight ? scripts : [scripts, PREF_MENU_SCRIPT].filter(Boolean).join('\n')
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -733,7 +767,7 @@ ${layout === 'shell' ? '<div class="shell">' : layout === 'reading' ? '<div clas
     : layout === 'onepage' ? '<div class="onepage">' : '<div class="wrap">'}
 ${body}
 </div>
-${scripts}
+${shellScripts}
 </body>
 </html>
 `
@@ -1512,12 +1546,12 @@ export function renderIndexPage(records, { siteOrigin = '' } = {}) {
     const withOnepage = items.filter(item => item.onepage?.markdown)
     if (!withOnepage.length) return ''
     const newest = withOnepage[0]
-    const words = withOnepage.reduce((total, item) => total + (item.onepage?.chars || 0), 0)
     return [
       '<tr class="onepage-row">',
       `<td class="lesson-title"><a href="/${escapeHtml(onepageSlug(newest.slug))}.html">一页纸摘要</a></td>`,
-      `<td class="lesson-keywords" colspan="3"><span class="lesson-theme">${withOnepage.length} 节 · 每节一张 A4，左侧可切换课次</span>` +
-        `<span class="kw">共 ${words} 字</span></td>`,
+      // 这一格只说清"这门课有几节配了一页纸"。原来那句排版说明与总字数是在解释
+      // 我们自己怎么排的，读者要的是入口，不是说明书。
+      `<td class="lesson-keywords" colspan="3"><span class="kw">共 ${withOnepage.length} 节</span></td>`,
       '</tr>'
     ].join('')
   }
@@ -1525,7 +1559,7 @@ export function renderIndexPage(records, { siteOrigin = '' } = {}) {
   const rowOf = record => [
     '<tr>',
     `<td class="lesson-title"><a href="${escapeHtml(record.slug)}.html">${escapeHtml(record.lessonTitle)}</a>` +
-      `${record.onepage ? ` <a class="onepage-link" href="/${escapeHtml(onepageSlug(record.slug))}.html">一页纸</a>` : ''}</td>`,
+      `${record.onepage ? ` <a class="onepage-link" href="/${escapeHtml(onepageSlug(record.slug))}.html" title="一页纸摘要" aria-label="一页纸摘要">${svgIcon('sheet')}</a>` : ''}</td>`,
     `<td class="lesson-keywords">${record.theme ? `<span class="lesson-theme">${escapeHtml(record.theme)}</span>` : ''}${(record.keywords || []).map(term => `<span class="kw">${escapeHtml(term)}</span>`).join('')}</td>`,
     record.readMinutes ? `<td class="lesson-meta">约 ${record.readMinutes} 分钟</td>` : '<td class="lesson-meta"></td>',
     record.publishedAt ? `<td class="lesson-date">${escapeHtml(String(record.publishedAt).slice(0, 10))}</td>` : '<td class="lesson-date"></td>',

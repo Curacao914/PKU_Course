@@ -9,9 +9,22 @@ import { renderCourse, renderCourses, renderNote, renderSearch, renderTerms } fr
  * inputSchema 都会放进 tools/list，客户端可能拿它做校验，所以字段说明也要当文档写。
  */
 
+const READ_ONLY = Object.freeze({
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false
+})
+
+/** 只读工具的统一标注：这个服务器不提供任何修改/删除能力（MCP 与 OpenAI 都要求声明）。 */
+function readOnly(definition) {
+  return { annotations: { ...READ_ONLY }, ...definition, annotations: { ...READ_ONLY } }
+}
+
 export const TOOL_DEFINITIONS = [
   {
     name: 'list_courses',
+    annotations: READ_ONLY,
     title: '课程列表（第一层）',
     description:
       '第一层：列出所有课程及其课次数量、最新课次时间、主题（theme）与关键词（keywords）汇总。' +
@@ -28,6 +41,7 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: 'get_course',
+    annotations: READ_ONLY,
     title: '某门课的课次清单（第二层）',
     description:
       '第二层：给一门课，返回每一节的 lessonTitle、发布时间、阅读时长、theme、keywords 与摘要（不含正文）。' +
@@ -47,6 +61,7 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: 'search_notes',
+    annotations: READ_ONLY,
     title: '跨课次检索（索引 + 可选正文）',
     description:
       '跨课程、跨课次检索：命中课程名、标题、小节标题、theme、keywords、概念、法条、案例、摘要；' +
@@ -68,6 +83,7 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: 'get_note',
+    annotations: READ_ONLY,
     title: '读笔记正文（第三层）',
     description:
       '第三层：按 slug（或 course + lesson）取整篇 Markdown。默认只返回前 12000 字，避免把上下文灌满；' +
@@ -88,6 +104,7 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: 'list_terms',
+    annotations: READ_ONLY,
     title: '某门课的概念/法条/案例清单',
     description:
       '给一门课，按出现次数列出概念、法条、案例、关键词，并给出落点（课次 + 小节锚点）。' +
@@ -103,8 +120,80 @@ export const TOOL_DEFINITIONS = [
       required: ['course']
     },
     run: (service, args) => service.listTerms(args).then(renderTerms)
+  },
+  {
+    name: 'search',
+    title: '知识检索（OpenAI 标准）',
+    description:
+      'OpenAI 标准知识检索接口：输入一个 query，返回 { results: [{ id, title, url }] }。' +
+      '与 course 专用的 search_notes 是同一套检索，只是输出格式不同——' +
+      '需要按课程/课次分层浏览时用 list_courses / get_course，标准接口给不支持自定义工具的客户端用。' +
+      '返回的 id 可直接传给 fetch。',
+    annotations: READ_ONLY,
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        query: { type: 'string', minLength: 1, description: '检索词，中文关键词即可' }
+      },
+      required: ['query']
+    },
+    outputSchema: {
+      type: 'object',
+      required: ['results'],
+      properties: {
+        results: {
+          type: 'array',
+          items: {
+            type: 'object',
+            required: ['id', 'title', 'url'],
+            properties: {
+              id: { type: 'string', description: '稳定标识，可直接传给 fetch' },
+              title: { type: 'string' },
+              url: { type: 'string', description: '用户可直接打开的 canonical URL' }
+            }
+          }
+        }
+      }
+    },
+    // OpenAI 规范要求：**恰好一个** type=text 的 content，其 text 是 JSON 字符串
+    run: (service, args) => service.searchKnowledge({ query: args.query, limit: args.limit }).then(payload => ({
+      content: [{ type: 'text', text: JSON.stringify({ results: payload.results }) }],
+      structuredContent: { results: payload.results }
+    }))
+  },
+  {
+    name: 'fetch',
+    title: '取文档（OpenAI 标准）',
+    description:
+      'OpenAI 标准取文档接口：输入 search 返回的 id，返回 { id, title, text, url, metadata }。' +
+      'id 也支持 "slug#小节标题" 的形式，只取那一节——比整篇更省上下文。',
+    annotations: READ_ONLY,
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        id: { type: 'string', minLength: 1, description: '来自 search 的 results[].id（笔记 slug，或 slug#小节）' }
+      },
+      required: ['id']
+    },
+    outputSchema: {
+      type: 'object',
+      required: ['id', 'title', 'text', 'url'],
+      properties: {
+        id: { type: 'string' },
+        title: { type: 'string' },
+        text: { type: 'string' },
+        url: { type: 'string' },
+        metadata: { type: 'object' }
+      }
+    },
+    run: (service, args) => service.fetchDocument({ id: args.id }).then(document => ({
+      content: [{ type: 'text', text: JSON.stringify(document) }],
+      structuredContent: document
+    }))
   }
-]
+].map(readOnly)
 
 export function toolDefinitions() {
   return TOOL_DEFINITIONS.map(({ run, ...definition }) => definition)

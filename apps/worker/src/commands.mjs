@@ -43,15 +43,22 @@ import {
   wechatSessionState
 } from '@course/notify'
 import { buildNoteRecord, readSiteIndex, writeSite } from '@course/publish'
+import { ACTIONABLE_STAGES } from '@course/store'
 
 import {
   collectDigest,
+  collectMissingMaterials,
+  dateKeyInTimeZone,
   digestSubject,
+  pptReminderSubject,
   previousDateKey,
   renderDigestHtml,
   renderDigestText,
+  renderPptReminderHtml,
+  renderPptReminderText,
   sendResendEmail
 } from './digest.mjs'
+import { checkWechatActivation } from './wechat.mjs'
 
 /**
  * 只保留最近 N 次运行摘要。
@@ -140,10 +147,43 @@ function readPublicDocs() {
     })
 }
 
+/**
+ * `--require-materials` 的取值：默认**开启**（没有课件就不自动跑）。
+ *
+ * 写成显式开关而不是写死在代码里，是为了两件事：管理台的「立即跑这一节」
+ * 能明确传 0（"我就是要跑"），以及以后想放开时不用改代码、只改定时任务那一行。
+ */
+export function parseRequireMaterials(value) {
+  if (value === undefined || value === null || String(value).trim() === '') return true
+  return !['0', 'false', 'no', 'off'].includes(String(value).trim().toLowerCase())
+}
+
+/**
+ * 自动链路的下一个候选任务。
+ *
+ * 为什么不直接用 `store.claimNext`：领取会把 `attempts + 1` 并占住一小时租约
+ * （见 packages/store/src/ledger.mjs），而"缺课件 → 本轮不处理"必须**零副作用**——
+ * 不消耗重试次数、不占租约、不写阶段事件，下一轮（或用户点「立即跑这一节」时）
+ * 立刻还能跑。所以这里只做与 claimNext 相同的筛选，选中之后再 claimTask 精确领取。
+ *
+ * 筛选条件与 claimNext 的 SQL 一一对应：可领取阶段 + 退避到期 + 租约空闲，按 id 排序。
+ */
+export function nextActionableTask(store, { at = new Date(), exclude = new Set() } = {}) {
+  const stamp = (at instanceof Date ? at : new Date(at)).toISOString()
+  return store.listTasks({ limit: 200 })
+    .filter(task => ACTIONABLE_STAGES.includes(task.stage))
+    .filter(task => !task.next_attempt_at || task.next_attempt_at <= stamp)
+    .filter(task => !task.lease_expires_at || task.lease_expires_at <= stamp)
+    .sort((left, right) => Number(left.id) - Number(right.id))
+    .find(task => !exclude.has(task.replay_key)) || null
+}
+
 export function createCommands(context) {
   const {
     config, acquire, runPython, which, openStore,
     callModel: injectedCallModel, sender: injectedSender, sleep = defaultSleep,
+    // 邮件发送器可注入：测试用假 sender 核对收件人/标题/正文，绝不真发一封邮件
+    emailSender: injectedEmailSender,
     env = process.env, now,
     // MCP 服务器可以被注入：测试不该真的挂起等 stdin；生产走 @course/notes-mcp 的实现
     mcpServer: injectedMcpServer,
@@ -223,6 +263,33 @@ export function createCommands(context) {
 
   /** 失败后延迟重试的间隔：与旧系统一致，避免坏任务被反复消费。 */
   const RETRY_DELAY_MS = 5 * 60 * 1000
+
+  /**
+   * 这一课次有没有课件。
+   *
+   * 判据只用 materials 包的 listMaterials：它已经把三种归属算在一起了——
+   * 本课次的、全课程通用的（course/ 目录）、以及别的课次声明 `appliesTo` 共用的。
+   * 自己再写一遍目录判断，迟早会和它分叉（"明明传了课件，系统还说没有"）。
+   *
+   * 读盘失败、或者任务上连课程/课次都没有（对不上归档目录）时返回 count = -1（"不知道"）：
+   * 宁可让这一轮照跑，也不要因为读不出目录或认不出课次就把整条链路停住——
+   * 那会变成"用户明明传了课件，系统还是不动"。
+   */
+  function lessonMaterials(task) {
+    if (!task?.course_name || !task?.title) return { count: -1, names: [] }
+    try {
+      const found = listMaterials({
+        root: config.materialsRoot,
+        course: task.course_name,
+        lesson: task.title,
+        replayKey: task.replay_key
+      })
+      return { count: found.length, names: found.map(item => item.name) }
+    } catch (error) {
+      stderr(`课件归档读取失败（${error instanceof Error ? error.message : String(error)}）：本轮按"有课件"处理`)
+      return { count: -1, names: [] }
+    }
+  }
 
   /**
    * 在账本里领取一条任务。
@@ -1033,9 +1100,22 @@ export function createCommands(context) {
       onFallback: reason => stderr(`改用备用通道 ${fallbackConfig.kind}：${reason}`)
     })
 
+    // 会话过期先说清楚，并记录一次"能不能自动激活"的判定结果。
+    // 结论是**不能**（需要人工给机器人发消息，或扫码登录/批准设备）——依据与出处
+    // 写在 wechat.mjs 的注释里，管理台的推送通道卡片显示同一句话。
+    const wechat = checkWechatActivation({
+      stateDir: config.notify.openclawStateDir,
+      home: config.notify.openclawHome,
+      now: new Date(clockNow()).getTime()
+    })
+    if (wechat.needed) {
+      stderr(`微信会话不可用：${wechat.reason}`)
+      stderr(`处理办法：${wechat.hint}`)
+    }
+
     if (options.flags.has('probe')) {
       const probe = await sender.probe()
-      emit({ probe: true, ok: probe.ok, target: config.notify.target ? 'set' : 'missing', detail: probe.detail }, options)
+      emit({ probe: true, ok: probe.ok, target: config.notify.target ? 'set' : 'missing', detail: probe.detail, wechat }, options)
       return probe.ok ? 0 : 1
     }
 
@@ -1060,7 +1140,7 @@ export function createCommands(context) {
 
       if (!options.flags.has('loop')) {
         const summary = await runDeliveryCycle(cycleOptions)
-        emit({ mode: 'once', ...summary }, options)
+        emit({ mode: 'once', ...summary, wechat }, options)
         return summary.failed > 0 ? 1 : 0
       }
 
@@ -1079,7 +1159,7 @@ export function createCommands(context) {
         if (summary.results.length) stderr(`第 ${rounds} 轮：发送 ${summary.sent}，重试 ${summary.retried}，失败 ${summary.failed}`)
         await sleep(config.notify.pollSeconds * 1000, signal)
       }
-      emit({ mode: 'loop', rounds, ...totals }, options)
+      emit({ mode: 'loop', rounds, ...totals, wechat }, options)
       return 0
     } finally {
       store.close()
@@ -1169,7 +1249,20 @@ export function createCommands(context) {
     // 否则一次调用会顺着账本把多节课全跑一遍——而每节课都要真花钱转写。
     const onlyReplay = String(options.options['replay-key'] || '').trim()
 
-    for (let index = 0; space.ok && index < maxTasks; index += 1) {
+    /**
+     * 「没有课件就不自动跑」。
+     *
+     * 用户的要求：课件没传上来，这一节先别动；除非在管理台点「立即跑这一节」——
+     * 那是一次显式点击，等于"我就是要跑"。默认生效，--require-materials 0 关掉。
+     *
+     * 拦的只是**自动选任务**这条路（不带 --replay-key）：显式点名一节课本身就是
+     * "我现在就要跑"，此时不再拦，只在结果里写清楚"无课件也照跑"。
+     */
+    const requireMaterials = parseRequireMaterials(options.options['require-materials'])
+    const skippedNoMaterials = []
+    summary.materials = { required: requireMaterials, skipped: [] }
+
+    for (let index = 0; space.ok && index < maxTasks; ) {
       const store = openStore(config.ledgerPath)
       let task = null
       try {
@@ -1190,14 +1283,56 @@ export function createCommands(context) {
             if (finished) break
           }
         } else {
-          task = store.claimNext({ workerId, leaseSeconds: 3600 })
+          const candidate = nextActionableTask(store, {
+            exclude: new Set(skippedNoMaterials.map(item => item.replayKey))
+          })
+          if (!candidate) break
+          if (requireMaterials) {
+            const materials = lessonMaterials(candidate)
+            if (materials.count === 0) {
+              // 零副作用地跳过：不领取（领取会把 attempts +1 并占住一小时租约），
+              // 账本阶段原样不动——补传课件之后，这一轮或下一轮立刻就能跑。
+              skippedNoMaterials.push({
+                replayKey: candidate.replay_key,
+                courseName: candidate.course_name,
+                title: candidate.title,
+                stage: candidate.stage
+              })
+              const label = [candidate.course_name, candidate.title].filter(Boolean).join(' · ') || candidate.replay_key
+              stderr(`${label}：没有课件，本轮不跑（上传课件后会自动开始；也可以点管理台的「立即跑这一节」强制跑）`)
+              summary.tasks.push({
+                replayKey: candidate.replay_key, stage: candidate.stage, action: 'skip', ok: true,
+                materialCount: 0, note: '没有课件，本轮不跑（不推进阶段）'
+              })
+              continue
+            }
+          }
+          const claimed = store.claimTask({ replayKey: candidate.replay_key, workerId, leaseSeconds: 3600 })
+          task = claimed.claimed ? claimed.task : null
+          if (!task) {
+            // 与别的进程撞车了（单 worker 时不该发生）：如实记一条，继续找下一个
+            summary.tasks.push({
+              replayKey: candidate.replay_key, stage: candidate.stage, action: 'skip', ok: true,
+              note: `未领取：${claimed.reason}`
+            })
+            continue
+          }
         }
       } finally {
         store.close()
       }
       if (!task) break
+      // 只有真正领到任务才算用掉一格配额：因缺课件被拦下的课次不占额度，
+      // 这一轮该跑的其它课次照样能跑。
+      index += 1
 
       const command = stageCommands[task.stage]
+      // 这一节有没有课件：显式单节或 --require-materials 0 时，无课件也照跑，
+      // 但结果里要看得出来（用户点「立即跑这一节」之后，不该怀疑它到底跑没跑）。
+      const materials = lessonMaterials(task)
+      const materialsNote = materials.count === 0
+        ? (onlyReplay ? '无课件也照跑（显式指定这一节）' : '无课件也照跑（--require-materials 0）')
+        : ''
 
       // 转录侧的付费故障（欠费/额度/密钥）没解决之前，不再开新的下载：
       // 转录跑不动，下载下来的媒体只会躺在盘上——14 节课每节 1—2G，很快把盘吃满，
@@ -1205,6 +1340,7 @@ export function createCommands(context) {
       if (command === 'download' && asrBlocked) {
         summary.tasks.push({
           replayKey: task.replay_key, stage: task.stage, action: 'skip', ok: false,
+          materialCount: materials.count,
           note: `转录通道未恢复（${asrBlocked.issue.title}），先不下载新课件以免堆满磁盘`
         })
         continue
@@ -1215,6 +1351,7 @@ export function createCommands(context) {
         // 不能静默跳过并让整轮看起来成功。
         summary.tasks.push({
           replayKey: task.replay_key, stage: task.stage, action: 'none', ok: false,
+          materialCount: materials.count,
           note: '该阶段没有对应的处理命令'
         })
         continue
@@ -1268,6 +1405,7 @@ export function createCommands(context) {
         // 跳过不是成功：前置产物缺失意味着上一阶段的结果没落下来，需要人工看一眼
         summary.tasks.push({
           replayKey: task.replay_key, stage: task.stage, action: command, ok: false,
+          materialCount: materials.count,
           note: '缺少前置产物，跳过'
         })
         continue
@@ -1278,7 +1416,11 @@ export function createCommands(context) {
           : command === 'transcribe' ? transcribe(commandOptions)
             : command === 'notes' ? notes(commandOptions)
               : publish(commandOptions))
-        summary.tasks.push({ replayKey: task.replay_key, stage: task.stage, action: command, ok: code === 0 })
+        summary.tasks.push({
+          replayKey: task.replay_key, stage: task.stage, action: command, ok: code === 0,
+          materialCount: materials.count,
+          ...(materialsNote ? { note: materialsNote } : {})
+        })
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         // 付费类故障（欠费/额度/密钥）要能被识别出来并单独提醒：它们需要用户动手，
@@ -1287,13 +1429,36 @@ export function createCommands(context) {
         if (issue && !providerIssues.some(item => item.category === issue.category)) providerIssues.push(issue)
         summary.tasks.push({
           replayKey: task.replay_key, stage: task.stage, action: command, ok: false,
+          materialCount: materials.count,
           error: message,
           ...(issue ? { providerIssue: issue.category } : {})
         })
       }
     }
 
-    // 3. 投递已排队的通知
+    // 缺课件被拦下的课次：账本原样不动，但摘要里要留下痕迹——
+    // 管理台的运行历史据此能回答"这一轮为什么没动那几节"。
+    summary.materials.skipped = skippedNoMaterials
+
+    /**
+     * 3. 投递已排队的通知（发之前先看一眼微信会话）。
+     *
+     * 这条通道要求用户最近给机器人发过消息（context_token），会话过期时接口照样
+     * 返回成功、微信端却收不到。所以在这里把状态说清楚并**记录**一次判定结果：
+     * 自动激活做不到（没有非交互式入口，见 wechat.mjs 的结论），就如实写下来，
+     * 而不是"试一下再说"——那只会继续产生账本说成功、手机没消息的假记录。
+     */
+    const wechat = checkWechatActivation({
+      stateDir: config.notify.openclawStateDir,
+      home: config.notify.openclawHome,
+      now: new Date(clockNow()).getTime()
+    })
+    if (wechat.needed) {
+      stderr(`微信会话不可用：${wechat.reason}`)
+      stderr(`处理办法：${wechat.hint}`)
+    }
+    summary.wechat = wechat
+
     try {
       const store = openStore(config.ledgerPath)
       try {
@@ -2162,6 +2327,71 @@ export function createCommands(context) {
   }
 
   /**
+   * 缺课件提醒（每晚 20:00）。
+   *
+   * 与 07:00 日报同一条原则：**没有缺的就不发**。为什么单独一封：自动链路现在
+   * "没有课件就不跑这一节"，课件缺不缺直接决定今晚会不会动——20:00 发出去，
+   * 用户还有时间上传。正文只有一张表（课程 · 课次 · 状态 · 去上传）。
+   *
+   * 判据与 cycle 的拦截判据**是同一个**（materials 包的 listMaterials），
+   * 否则会出现"邮件说缺、链路照跑"这种自相矛盾的状态。
+   */
+  async function pptReminder(options) {
+    const store = openStore(config.ledgerPath)
+    let tasks = []
+    try {
+      tasks = store.listTasks({ limit: 500 }).map(task => ({
+        replayKey: task.replay_key,
+        courseName: task.course_name,
+        title: task.title,
+        stage: task.stage
+      }))
+    } finally {
+      store.close()
+    }
+
+    const missing = collectMissingMaterials({
+      tasks,
+      hasMaterials: task => lessonMaterials({
+        course_name: task.courseName, title: task.title, replay_key: task.replayKey
+      }).count !== 0
+    })
+    const date = dateKeyInTimeZone(clockNow(), config.digest.timeZone)
+    const adminUrl = `${String(config.notify.publicUrl || '').replace(/\/+$/, '')}/admin`
+    const subject = pptReminderSubject(missing, { date })
+    const html = renderPptReminderHtml(missing, { adminUrl, date })
+    const text = renderPptReminderText(missing, { adminUrl, date })
+
+    if (options.flags.has('dry-run')) {
+      emit({ dryRun: true, subject, to: config.digest.to ? 'set' : 'missing', missing, html, text }, options)
+      return 0
+    }
+    if (!missing.length) {
+      emit({ sent: false, skipped: true, reason: '没有缺课件的课次', date, checked: tasks.length }, options)
+      stderr('没有缺课件的课次，按约定不发邮件。')
+      return 0
+    }
+
+    const to = options.options.to || config.digest.to
+    // 发送器可注入：测试用假 sender 核对收件人/标题/正文，不会真发一封邮件
+    const send = injectedEmailSender || sendResendEmail
+    const result = await send({
+      apiKey: config.digest.resendApiKey,
+      from: config.digest.from,
+      to,
+      subject,
+      html,
+      text
+    })
+    emit({
+      sent: true, id: result.id, to: to ? 'set' : 'missing', subject, date,
+      lessons: missing.length, missing
+    }, options)
+    stderr(`已发出缺课件提醒：${missing.length} 节`)
+    return 0
+  }
+
+  /**
    * 以 stdio 启动课程笔记 MCP 服务器（给 Claude Code / DSH 等 AI 客户端挂载，见 docs/12）。
    *
    * 为什么挂在 CLI 上而不是单独再发一个可执行文件：客户端配置里只写
@@ -2192,7 +2422,8 @@ export function createCommands(context) {
   // 键名必须与 CLI 命令名一致：'admin-passwd' 带连字符，不能用标识符简写
   return {
     doctor, discover, download, transcribe, notes, materials, balance, publish,
-    notify, cycle, verify, status, retry, prune, backup, digest, brief: briefRun, onepage: onepageRun,
+    notify, cycle, verify, status, retry, prune, backup, digest, 'ppt-reminder': pptReminder,
+    brief: briefRun, onepage: onepageRun,
     'admin-passwd': adminPassword, mcp
   }
 }
@@ -2262,14 +2493,22 @@ export const USAGE = `用法：course <命令> [选项]
                                            每日邮件日报：前一天新发布/更新的课次、需要处理的
                                            课次。**没有更新就不发**（--force 可强制）。
                                            走 Resend；与微信通道相互独立
+  ppt-reminder [--to <邮箱>] [--dry-run]
+                                           缺课件提醒：列出所有还没有课件的课次
+                                           （课程 · 课次 · 状态 · 管理台链接），每天 20:00 发。
+                                           **一节都不缺就不发**。与 07:00 日报同一套邮件样式
   backup     [--keep <份数>]                     把账本与站点库做一致性快照（默认留 7 份）
   prune      [--apply] [--keep-originals]         清理原件：纯文本（转录稿/课件文字/笔记）
                                            永久保留；视频、音频、PPT 原文件只在转换成功
                                            且校验通过之后才删。默认只报告不删除
   cycle      [--max-tasks <条数>] [--course <名称>] [--replay-key <键>] [--max-steps <步数>]
-             [--auto-approve-outline 0|1]
+             [--auto-approve-outline 0|1] [--require-materials 0|1]
                                            一轮完整链路：扫描 → 逐条推进各阶段 → 投递通知
                                            --max-steps / --auto-approve-outline 会透传给 notes 阶段
+                                           --require-materials 默认 1：自动选任务时跳过
+                                           "该课次没有任何课件"的课次（不推进阶段，只留一行日志）；
+                                           0 = 无课件也照跑。指定 --replay-key 的单节课
+                                           不受这条限制（显式点名就是"我现在就要跑"）
   verify     [--course <名称>] [--replay-key <键>] [--out <站点目录>]
                                            验收：跑一轮真实链路并按验收条件逐项断言
   mcp        [--library <发布库.json>] [--origin <站点域名>] [--ttl <秒>]

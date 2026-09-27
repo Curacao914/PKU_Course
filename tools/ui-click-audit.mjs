@@ -30,6 +30,9 @@ import { chromium } from 'playwright-core'
 import {
   buildNoteRecord, renderIndexPage, renderKnowledgeMapPage, renderNotePage, renderSearchPage, renderTermIndexPage
 } from '@course/publish'
+// 一页纸页面的渲染函数没有从包的入口导出（包只暴露 "."），审计要造一份能点进去的
+// 一页纸夹具，所以直接引这份源码——不然"首页那个入口点下去是不是真的到得了"就测不到。
+import { renderOnepagePageHtml } from '../packages/publish/src/site.mjs'
 import { openLedger } from '@course/store'
 import { startSiteServer } from '../apps/site/src/server.mjs'
 
@@ -151,6 +154,12 @@ function buildFixture() {
     courseName: '刑事执行法',
     lessonTitle: '第7-8节 减刑与假释',
     publishedAt: '2026-09-23T10:00:00.000Z',
+    // 这一节配了一页纸：首页那门课的第一行与课次行里的入口都要有东西可点
+    onepage: {
+      title: '减刑与假释的适用条件',
+      markdown: ['## 一、减刑', '', '- 报请与裁定', '', '## 二、假释', '', '- 没有再犯危险'].join('\n'),
+      chars: 26
+    },
     brief: {
       briefing: '本节讲减刑与假释的适用条件：减刑的报请与裁定、假释的实质条件与考验期。',
       keyPoints: ['减刑要经过报请与裁定', '假释看没有再犯危险'],
@@ -243,6 +252,12 @@ function buildFixture() {
     const pageFile = path.join(siteRoot, item.slug + '.html')
     fs.mkdirSync(path.dirname(pageFile), { recursive: true })
     fs.writeFileSync(pageFile, renderNotePage(item, { siteOrigin: '' }))
+  }
+  // 一页纸页面：有 onepage 的课次才写（与 writeSite 的规则一致）
+  for (const item of courseRecords.filter(record => record.onepage?.markdown)) {
+    const pageFile = path.join(siteRoot, item.slug.replace(/^notes\//, 'onepage/') + '.html')
+    fs.mkdirSync(path.dirname(pageFile), { recursive: true })
+    fs.writeFileSync(pageFile, renderOnepagePageHtml(item, { siteOrigin: '' }))
   }
   fs.writeFileSync(path.join(siteRoot, 'index.html'), renderIndexPage(courseRecords))
   fs.mkdirSync(path.join(siteRoot, 'concepts'), { recursive: true })
@@ -851,6 +866,10 @@ async function auditNotePage(page, site, noteUrl, failures) {
   const toolsInTopbar = await page.$eval('.topbar', el => !!el.querySelector('#tools'))
   const floatingTools = await page.$eval('#tools', el => getComputedStyle(el).position === 'fixed')
   await record('工具排在顶栏里', toolsInTopbar && !floatingTools, toolsInTopbar ? '顶栏里能找到工具栏' : '工具栏不在顶栏里')
+  // 阅读页保持原样：工具栏图标排 + 导航下拉，不再多挂一个「阅读设置」下拉
+  // （一页上出现两套一模一样的控件，读者只会犹豫该点哪个）
+  const prefMenuOnNote = await page.$('#prefmenu')
+  await record('阅读页不挂设置下拉', !prefMenuOnNote, prefMenuOnNote ? '顶栏里多了一个设置下拉' : '只有工具栏那一排')
   // 顶栏那几条站点链接（含知识地图）收进下拉，点开才出现
   await page.click('.navmenu > summary')
   await page.waitForTimeout(120)
@@ -1112,7 +1131,7 @@ async function auditSearch(page, site, failures) {
 }
 
 /** 首页与索引页：横向课次条、课程过滤、条目落到正文的哪一节。 */
-async function auditIndexPages(page, site, failures) {
+async function auditIndexPages(page, site, noteUrl, failures) {
   const results = []
   const record = async (name, ok, detail) => {
     results.push({ name, ok, detail })
@@ -1126,15 +1145,17 @@ async function auditIndexPages(page, site, failures) {
   await page.waitForSelector('.lesson-table', { timeout: 8000 })
   const bands = await page.$$eval('.band', nodes => nodes.map(node => ({
     course: node.getAttribute('data-course'),
-    lessons: node.querySelectorAll('.lesson-table tbody tr').length,
+    lessons: node.querySelectorAll('.lesson-table tbody tr:not(.onepage-row)').length,
     headers: [...node.querySelectorAll('.lesson-table th')].map(th => th.textContent),
-    keywords: [...node.querySelectorAll('.lesson-table tbody tr')]
+    // 一页纸那一行（.onepage-row）不是课次：它的关键词格写的是"共 N 节"，单独看
+    keywords: [...node.querySelectorAll('.lesson-table tbody tr:not(.onepage-row)')]
       .map(row => [...row.querySelectorAll('.kw')].map(kw => kw.textContent))
   })))
   await record('一门课一组', bands.length === 3, '共 ' + bands.length + ' 组：' + bands.map(band => band.course).join(' / '))
   await record('课次按表格排', bands.every(band => band.lessons >= 1) && !(await page.$('.card')),
     bands.map(band => band.course + ' ' + band.lessons + ' 节').join('，'))
   await record('表头是课次/关键词/时长/日期', bands[0].headers.join('|') === '课次|关键词|时长|日期', bands[0].headers.join(' · '))
+  // 一页纸那一行只说"共 N 节"，不是关键词，数关键词时要跳过它
   const keywordCounts = bands.flatMap(band => band.keywords.map(list => list.length))
   const keywordSample = bands[0].keywords[0] || []
   await record('每节课都有关键词', keywordCounts.every(count => count >= 2 && count <= 6),
@@ -1149,12 +1170,197 @@ async function auditIndexPages(page, site, failures) {
   await page.click('#course-rail button[data-course=""]')
   await page.waitForTimeout(120)
 
+  // 一页纸入口：一个"带折角的纸"图标（原来那"一页纸"三个字被这张表挤得换行）
+  const onepageEntry = await page.evaluate(() => {
+    // 课次行里的图标入口
+    const link = document.querySelector('.onepage-link')
+    if (!link) return null
+    const svg = link.querySelector('svg')
+    // 每门课第一行的"一页纸摘要"入口（那一行的关键词格只说有几节）
+    const row = document.querySelector('.onepage-row')
+    return {
+      isIcon: Boolean(svg) && link.textContent.trim() === '',
+      label: link.getAttribute('aria-label'),
+      title: link.getAttribute('title'),
+      viewBox: svg ? svg.getAttribute('viewBox') : '',
+      stroke: svg ? getComputedStyle(svg).stroke : '',
+      fill: svg ? getComputedStyle(svg).fill : '',
+      href: link.getAttribute('href'),
+      rowText: row ? row.querySelector('.lesson-keywords').textContent.trim() : '',
+      rowHref: row ? row.querySelector('.lesson-title a').getAttribute('href') : ''
+    }
+  })
+  await record('一页纸入口是图标',
+    Boolean(onepageEntry && onepageEntry.isIcon && onepageEntry.viewBox === '0 0 24 24' &&
+      onepageEntry.fill === 'none' && onepageEntry.stroke !== 'none' &&
+      onepageEntry.label === '一页纸摘要' && onepageEntry.title === '一页纸摘要'),
+    onepageEntry
+      ? 'aria-label=' + onepageEntry.label + '，viewBox ' + onepageEntry.viewBox + '，描边 ' + onepageEntry.stroke + '，链接 ' + onepageEntry.href
+      : '页面上没有一页纸入口')
+  await record('一页纸那一行只说有几节',
+    Boolean(onepageEntry && onepageEntry.rowText === '共 1 节' && onepageEntry.rowHref === onepageEntry.href),
+    onepageEntry
+      ? '关键词格写着「' + onepageEntry.rowText + '」，入口指向 ' + onepageEntry.rowHref
+      : '没有一页纸那一行')
+
+  // 图标点下去要真的到那一页：入口不是装饰
+  await page.click('.onepage-link')
+  await page.waitForSelector('.sheet', { timeout: 8000 })
+  const landedOnepage = await page.evaluate(() => ({
+    path: location.pathname,
+    title: (document.querySelector('.sheet-title') || {}).textContent || ''
+  }))
+  await record('点图标进入一页纸',
+    /^\/onepage\//.test(landedOnepage.path) && landedOnepage.title.trim().length > 0,
+    '落到 ' + landedOnepage.path + '（' + landedOnepage.title.trim() + '）')
+  await page.goBack({ waitUntil: 'domcontentloaded' })
+  await page.waitForSelector('.lesson-table', { timeout: 8000 })
+
+  /** 打开设置下拉（已经开着就别再点一下关掉它）。 */
+  const openPrefMenu = async () => {
+    if (!(await page.$eval('#prefmenu', node => node.open))) await page.click('#prefmenu > summary')
+    await page.waitForTimeout(120)
+  }
+
+  // 「阅读设置」下拉：深浅 / 底色 / 字号，这三项以前只有笔记页能改
+  const prefPlacement = await page.evaluate(() => {
+    const menu = document.getElementById('prefmenu')
+    if (!menu) return null
+    const box = menu.getBoundingClientRect()
+    const others = [...menu.parentElement.children].filter(node => node !== menu)
+    return {
+      inTopbar: Boolean(menu.closest('.topbar')),
+      isRightmost: others.every(node => node.getBoundingClientRect().right <= box.right),
+      hasIcon: Boolean(menu.querySelector('summary svg')),
+      // 顶栏那一排的最后一项，也就是页面右上角
+      rightGap: Math.round(window.innerWidth - box.right),
+      dots: menu.querySelectorAll('button.paper[data-paper]').length
+    }
+  })
+  await record('设置下拉排在顶栏最右',
+    Boolean(prefPlacement && prefPlacement.inTopbar && prefPlacement.isRightmost && prefPlacement.hasIcon && prefPlacement.dots === 4),
+    prefPlacement ? '顶栏里最后一项，距右边缘 ' + prefPlacement.rightGap + 'px，' + prefPlacement.dots + ' 个底色圆点' : '顶栏里没有设置下拉')
+
+  // 键盘可达 + 点外面收起 + Esc 收起：<details> 原生只管"点自己那一下"
+  await page.focus('#prefmenu > summary')
+  await page.keyboard.press('Enter')
+  await page.waitForTimeout(120)
+  const openedByKeyboard = await page.$eval('#prefmenu', node => node.open)
+  await page.click('.band > h2')
+  await page.waitForTimeout(120)
+  const closedByOutside = await page.$eval('#prefmenu', node => !node.open)
+  await openPrefMenu()
+  await page.keyboard.press('Escape')
+  await page.waitForTimeout(120)
+  const closedByEscape = await page.$eval('#prefmenu', node => !node.open)
+  await record('设置下拉键盘可达、点外面/Esc 收起',
+    openedByKeyboard && closedByOutside && closedByEscape,
+    '回车' + (openedByKeyboard ? '能展开' : '展不开') + '，点别处' + (closedByOutside ? '收起' : '没收起') + '，Esc ' + (closedByEscape ? '收起' : '没收起'))
+
+  // 首页也能切底色 / 夜间 / 字号——都要真的改到这一页，而不是只写进 localStorage
+  const homeLook = {}
+  homeLook.bodyBefore = await page.evaluate(() => getComputedStyle(document.body).backgroundColor)
+  homeLook.fontBefore = await page.$eval('.lesson-table .lesson-title a', el => parseFloat(getComputedStyle(el).fontSize))
+  await openPrefMenu()
+  await page.click('#prefmenu button.paper[data-paper="green"]')
+  await page.waitForTimeout(150)
+  const homePaper = await page.evaluate(() => ({
+    attr: document.documentElement.getAttribute('data-paper'),
+    body: getComputedStyle(document.body).backgroundColor,
+    pressed: document.querySelector('#prefmenu button.paper[data-paper="green"]').getAttribute('aria-pressed'),
+    stillOpen: document.getElementById('prefmenu').open
+  }))
+  await openPrefMenu()
+  await page.click('#prefmenu [data-pref="theme"]')
+  await page.waitForTimeout(150)
+  const homeTheme = await page.evaluate(() => {
+    const button = document.querySelector('#prefmenu [data-pref="theme"]')
+    return {
+      theme: document.documentElement.getAttribute('data-theme'),
+      pressed: button.getAttribute('aria-pressed'),
+      moon: getComputedStyle(button.querySelector('.icon-moon')).display !== 'none',
+      sun: getComputedStyle(button.querySelector('.icon-sun')).display !== 'none'
+    }
+  })
+  await openPrefMenu()
+  await page.$eval('#prefmenu #fontRange', el => { el.value = '1.3'; el.dispatchEvent(new Event('input', { bubbles: true })) })
+  await page.waitForTimeout(200)
+  const homeFont = await page.evaluate(() => ({
+    scale: document.documentElement.style.getPropertyValue('--font-scale'),
+    size: parseFloat(getComputedStyle(document.querySelector('.lesson-table .lesson-title a')).fontSize),
+    stored: localStorage.getItem('course.fontScale')
+  }))
+  await page.keyboard.press('Escape')
+  await record('首页也能切底色/夜间/字号',
+    homePaper.attr === 'green' && homePaper.body === 'rgb(199, 237, 204)' &&
+      homePaper.body !== homeLook.bodyBefore && homePaper.pressed === 'true' && !homePaper.stillOpen &&
+      homeTheme.theme === 'dark' && homeTheme.pressed === 'true' && homeTheme.moon && !homeTheme.sun &&
+      homeFont.scale === '1.3' && homeFont.size > homeLook.fontBefore && homeFont.stored === '1.3',
+    '底色 ' + homeLook.bodyBefore + ' → ' + homePaper.body + '（' + homePaper.attr + '）；' +
+    '主题 light → ' + homeTheme.theme + '（月亮图标 ' + (homeTheme.moon ? '亮' : '灭') + '）；' +
+    '字号 ' + homeLook.fontBefore + 'px → ' + homeFont.size + 'px（--font-scale ' + homeFont.scale + '）')
+
+  // 与笔记页互通：同一批 localStorage 键，刚才那一套在笔记页要原样生效
+  await page.goto(site.url + noteUrl, { waitUntil: 'domcontentloaded' })
+  await page.waitForSelector('article h2', { timeout: 8000 })
+  const inherited = await page.evaluate(() => ({
+    theme: document.documentElement.getAttribute('data-theme'),
+    paper: document.documentElement.getAttribute('data-paper'),
+    scale: document.documentElement.style.getPropertyValue('--font-scale'),
+    toolTheme: document.getElementById('toolTheme').getAttribute('aria-pressed'),
+    range: document.getElementById('fontRange').value
+  }))
+  await record('设置与笔记页互通',
+    inherited.theme === 'dark' && inherited.paper === null && inherited.scale === '1.3' &&
+      inherited.toolTheme === 'true' && inherited.range === '1.3',
+    '笔记页拿到 data-theme=' + inherited.theme + '，--font-scale=' + inherited.scale + '，工具栏滑块=' + inherited.range)
+
+  // 收尾：切回白天，别让后面的索引页断言在一个夜间页面上跑
+  await page.goto(site.url + '/index.html', { waitUntil: 'domcontentloaded' })
+  await page.waitForSelector('.lesson-table', { timeout: 8000 })
+  await openPrefMenu()
+  await page.$eval('#prefmenu #fontRange', el => { el.value = '1'; el.dispatchEvent(new Event('input', { bubbles: true })) })
+  await page.click('#prefmenu button.paper[data-paper=""]')
+  await page.waitForTimeout(150)
+  await openPrefMenu()
+  await page.click('#prefmenu [data-pref="theme"]')
+  await page.waitForTimeout(150)
+  const resetLook = await page.evaluate(() => ({
+    theme: document.documentElement.getAttribute('data-theme'),
+    paper: document.documentElement.getAttribute('data-paper')
+  }))
+  await record('切回白天', resetLook.theme === 'light' && resetLook.paper === null, 'data-theme=' + resetLook.theme)
+
+  // 窄屏：顶栏那一排本来就挤，设置下拉不能溢出屏幕
+  await page.setViewportSize({ width: 375, height: 800 })
+  await page.waitForTimeout(200)
+  await openPrefMenu()
+  const narrow = await page.evaluate(() => {
+    const menu = document.getElementById('prefmenu')
+    const pop = menu.querySelector('.pref-pop').getBoundingClientRect()
+    const summary = menu.querySelector('summary').getBoundingClientRect()
+    return {
+      popLeft: Math.round(pop.left), popRight: Math.round(pop.right),
+      summaryRight: Math.round(summary.right),
+      viewport: window.innerWidth,
+      scrollWidth: document.documentElement.scrollWidth
+    }
+  })
+  await record('窄屏下拉不溢出屏幕',
+    narrow.popLeft >= 0 && narrow.popRight <= narrow.viewport &&
+      narrow.summaryRight <= narrow.viewport && narrow.scrollWidth <= narrow.viewport + 1,
+    '375px 视口：下拉占 ' + narrow.popLeft + '~' + narrow.popRight + 'px，入口右边缘 ' + narrow.summaryRight + 'px，页面宽 ' + narrow.scrollWidth + 'px')
+  await page.keyboard.press('Escape')
+  await page.setViewportSize({ width: 1280, height: 900 })
+  await page.waitForTimeout(150)
+
   // 索引页：课程 → 课次切分，术语是可点的词；不做折叠
   await page.goto(site.url + '/concepts/index.html', { waitUntil: 'domcontentloaded' })
   await page.waitForSelector('.chip', { timeout: 8000 })
   const groupCount = await page.$$eval('.term-group', nodes => nodes.length)
   const chipCount = await page.$$eval('.chip', nodes => nodes.length)
-  const folds = await page.$$eval('details', nodes => nodes.length)
+  // 内容不做折叠（顶栏那个「阅读设置」下拉不算内容折叠）
+  const folds = await page.$$eval('details', nodes => nodes.filter(node => node.id !== 'prefmenu').length)
   await record('概念按课次切分', groupCount >= 2 && chipCount >= groupCount, groupCount + ' 个课次分组 / ' + chipCount + ' 个术语')
   await record('索引不折叠', folds === 0, '没有折叠块，一次列到底')
   const sharedChips = await page.$$eval('.chip-shared', nodes => nodes.length)
@@ -1294,7 +1500,7 @@ async function main() {
     console.log('')
     await auditSearch(page, site, failures)
     console.log('')
-    await auditIndexPages(page, site, failures)
+    await auditIndexPages(page, site, fixture.noteUrl, failures)
   } finally {
     await browser.close()
     // 浏览器关掉后可能还有 keep-alive 连接挂在服务器上，close() 会一直等它们；

@@ -26,7 +26,11 @@ export const READER_ICONS = {
   // 打印机：看得出是打印——上半是机身，下半吐出一张纸
   printer: '<path d="M7 9V3.8h10V9"/><rect x="3.5" y="9" width="17" height="7.2" rx="1.6"/><path d="M7 14.2h10V20H7z"/>',
   arrowUp: '<path d="M12 19V6"/><path d="M6.5 11.5L12 6l5.5 5.5"/>',
-  menu: '<path d="M4 7h16M4 12h16M4 17h16"/>'
+  menu: '<path d="M4 7h16M4 12h16M4 17h16"/>',
+  // 阅读设置：两根带滑块的横杆。齿轮在这个尺寸下会糊成一团，滑杆一眼就是"可调"
+  sliders: '<path d="M4 8h5M15 8h5M4 16h7M17 16h3"/><circle cx="12" cy="8" r="2.2"/><circle cx="14" cy="16" r="2.2"/>',
+  // 一页纸摘要：一张带折角的纸加几道横线（首页表格里"一页纸"三个字会被挤换行，所以用图标）
+  sheet: '<path d="M14 3H7.5A1.5 1.5 0 0 0 6 4.5v15A1.5 1.5 0 0 0 7.5 21h9a1.5 1.5 0 0 0 1.5-1.5V7z"/><path d="M14 3v4h4"/><path d="M9 13h6M9 16.5h4"/>'
 }
 
 export function svgIcon(name) {
@@ -40,6 +44,55 @@ const ICON_BOLD = `<svg viewBox="0 0 24 24" aria-hidden="true">${READER_ICONS.bo
 const ICON_UNDERLINE = `<svg viewBox="0 0 24 24" aria-hidden="true">${READER_ICONS.underline}</svg>`
 const ICON_MARK = `<svg viewBox="0 0 24 24" aria-hidden="true">${READER_ICONS.mark}</svg>`
 const ICON_COPY = `<svg viewBox="0 0 24 24" aria-hidden="true">${READER_ICONS.copy}</svg>`
+
+/**
+ * 深浅 / 底色 / 字号：阅读页工具栏与顶栏"阅读设置"下拉**共用同一段脚本**。
+ *
+ * 为什么抽出来：这两处各写一份必然漂移。它们是同一批 localStorage 键
+ * （course.theme / course.paper / course.fontScale），逻辑写岔了就会出现
+ * "在首页调好的底色，点进笔记又变回去"这种谁都说不清的问题。
+ * 键名与 <head> 里的预置脚本（site.mjs 的 PREF_SCRIPT）必须一致。
+ */
+const PREF_CORE = String.raw`
+  var root = document.documentElement
+  var store = {
+    get: function (key, fallback) { try { return localStorage.getItem(key) || fallback } catch (e) { return fallback } },
+    set: function (key, value) { try { localStorage.setItem(key, value) } catch (e) {} }
+  }
+
+  // ── 深浅 / 底色 / 字号（与每页开头的预置脚本共用同一批键）──
+  function applyTheme (dark) {
+    root.setAttribute('data-theme', dark ? 'dark' : 'light')
+    if (dark) root.removeAttribute('data-paper')
+    else if (store.get('course.paper', '')) root.setAttribute('data-paper', store.get('course.paper', ''))
+    store.set('course.theme', dark ? 'dark' : 'light')
+    // 工具栏里的日/夜按钮与设置下拉里的那个按钮都跟着亮起来（同一页只有一个）
+    document.querySelectorAll('#toolTheme, [data-pref="theme"]').forEach(function (button) {
+      button.setAttribute('aria-pressed', dark ? 'true' : 'false')
+    })
+  }
+  function applyPaper (paper) {
+    store.set('course.paper', paper || '')
+    if (!paper || root.getAttribute('data-theme') === 'dark') root.removeAttribute('data-paper')
+    else root.setAttribute('data-paper', paper)
+    document.querySelectorAll('button.paper[data-paper]').forEach(function (dot) {
+      dot.setAttribute('aria-pressed', dot.getAttribute('data-paper') === (paper || '') ? 'true' : 'false')
+    })
+  }
+  function applyFont (scale) {
+    var value = Math.min(1.4, Math.max(0.85, Number(scale) || 1))
+    root.style.setProperty('--font-scale', String(value))
+    store.set('course.fontScale', String(value))
+    var range = document.getElementById('fontRange')
+    if (range) range.value = String(value)
+  }
+
+  // 进来先按本地存的偏好刷一遍。<head> 里那段已经刷过一次（那一次是为了不闪白），
+  // 这一次补的是按钮/滑块自己的状态。
+  applyTheme(store.get('course.theme', 'light') === 'dark')
+  applyPaper(store.get('course.paper', ''))
+  applyFont(store.get('course.fontScale', '1'))
+`
 
 /**
  * 右上角工具栏。
@@ -77,6 +130,70 @@ export function toolBar(record = {}) {
   ].join('')
 }
 
+/**
+ * 顶栏右侧的「阅读设置」下拉：深浅 / 背景色 / 字号。
+ *
+ * 非阅读页（首页、索引、地图、文档、搜索）顶栏没有工具栏图标，这三项以前一个都改不了；
+ * 现在收进一个下拉，挂在那一排导航的最右边，样式与站点导航下拉完全一致
+ * （点开、点外面收起、Esc 收起、键盘可达）。
+ * 阅读页与一页纸页不挂它——那两页顶栏本来就有工具栏图标排，多一个入口只会让人犹豫点哪个。
+ */
+export function settingsMenu() {
+  return [
+    '<details class="navmenu prefmenu" id="prefmenu">',
+    `<summary title="阅读设置" aria-label="阅读设置">${svgIcon('sliders')}</summary>`,
+    '<div class="nav-pop pref-pop">',
+    // 日/夜各一个图标，由当前主题决定显示哪个（与工具栏同一套 class，CSS 也共用）
+    '<button type="button" data-pref="theme" title="深浅色" aria-label="深浅色">' +
+      `<span class="icon-sun">${svgIcon('sun')}</span><span class="icon-moon">${svgIcon('moon')}</span></button>`,
+    '<div class="dot-row">',
+    '<button class="paper" type="button" data-paper="" style="background:#ffffff" title="纸白" aria-label="纸白"></button>',
+    '<button class="paper" type="button" data-paper="green" style="background:#c7edcc" title="豆沙绿" aria-label="豆沙绿"></button>',
+    '<button class="paper" type="button" data-paper="kraft" style="background:#f4ecd8" title="牛皮纸" aria-label="牛皮纸"></button>',
+    '<button class="paper" type="button" data-paper="gray" style="background:#f2f3f5" title="浅灰" aria-label="浅灰"></button>',
+    '</div>',
+    '<input type="range" id="fontRange" min="0.9" max="1.4" step="0.05" aria-label="字号">',
+    '</div></details>'
+  ].join('')
+}
+
+/**
+ * 设置下拉的交互。
+ *
+ * <details>/<summary> 原生就支持鼠标点击与键盘（Tab 到、Enter/Space 开合），所以这里只补三件
+ * 原生不管的事：点外面收起、Esc 收起、以及三个控件自己的行为。
+ * 三个控件走的还是 PREF_CORE 里的 applyTheme / applyPaper / applyFont——
+ * 与阅读页工具栏是同一份实现、同一批 localStorage 键，两边不会各说各话。
+ */
+export const PREF_MENU_SCRIPT = '<script>' + String.raw`
+(function () {
+  var menu = document.getElementById('prefmenu')
+  if (!menu) return
+` + PREF_CORE + String.raw`
+  menu.addEventListener('click', function (event) {
+    if (!event.target.closest) return
+    // 色板判定必须限定成 button.paper[data-paper]：<html> 自己也带 data-paper，
+    // 用 closest('[data-paper]') 会把「点这个下拉里的任意位置」都当成选颜色。
+    var dot = event.target.closest('button.paper[data-paper]')
+    // 选完颜色就收起：留着它会在窄屏上盖住下面的内容
+    if (dot) { applyPaper(dot.getAttribute('data-paper') || ''); menu.open = false; return }
+    var button = event.target.closest('[data-pref="theme"]')
+    if (button) applyTheme(root.getAttribute('data-theme') !== 'dark')
+  })
+  var range = document.getElementById('fontRange')
+  if (range) {
+    range.value = store.get('course.fontScale', '1')
+    range.addEventListener('input', function () { applyFont(range.value) })
+  }
+  document.addEventListener('click', function (event) {
+    if (!event.target.closest || !event.target.closest('#prefmenu')) menu.open = false
+  }, true)
+  document.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape' && menu.open) menu.open = false
+  })
+})();
+</script>`
+
 /** 左栏：本课程全部课次，点着就能换课。 */
 export function courseNav(record = {}, courseLessons = []) {
   if (!courseLessons.length) return ''
@@ -98,44 +215,12 @@ function escapeAttr(value) {
  * 四件事：工具栏（深浅/底色/字号/专注/复制/打印）、锚点高亮、划词批注、目录跟随。
  * 全部原生 JS，没有依赖——站点没有构建步骤，这段就是它全部的交互。
  */
+// 深浅 / 底色 / 字号不在这里再写一遍：与顶栏的阅读设置下拉共用 PREF_CORE（见上）
 export const READER_SCRIPT = '<script>' + String.raw`
 (function () {
-  var root = document.documentElement
   var reading = document.getElementById('reading')
   var tools = document.getElementById('tools')
-  var store = {
-    get: function (key, fallback) { try { return localStorage.getItem(key) || fallback } catch (e) { return fallback } },
-    set: function (key, value) { try { localStorage.setItem(key, value) } catch (e) {} }
-  }
-
-  // ── 深浅 / 底色 / 字号（与每页开头的预置脚本共用同一批键）──
-  function applyTheme (dark) {
-    root.setAttribute('data-theme', dark ? 'dark' : 'light')
-    if (dark) root.removeAttribute('data-paper')
-    else if (store.get('course.paper', '')) root.setAttribute('data-paper', store.get('course.paper', ''))
-    store.set('course.theme', dark ? 'dark' : 'light')
-    var button = document.getElementById('toolTheme')
-    if (button) button.setAttribute('aria-pressed', dark ? 'true' : 'false')
-  }
-  function applyPaper (paper) {
-    store.set('course.paper', paper || '')
-    if (!paper || root.getAttribute('data-theme') === 'dark') root.removeAttribute('data-paper')
-    else root.setAttribute('data-paper', paper)
-    document.querySelectorAll('button.paper[data-paper]').forEach(function (dot) {
-      dot.setAttribute('aria-pressed', dot.getAttribute('data-paper') === (paper || '') ? 'true' : 'false')
-    })
-  }
-  function applyFont (scale) {
-    var value = Math.min(1.4, Math.max(0.85, Number(scale) || 1))
-    root.style.setProperty('--font-scale', String(value))
-    store.set('course.fontScale', String(value))
-    var range = document.getElementById('fontRange')
-    if (range) range.value = String(value)
-  }
-
-  applyTheme(store.get('course.theme', 'light') === 'dark')
-  applyPaper(store.get('course.paper', ''))
-  applyFont(store.get('course.fontScale', '1'))
+` + PREF_CORE + String.raw`
 
   function closePops () {
     document.querySelectorAll('.tool-wrap.open').forEach(function (node) { node.classList.remove('open') })

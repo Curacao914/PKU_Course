@@ -28,7 +28,11 @@ export const INSTRUCTIONS = [
   '1) list_courses —— 先看有哪些课（课次数、最新时间、theme、keywords）；',
   '2) get_course(course) —— 锁定课程后看每一节的 theme/keywords/摘要，决定读哪一节；',
   '3) search_notes(query, includeBody?) —— 跨课程/跨课次找某个概念、法条、案例时用，返回片段与定位；',
-  '4) get_note(slug, section?, maxChars?) —— 只在这一步读正文，优先带 section 只读相关小节。',
+  '4) get_note(slug, section?, maxChars?) —— 只在这一步读正文，优先带 section 只读相关小节；',
+  '5) list_terms(course) —— 复习型问题（这门课讲过哪些案例/法条）用它一次看全。',
+  '回答跨课次、跨课程的问题时，请在答案里标明具体课程与课次（返回里都带 slug 与 canonical URL）。',
+  '另外提供 OpenAI 标准知识接口 search(query) 与 fetch(id)：给不支持自定义工具的客户端用，' +
+    '检索逻辑与上面一致；能用课程专用工具时优先用它们（分层更清楚）。',
   '支持 resources 的客户端也可以直接读 notes://courses、notes://course/<课程名>、notes://note/<slug>。'
 ].join('\n')
 
@@ -74,8 +78,13 @@ export function createProtocolServer({ service, serverInfo = SERVER_INFO, instru
       return { content: [{ type: 'text', text: `参数不合法：${checked.errors.join('；')}` }], isError: true }
     }
     try {
-      const text = await tool.run(service, checked.value)
-      return { content: [{ type: 'text', text }], isError: false }
+      const result = await tool.run(service, checked.value)
+      // 工具可以返回"已经成形的结果"（标准 search/fetch 需要同时给出 content 与
+      // structuredContent），其余工具返回纯文本即可。
+      if (result && typeof result === 'object' && Array.isArray(result.content)) {
+        return { ...result, isError: false }
+      }
+      return { content: [{ type: 'text', text: result }], isError: false }
     } catch (error) {
       if (error instanceof ToolError) return { content: [{ type: 'text', text: error.message }], isError: true }
       throw error

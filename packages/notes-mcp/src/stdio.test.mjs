@@ -70,7 +70,7 @@ test('runStdioServer：一行一条消息、顺序回应、通知不回、坏 JS
   assert.deepEqual(responses.map(item => item.id), [1, 2, null, 3])
   assert.equal(responses[0].result.protocolVersion, '2025-06-18')
   assert.equal(responses[0].result.capabilities.resources !== undefined, true)
-  assert.equal(responses[1].result.tools.length, 5)
+  assert.equal(responses[1].result.tools.length, 7)
   assert.equal(responses[2].error.code, -32700)
   assert.match(responses[3].result.content[0].text, /国际法学/)
   assert.ok(logs.some(line => line.includes('就绪')))

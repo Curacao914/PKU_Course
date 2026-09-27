@@ -112,14 +112,19 @@ export function renderDigestText(digest, { siteOrigin = 'https://course.law-tech
 }
 
 /**
- * HTML 版：只用列表与表格。
+ * 邮件表格样式。
  *
  * 邮件客户端对 CSS 支持有限，所以用最朴素的内联样式与 table 布局——
  * 花哨的东西在 Gmail / QQ 邮箱 / 微信内置浏览器里表现不一致。
+ * 日报与缺课件提醒共用这一份，避免两封邮件的表格长得不一样。
  */
+const EMAIL_CELL = 'padding:8px 10px;border-bottom:1px solid #e8e8ed;vertical-align:top;font-size:14px'
+const EMAIL_HEAD = 'padding:8px 10px;border-bottom:1px solid #d2d2d7;text-align:left;font-size:12px;color:#6e6e73;font-weight:600'
+
+/** HTML 版：只用列表与表格。 */
 export function renderDigestHtml(digest, { siteOrigin = 'https://course.law-tech.dev' } = {}) {
-  const cell = 'padding:8px 10px;border-bottom:1px solid #e8e8ed;vertical-align:top;font-size:14px'
-  const head = 'padding:8px 10px;border-bottom:1px solid #d2d2d7;text-align:left;font-size:12px;color:#6e6e73;font-weight:600'
+  const cell = EMAIL_CELL
+  const head = EMAIL_HEAD
   const rows = digest.published.map(note => `
     <tr>
       <td style="${cell}">${escapeHtml(note.courseName)}</td>
@@ -180,6 +185,105 @@ export async function sendResendEmail({
   } finally {
     clearTimeout(timer)
   }
+}
+
+/**
+ * 缺课件提醒（每晚 20:00）。
+ *
+ * 为什么单独一封：自动链路现在是"没有课件就不跑这一节"，课件缺不缺直接决定
+ * 这一节今晚会不会动。20:00 发出，留出上传的时间。
+ *
+ * 与 07:00 日报同一条原则：**没有缺的就不发**（宁可不打扰，也不发一封空邮件）。
+ * 正文与日报同一套表格样式，只有"课程 · 课次 · 状态 · 去上传"四列，
+ * 不写解释系统自身的元文案。
+ */
+
+/** 跑完的课次不再提醒：补课件对已经发布/完成的课次没有意义。 */
+const REMINDER_DONE_STAGES = ['published', 'completed']
+
+/** 阶段 → 人话。账本里的阶段名是我们自己的词汇，邮件里要写用户看得懂的。 */
+export const STAGE_LABELS = {
+  discovered: '已发现，等待处理',
+  queued: '排队中',
+  downloading: '下载中',
+  downloaded: '已下载，等转录',
+  transcribing: '转录中',
+  transcript_ready: '已转写，等写笔记',
+  building_textpack: '整理文本中',
+  writing: '写笔记中',
+  notes_ready: '笔记已就绪，等发布',
+  publishing: '发布中',
+  needs_attention: '需要人工处理',
+  failed: '失败',
+  notifying: '通知中',
+  completed: '已完成',
+  published: '已发布'
+}
+
+export function stageLabel(stage) {
+  return STAGE_LABELS[String(stage || '')] || String(stage || '未知')
+}
+
+/**
+ * 挑出"还没有课件、且还没跑完"的课次。
+ *
+ * @param hasMaterials 由调用方注入（materials 包的 listMaterials）；全课程通用与
+ *                     跨课次共用的课件在那边已经算作"有"，这里不重复判断。
+ */
+export function collectMissingMaterials({ tasks = [], hasMaterials = () => false } = {}) {
+  return tasks
+    .filter(task => task && task.replayKey && task.courseName && task.title)
+    .filter(task => !REMINDER_DONE_STAGES.includes(task.stage))
+    .filter(task => !hasMaterials(task))
+    .map(task => ({
+      replayKey: task.replayKey,
+      courseName: task.courseName || '',
+      lessonTitle: task.title || '',
+      stage: task.stage || '',
+      stageLabel: stageLabel(task.stage)
+    }))
+    .sort((left, right) => String(`${left.courseName}${left.lessonTitle}`)
+      .localeCompare(String(`${right.courseName}${right.lessonTitle}`), 'zh'))
+}
+
+/** 提醒标题：几节、哪天，一眼够用。 */
+export function pptReminderSubject(list, { date = '' } = {}) {
+  const items = Array.isArray(list) ? list : []
+  return `缺课件提醒${date ? ` · ${date}` : ''} · ${items.length} 节待上传`
+}
+
+export function renderPptReminderText(list, { adminUrl = '', date = '' } = {}) {
+  const items = Array.isArray(list) ? list : []
+  const lines = [`缺课件提醒${date ? ` · ${date}` : ''}`, '']
+  lines.push(`这 ${items.length} 节还没有课件，补齐后夜里才会自动跑笔记：`, '')
+  for (const item of items) {
+    lines.push(`- ${item.courseName} · ${item.lessonTitle}（${item.stageLabel || stageLabel(item.stage)}）`)
+  }
+  if (adminUrl) lines.push('', `上传课件：${adminUrl}`)
+  return lines.join('\n')
+}
+
+/** HTML 版：与日报同一套表格样式（内联样式 + table，邮件客户端才认）。 */
+export function renderPptReminderHtml(list, { adminUrl = '', date = '' } = {}) {
+  const items = Array.isArray(list) ? list : []
+  const rows = items.map(item => `
+    <tr>
+      <td style="${EMAIL_CELL}">${escapeHtml(item.courseName)}</td>
+      <td style="${EMAIL_CELL}">${escapeHtml(item.lessonTitle)}</td>
+      <td style="${EMAIL_CELL};color:#6e6e73;white-space:nowrap">${escapeHtml(item.stageLabel || stageLabel(item.stage))}</td>
+      <td style="${EMAIL_CELL}">${adminUrl ? `<a href="${escapeHtml(adminUrl)}" style="color:#2f6f61">去上传</a>` : ''}</td>
+    </tr>`).join('')
+
+  return `<!doctype html><html><body style="margin:0;background:#fbfbfd;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif;color:#1d1d1f">
+  <div style="max-width:640px;margin:0 auto;padding:24px 20px">
+    <h1 style="font-size:20px;margin:0 0 4px">缺课件提醒</h1>
+    <p style="margin:0 0 20px;color:#6e6e73;font-size:13px">${escapeHtml(date)} · 这 ${items.length} 节还没有课件，补齐后夜里才会自动跑笔记</p>
+    <table style="width:100%;border-collapse:collapse;margin-bottom:22px">
+      <thead><tr><th style="${EMAIL_HEAD}">课程</th><th style="${EMAIL_HEAD}">课次</th><th style="${EMAIL_HEAD}">状态</th><th style="${EMAIL_HEAD}">管理台</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    ${adminUrl ? `<p style="margin:0;color:#86868b;font-size:12px">管理台：<a href="${escapeHtml(adminUrl)}" style="color:#2f6f61">${escapeHtml(adminUrl)}</a></p>` : ''}
+  </div></body></html>`
 }
 
 /** 日报标题：一眼看出昨天值不值得点开。 */

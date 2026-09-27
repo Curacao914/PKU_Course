@@ -1,0 +1,13 @@
+[Unit]
+Description=每天 20:00（北京时间）提醒还没上传的课件
+
+[Timer]
+# 夜里 07:30 那一轮 cycle 会真正动笔记，20:00 提醒留出一晚上的时间上传。
+# 服务器时区就是 Asia/Shanghai；Persistent 让错过的轮次开机后补跑
+OnCalendar=*-*-* 20:00:00
+Persistent=true
+AccuracySec=1min
+Unit=course-ppt-reminder.service
+
+[Install]
+WantedBy=timers.target

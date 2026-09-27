@@ -82,6 +82,54 @@ export function validateConfigPatch(patch = {}) {
   return { clean, errors }
 }
 
+/**
+ * 微信会话：过期就说清楚，不让用户自己算。
+ *
+ * 这条通道只在"用户最近给机器人发过消息"之后才能真正送达——平台随每条来信下发
+ * context_token，出站必须原样带上；没有它接口照常返回 messageId，微信端却收不到。
+ * 所以"最近互动多久了"不是背景信息，而是"现在能不能推"的判据：超过
+ * WECHAT_SESSION_MAX_AGE_MINUTES（默认 720 分钟 = 12 小时）就直接写
+ * "已过期（超过 12 小时）"并用 warn 色，而不是只丢一个"23 小时前"让人自己减。
+ *
+ * 文案与 worker 侧 apps/worker/src/wechat.mjs 保持一致：站点进程与 worker 是两条
+ * 独立进程，读不到彼此的模块，这一句只能各留一份（改动时两边一起改）。
+ */
+export const WECHAT_ACTIVATION = {
+  supported: false,
+  reason: 'OpenClaw 没有可自动重建会话的入口',
+  // 依据（2026-09 核实）：openclaw channels login --channel openclaw-weixin 是**扫码登录**
+  // （官方文档 openclaw/docs/channels/wechat.md：必须用手机扫码确认）；context_token 由
+  // 微信随用户的入站消息下发、存在网关进程里，CLI 的 message / sessions / devices /
+  // pairing 都不会重建它。详见 deploy/README.md「会话过期：先显示清楚，再谈自动」。
+  hint: '给微信机器人发一条消息即可恢复会话；OpenClaw 没有可自动重建会话的入口（需要人工扫码登录或批准设备，见 deploy/README.md）'
+}
+
+/**
+ * 把会话状态的原始数字翻成人话：是否过期、多久没互动、阈值多少小时。
+ *
+ * @returns {{ok:boolean, fresh:boolean, expired:boolean, ageMinutes:number|null, ageText:string,
+ *           limitHours:number, summary:string, hint:string}}
+ */
+export function describeWechatSession({ session = {}, maxAgeMinutes = WECHAT_SESSION_MAX_AGE_MINUTES } = {}) {
+  const limitHours = Math.round(Number(maxAgeMinutes || WECHAT_SESSION_MAX_AGE_MINUTES) / 60)
+  if (!session.ok) {
+    return { ...session, fresh: false, expired: false, limitHours, ageText: '', summary: '不可用', hint: '' }
+  }
+  const ageMinutes = Math.max(0, Math.round(Number(session.ageMinutes) || 0))
+  const fresh = ageMinutes <= maxAgeMinutes
+  const ageText = ageMinutes < 60 ? `${ageMinutes} 分钟前` : `${Math.round(ageMinutes / 60)} 小时前`
+  return {
+    ...session,
+    fresh,
+    expired: !fresh,
+    limitHours,
+    ageText,
+    // 过期时把"多久没互动"和"超过多少算过期"写进同一句：用户不需要自己减
+    summary: fresh ? `最近互动 ${ageText}` : `已过期（超过 ${limitHours} 小时）：最近互动 ${ageText}`,
+    hint: fresh ? '' : WECHAT_ACTIVATION.hint
+  }
+}
+
 function sendJson(res, status, value, headers = {}) {
   const body = Buffer.from(`${JSON.stringify(value, null, 2)}\n`)
   res.writeHead(status, {
@@ -321,7 +369,14 @@ export function buildActionArgs(action, payload = {}, workerPath = '') {
     case 'prune':
       return [...base, 'prune', ...(payload.apply ? ['--apply'] : [])]
     case 'cycle':
-      return [...base, 'cycle', '--max-tasks', String(Number(payload.maxTasks) || 5), ...(payload.replayKey ? ['--replay-key', String(payload.replayKey)] : [])]
+      // 课次行里的「立即跑这一节」是一次**显式点击**：把 --require-materials 0 明确写进
+      // 命令行，等于"我知道这节没课件，我就是要跑"。整轮那个按钮保持 CLI 默认
+      // （缺课件就跳过），因为它做的事与定时任务完全一样。
+      return [
+        ...base, 'cycle',
+        '--max-tasks', String(Number(payload.maxTasks) || 5),
+        ...(payload.replayKey ? ['--replay-key', String(payload.replayKey), '--require-materials', '0'] : [])
+      ]
     case 'backup': case 'balance': case 'doctor': case 'discover': case 'notify': case 'status':
       return [...base, action]
     default:
@@ -611,12 +666,10 @@ export function createAdminHandler({
   }
 
   /**
-   * 微信通道的会话状态。
+   * 推送通道状态：微信会话（含是否过期）与备用通道配没配。
    *
-   * 这个通道（微信机器人）只在"用户最近给机器人发过消息"之后才能把消息真正送到——
-   * 平台给每条来信发一个 context_token，出站必须原样带上。没有它会怎样：接口照常返回
-   * messageId，看起来"发送成功"，但微信端收不到。所以必须在界面上说出来，
-   * 而不是让用户对着"已发送"发呆。
+   * 会话判定交给 describeWechatSession（纯函数、有固定时钟的测试），这里只负责
+   * 把进程环境里的 OPENCLAW_* 喂进去——站点服务的环境变量来自 systemd 单元。
    */
   function channelHealth() {
     const session = wechatSessionState({
@@ -624,8 +677,11 @@ export function createAdminHandler({
       home: process.env.OPENCLAW_HOME || '',
       now: now()
     })
-    const fresh = session.ok && Number(session.ageMinutes || 0) <= WECHAT_SESSION_MAX_AGE_MINUTES
-    return { ...session, fresh, fallback: fallbackChannelState() }
+    return {
+      ...describeWechatSession({ session, maxAgeMinutes: WECHAT_SESSION_MAX_AGE_MINUTES }),
+      fallback: fallbackChannelState(),
+      activation: WECHAT_ACTIVATION
+    }
   }
 
   /**

@@ -105,8 +105,12 @@ const FIELD_SPECS = [
   { kind: '课程', weight: 3, values: record => [record.courseName, record.teacher] }
 ]
 
-export function createNotesService({ source } = {}) {
+export function createNotesService({ source, siteOrigin = '' } = {}) {
   if (!source) throw new Error('createNotesService 需要 source（createSource 的产物）')
+  // canonical URL：AI 引用来源时要给用户能直接点开的地址
+  const origin = String(siteOrigin || 'https://course.law-tech.dev').replace(/\/+$/, '')
+  const noteUrl = slug => `${origin}/${String(slug).replace(/^\/+/, '')}.html`
+  const onePageUrl = slug => `${origin}/${String(slug).replace(/^notes\//, 'onepage/')}.html`
 
   /** 第一层：课程总览。 */
   async function listCourses({ query = '', limit = 50 } = {}) {
@@ -313,6 +317,76 @@ export function createNotesService({ source } = {}) {
     }
   }
 
+  /**
+   * OpenAI 标准知识接口之一：search(query) → { results: [{ id, title, url }] }。
+   *
+   * 与 course 专用的 search_notes 的关系：**复用同一套检索**，只是输出换成标准格式。
+   * 先查索引；索引命中太少时就下沉到正文再查一次（标准接口的调用方只会给一个 query，
+   * 不会像模型那样自己决定要不要 includeBody）。
+   *
+   * id 用 slug，稳定且能直接喂给 fetch。
+   */
+  async function searchKnowledge({ query = '', limit = 8 } = {}) {
+    const text = String(query || '').trim()
+    if (!text) throw new ToolError('search 需要 query。')
+    const records = await source.listNotes()
+    const bySlug = new Map(records.map(record => [record.slug, record]))
+    const first = await searchNotes({ query: text, limit: Math.max(limit * 2, 8) })
+    let hits = first.hits || []
+    if (hits.length < 3) {
+      // 索引里没写到的内容（正文细节）再扫一遍正文；远程数据源会逐篇下载，代价可接受
+      const deep = await searchNotes({ query: text, includeBody: true, limit: Math.max(limit * 2, 8) })
+      const seen = new Set(hits.map(hit => hit.slug))
+      hits = [...hits, ...(deep.hits || []).filter(hit => !seen.has(hit.slug))]
+    }
+    const results = hits.slice(0, limit).map(hit => {
+      const record = bySlug.get(hit.slug)
+      const course = hit.courseName || record?.courseName || ''
+      const lesson = hit.lessonTitle || record?.lessonTitle || ''
+      return {
+        id: hit.slug,
+        title: course ? `${course} · ${lesson}` : lesson,
+        url: noteUrl(hit.slug)
+      }
+    })
+    return { query: text, scanned: first.scanned || records.length, results }
+  }
+
+  /**
+   * OpenAI 标准知识接口之二：fetch(id) → { id, title, text, url, metadata }。
+   *
+   * id 支持两种：笔记 slug（整篇），或 slug#小节标题/标题 id（只取那一节）——
+   * 后者让调用方能在不读整篇的前提下拿到相关段落。
+   */
+  async function fetchDocument({ id = '' } = {}) {
+    const raw = String(id || '').trim()
+    if (!raw) throw new ToolError('fetch 需要 id（来自 search 的 results[].id）。')
+    const [slugPart, sectionPart = ''] = raw.split('#')
+    const section = sectionPart ? decodeURIComponent(sectionPart) : ''
+    const note = await getNote({ slug: slugPart, section, maxChars: NOTE_MAX_CHARS_LIMIT })
+    const text = note.markdown || ''
+    return {
+      id: raw,
+      title: section
+        ? `${note.courseName} · ${note.lessonTitle} · ${note.section?.title || section}`
+        : `${note.courseName} · ${note.lessonTitle}`,
+      text,
+      url: noteUrl(note.slug),
+      metadata: {
+        course: note.courseName || '',
+        lesson: note.lessonTitle || '',
+        date: String(note.publishedAt || '').slice(0, 10),
+        section: note.section?.title || section || '',
+        slug: note.slug,
+        theme: note.theme || '',
+        keywords: note.keywords || [],
+        readMinutes: note.readMinutes || 0,
+        totalChars: note.totalChars || text.length,
+        onePageUrl: onePageUrl(note.slug)
+      }
+    }
+  }
+
   /** 加分项：一门课的概念 / 法条 / 案例清单，带出现次数与落点。 */
   async function listTerms({ course = '', kind = 'all', limit = 50 } = {}) {
     const records = await source.listNotes()
@@ -457,6 +531,8 @@ export function createNotesService({ source } = {}) {
     searchNotes,
     getNote,
     listTerms,
+    searchKnowledge,
+    fetchDocument,
     listResources,
     readResource,
     resourceTemplates

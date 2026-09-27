@@ -42,17 +42,28 @@ test('notifications/initialized 与未知通知都不产生响应', async () => 
   assert.equal(logs.length, 0)
 })
 
-test('tools/list：五个工具，名字唯一、描述与 inputSchema 齐备、不泄漏内部字段', async () => {
+test('tools/list：七个工具（含 OpenAI 标准的 search/fetch），名字唯一、描述与 inputSchema 齐备、不泄漏内部字段', async () => {
   const response = await request(2, 'tools/list')
   const tools = response.result.tools
-  assert.deepEqual(tools.map(tool => tool.name), ['list_courses', 'get_course', 'search_notes', 'get_note', 'list_terms'])
+  assert.deepEqual(tools.map(tool => tool.name),
+    ['list_courses', 'get_course', 'search_notes', 'get_note', 'list_terms', 'search', 'fetch'])
   assert.equal(new Set(tools.map(tool => tool.name)).size, tools.length)
   for (const tool of tools) {
     assert.ok(tool.description.length > 20, tool.name)
     assert.equal(tool.inputSchema.type, 'object')
     assert.equal(tool.inputSchema.additionalProperties, false)
     assert.equal('run' in tool, false)
+    // 全是只读工具：MCP 与 OpenAI 都要求显式声明
+    assert.equal(tool.annotations.readOnlyHint, true, tool.name)
+    assert.equal(tool.annotations.destructiveHint, false, tool.name)
   }
+  // OpenAI 标准知识接口：输入只有一个字符串，输出 schema 里必须有 id/title/url
+  const search = tools.find(tool => tool.name === 'search')
+  const fetch = tools.find(tool => tool.name === 'fetch')
+  assert.deepEqual(search.inputSchema.required, ['query'])
+  assert.deepEqual(fetch.inputSchema.required, ['id'])
+  assert.deepEqual(search.outputSchema.properties.results.items.required, ['id', 'title', 'url'])
+  assert.deepEqual(fetch.outputSchema.required, ['id', 'title', 'text', 'url'])
   for (const name of ['get_course', 'search_notes', 'list_terms']) {
     assert.deepEqual(tools.find(tool => tool.name === name).inputSchema.required, name === 'search_notes' ? ['query'] : ['course'])
   }
@@ -164,4 +175,37 @@ test('协议细节：ping、id=0、未知方法、坏消息、批量数组', asy
 
   const notObject = await server.handleMessage('hello')
   assert.equal(notObject.error.code, -32600)
+})
+
+test('search / fetch：按 OpenAI 标准返回（单个 text content + JSON 字符串，另附 structuredContent）', async () => {
+  const response = await request(9, 'tools/call', { name: 'search', arguments: { query: '国际法' } })
+  const result = response.result
+  assert.equal(result.isError, false)
+  assert.equal(result.content.length, 1, '规范要求恰好一个 content 项')
+  assert.equal(result.content[0].type, 'text')
+  const payload = JSON.parse(result.content[0].text)
+  assert.ok(Array.isArray(payload.results))
+  assert.ok(payload.results.length >= 1)
+  for (const item of payload.results) {
+    assert.deepEqual(Object.keys(item).sort(), ['id', 'title', 'url'])
+    assert.ok(item.url.startsWith('https://'))
+  }
+  // structuredContent 与文本里那份必须一致，否则不同客户端会看到两套结果
+  assert.deepEqual(result.structuredContent, payload)
+
+  const first = payload.results[0]
+  const fetched = await request(10, 'tools/call', { name: 'fetch', arguments: { id: first.id } })
+  const document = JSON.parse(fetched.result.content[0].text)
+  assert.equal(document.id, first.id)
+  assert.equal(document.url, first.url)
+  assert.ok(document.text.length > 100)
+  assert.equal(document.metadata.course.length > 0, true)
+  assert.ok(document.metadata.lesson.length > 0)
+  assert.deepEqual(fetched.result.structuredContent, document)
+
+  // id 支持 slug#小节：只取那一节，比整篇省上下文
+  const section = await request(11, 'tools/call', { name: 'fetch', arguments: { id: first.id + '#课程概览' } })
+  const sliced = JSON.parse(section.result.content[0].text)
+  assert.ok(sliced.text.length < document.text.length || sliced.metadata.section.length > 0)
+  assert.ok(sliced.metadata.section.length > 0, '按小节取时要带上小节名')
 })

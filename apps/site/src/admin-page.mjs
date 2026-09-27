@@ -505,10 +505,14 @@ function channelHtml () {
   var c = state.status.channel || {}
   var rows = []
   if (c.ok) {
-    var age = Number(c.ageMinutes || 0)
-    var text = age < 60 ? age + ' 分钟前' : Math.round(age / 60) + ' 小时前'
-    rows.push('<div><span class="pill ' + (c.fresh ? 'ok' : 'warn') + '"><span class="dot"></span>微信机器人 ' + (c.fresh ? '可用' : '会话过期') + '</span>' +
-      '<span class="tiny muted" style="margin-left:8px">最近互动 ' + esc(text) + '</span></div>')
+    // 「最近互动 23 小时前」要用户自己算是算不过来的，所以判断结论由服务端一起给出：
+    // 已过期就直接写「已过期（超过 12 小时）」并用 warn 色，再补一句可执行的提示。
+    var summary = c.summary || ('最近互动 ' + (c.ageText || ''))
+    rows.push('<div><span class="pill ' + (c.fresh ? 'ok' : 'warn') + '"><span class="dot"></span>微信机器人 ' + (c.fresh ? '可用' : '已过期') + '</span>' +
+      '<span class="tiny muted" style="margin-left:8px">' + esc(summary) + '</span></div>')
+    if (c.expired) {
+      rows.push('<div class="tiny" style="margin-top:6px">' + esc(c.hint || '需要重新扫码/重新登录 OpenClaw') + '</div>')
+    }
   } else {
     rows.push('<div><span class="pill bad"><span class="dot"></span>微信机器人 不可用</span>' +
       (c.reason ? '<span class="tiny muted" style="margin-left:8px">' + esc(c.reason) + '</span>' : '') + '</div>')

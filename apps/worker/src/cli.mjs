@@ -111,6 +111,8 @@ export async function runCli(argv = [], deps = {}) {
     openStore: deps.openStore ?? (path => openLedger(path)),
     callModel: deps.callModel,
     sender: deps.sender,
+    // 邮件发送器同样可注入：测试用假 sender，绝不真发邮件
+    emailSender: deps.emailSender,
     sleep: deps.sleep,
     stdout,
     stderr

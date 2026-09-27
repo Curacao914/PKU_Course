@@ -205,7 +205,56 @@ test('the reading page keeps its tools in the top bar instead of a floating pane
   // 首页/索引页照旧平铺导航，不必点开
   const home = renderIndexPage([record()])
   assert.match(home, /<nav><a href="\/">全部课次<\/a>/)
-  assert.ok(!home.includes('<details class="navmenu">'), '只有阅读页需要收起导航')
+  assert.ok(!home.includes('title="站点导航"'), '首页的导航不收进下拉')
+})
+
+test('every page without the reading toolbar still offers 深浅 / 底色 / 字号', () => {
+  // 用户的要求：这三项设置以前只有笔记页与一页纸页能改，首页、索引、地图、文档、搜索
+  // 一个入口都没有——而它们是同一批 localStorage 键，本来就该处处能改。
+  const pages = {
+    首页: renderIndexPage([record()]),
+    概念索引: renderTermIndexPage({
+      title: '概念索引',
+      kind: 'concepts',
+      notes: [record({
+        markdown: [NOTE, '', '<details><summary>元数据</summary>', '<pre><code>', 'META: CONCEPT: 共同故意', '</code></pre>', '</details>'].join('\n')
+      })]
+    }),
+    知识地图: renderKnowledgeMapPage({ notes: [record({ markdown: NOTE })] }),
+    搜索: renderSearchPage()
+  }
+  for (const [name, html] of Object.entries(pages)) {
+    // 下拉挂在那一排导航的最右边（也就页面右上角），样式与站点导航下拉同一套
+    assert.match(html, /<\/nav><details class="navmenu prefmenu" id="prefmenu">/, name + ' 的设置下拉要排在一排导航的末尾')
+    assert.match(html, /<summary title="阅读设置" aria-label="阅读设置">/, name + ' 的入口要能键盘聚焦、有名字')
+    assert.match(html, /data-pref="theme"/, name + ' 要能切深浅')
+    for (const paper of ['data-paper="green"', 'data-paper="kraft"', 'data-paper="gray"']) {
+      assert.ok(html.includes(paper), name + ' 要能选底色 ' + paper)
+    }
+    assert.match(html, /id="fontRange" min="0.9" max="1.4"/, name + ' 要能调字号')
+    // 点外面收起 / Esc 收起：<details> 原生只管点自己那一下
+    assert.match(html, /if \(!event\.target\.closest \|\| !event\.target\.closest\('#prefmenu'\)\) menu\.open = false/)
+    assert.match(html, /event\.key === 'Escape' && menu\.open/)
+    // 复核过的真实 bug：<html> 自己也带 data-paper，宽松的 closest 会把每次点击都吃成"选颜色"
+    assert.match(html, /closest\('button\.paper\[data-paper\]'\)/, name + ' 的色板判定必须只认色板按钮')
+    assert.ok(!/event\.target\.closest\('\[data-paper\]'\)/.test(html), name + ' 不能写成对根元素也生效的形式')
+  }
+
+  // 字号滑块在这几页要真的改得到字，而不是只改一个没人用的变量
+  const home = pages.首页
+  assert.match(home, /\.wrap \{ font-size: calc\(1em \* var\(--font-scale\)\); \}/,
+    '内容区的基准字号要跟着 --font-scale')
+  assert.match(home, /\.lesson-table \.lesson-title a \{ color: var\(--ink\); font-size: \.97em; \}/,
+    '表格里的字号要跟着基准走（写成 em）')
+
+  // 阅读页照旧用工具栏图标排，不再多一个同样的下拉；但两边必须是同一套实现（同一批键）
+  const note = renderNotePage(record({ markdown: NOTE }))
+  assert.ok(!note.includes('id="prefmenu"'), '阅读页不挂第二个设置入口')
+  const core = html => html.match(/var store = \{\n    get: function \(key, fallback\)[\s\S]*?applyFont\(store\.get\('course\.fontScale', '1'\)\)/)[0]
+  assert.equal(core(note), core(home), '两处必须是同一段实现，改了一边另一边就会漂移')
+  for (const key of ['course.theme', 'course.paper', 'course.fontScale']) {
+    assert.ok(core(home).includes(key), '共用 localStorage 键 ' + key)
+  }
 })
 
 test('the reading page extras match what the reader asked for', () => {
@@ -516,7 +565,14 @@ test('writeSite writes a one-page file only for lessons that have one', () => {
   const home = fs.readFileSync(path.join(dir3, 'index.html'), 'utf8')
   assert.match(home, /class="onepage-row"/)
   assert.match(home, /一页纸摘要/)
-  assert.match(home, /class="onepage-link"/)
+  // 课次行里的入口是一个"带折角的纸"图标：原来那三个字会被这张表挤得换行
+  assert.match(home, /<a class="onepage-link" href="\/onepage\/[^"]+" title="一页纸摘要" aria-label="一页纸摘要"><svg viewBox="0 0 24 24"/,
+    '一页纸入口是 SVG 图标，且鼠标悬停与读屏都能看出它是"一页纸摘要"')
+  assert.ok(!/>一页纸<\/a>/.test(home), '不再用文字当图标')
+  // 一页纸那一行的关键词格只留"共 N 节"：排版说明与总字数都是在解释我们自己的排版
+  assert.match(home, /<tr class="onepage-row">[\s\S]*?<span class="kw">共 1 节<\/span><\/td>/)
+  assert.ok(!home.includes('每节一张 A4'), '排版说明不该出现在页面上')
+  assert.ok(!/class="onepage-row">[\s\S]{0,300}?共 \d+ 字/.test(home), '一页纸那一行不再显示总字数')
 })
 
 test('the site carries AI-readable docs: /llms.txt and one page per docs/public/*.md', () => {
@@ -622,7 +678,9 @@ test('index entries jump to the section where the term actually appears', () => 
   assert.match(html, /class="term-course" data-course="刑法分论"/, '按课程切分')
   assert.match(html, /<div class="term-group">/, '课程内再按课次切分')
   assert.match(html, /class="chip/, '每条术语只是一个可点的词')
-  assert.ok(!html.includes('<details'), '索引页不做折叠，一屏看到底')
+  // 索引页的内容不做折叠，一屏看到底。页面上唯一的折叠是顶栏那个「阅读设置」下拉
+  const folds = (html.match(/<details[^>]*>/g) || []).filter(tag => !/id="prefmenu"/.test(tag))
+  assert.equal(folds.length, 0, '索引页不做折叠，一屏看到底')
   assert.ok(!/篇笔记|已索引|发布过/.test(html), '页面上不写解释站点自身的话')
 })
 

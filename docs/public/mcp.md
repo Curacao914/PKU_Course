@@ -102,3 +102,36 @@
 - 数据源远程模式默认 60 秒缓存（`--ttl`/`COURSE_MCP_TTL_SECONDS` 可调）；刚发布的笔记最多等 60 秒。
 - 经 `course mcp` 启动时 stderr 会有一条 Node 的 `ExperimentalWarning: SQLite`，属正常现象，不影响协议（协议消息只走 stdout）。
 - 只读：这个服务器不会修改任何笔记。
+
+## 七、Remote MCP（长期在线，不需要本地任何程序）
+
+上面三种挂载方式都需要本机跑一个 Node 进程（stdio）。**长期在线、脱离用户电脑**的是这个地址：
+
+    https://course.law-tech.dev/mcp
+
+- 传输：Streamable HTTP（POST 一条 JSON-RPC，回一条 JSON；不带会话，服务器无状态）
+- 身份验证：**无**（全部是公开只读内容）
+- 数据源：与站点同一份发布库（`library.json`），新笔记发布后按文件更新时间自动可见，不需要重启或重新部署
+- 只读：所有工具都标了 `readOnlyHint: true`，服务器没有任何写入能力
+
+### 接到 ChatGPT
+
+「新建插件 / 连接器」→ 填 URL `https://course.law-tech.dev/mcp` → 身份验证选「无 / 不需要」→ 扫描后应出现：
+
+| 工具 | 用途 |
+|---|---|
+| `list_courses` | 有哪些课（课次数、最新时间、主题、关键词） |
+| `get_course` | 某门课每节的主题/关键词/摘要/目录（不含正文） |
+| `search_notes` | 跨课次/跨课程检索，返回片段与落点 |
+| `get_note` | 读正文；支持 `section` 只取一节、`maxChars` 限长 |
+| `list_terms` | 某门课的概念/法条/案例清单 |
+| `search` | OpenAI 标准知识检索（`{ results: [{ id, title, url }] }`） |
+| `fetch` | OpenAI 标准取文档（`{ id, title, text, url, metadata }`）；id 支持 `slug#小节` |
+
+### 接到 Claude / 其它客户端
+
+支持 Remote MCP 的客户端直接填 URL 即可；只支持 stdio 的客户端用上面三种本地方式之一。
+
+### 更新行为
+
+发布一篇新笔记（`course publish`）之后：`list_courses` / `get_course` / `search_notes` / `get_note` / `list_terms` / `search` / `fetch` / `/api/notes` / `/llms.txt` / `/concepts` 等索引都会自动跟上，**不需要改 MCP 配置，也不需要重新部署服务**。远程站点数据源默认 60 秒缓存，本地发布库按文件修改时间判断，发布后最长等一个缓存周期。
