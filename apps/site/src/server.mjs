@@ -29,7 +29,11 @@ const CONTENT_TYPES = {
   '.jpeg': 'image/jpeg',
   '.webp': 'image/webp',
   '.ico': 'image/x-icon',
-  '.txt': 'text/plain; charset=utf-8'
+  '.txt': 'text/plain; charset=utf-8',
+  // Markdown 是给人和 AI 读的正文（/md/<课程>/<课次>.md）：不声明类型的话浏览器与
+  // 抓取方都只能拿到 application/octet-stream，既不能就地预览，也拿不到字符集。
+  '.md': 'text/markdown; charset=utf-8',
+  '.xml': 'application/xml; charset=utf-8'
 }
 
 function send(res, status, body, headers = {}) {
