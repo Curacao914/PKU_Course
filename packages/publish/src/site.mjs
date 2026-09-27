@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import { escapeHtml, extractHeadings, renderMarkdown, slugify, summarizeMarkdown } from './markdown.mjs'
-import { READER_SCRIPT, courseNav, toolBar } from './reader.mjs'
+import { READER_SCRIPT, courseNav, svgIcon, toolBar } from './reader.mjs'
 
 /**
  * 站点生成：把已完成的笔记变成可以对外阅读的页面。
@@ -116,11 +116,6 @@ a:hover { color: var(--accent-ink); }
   font-size: 13px; color: var(--muted); display: flex; flex-direction: column; gap: 8px; }
 .rail .rail-extra .prevnext { display: flex; flex-direction: column; gap: 6px; }
 .rail .rail-extra .prevnext a { color: var(--ink-soft); }
-/* 阅读控制：字号 / 主题 / 继续上次阅读。放在左栏底部，不抢正文注意力 */
-.rail-controls { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-.rail-controls button { font: inherit; font-size: 13px; padding: 4px 9px; border-radius: 8px;
-  border: 1px solid var(--line-strong); background: var(--bg); color: var(--ink-soft); cursor: pointer; }
-.rail-controls button:hover { border-color: var(--accent); color: var(--accent-ink); }
 .resume { display: inline-flex; align-items: center; gap: 8px; margin: 0 0 20px; padding: 8px 14px;
   border-radius: 999px; background: var(--accent-soft); border: 1px solid var(--line); color: var(--accent-ink);
   font-family: var(--sans); font-size: 14px; cursor: pointer; }
@@ -176,14 +171,30 @@ article .brief li { margin: 5px 0; }
   border: 1px solid var(--line); border-radius: var(--radius); }
 .diagram svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
 /* ── 索引页：条目 + 出处 ── */
-.index-list { margin-top: 8px; }
-.index-row { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 16px;
-  padding: 14px 0; border-bottom: 1px solid var(--line); align-items: start; }
-.index-term { font-weight: 600; color: var(--ink); }
-.index-article { margin-left: 8px; font-weight: 400; font-size: 13px; color: var(--muted); }
-.index-notes { display: flex; flex-wrap: wrap; gap: 8px 14px; font-size: 14px; }
-.index-notes a { color: var(--ink-soft); border-bottom: 1px solid var(--line); }
-.index-notes a:hover { color: var(--accent-ink); border-bottom-color: var(--accent); }
+/* 索引按 课程 → 课次 切分，每条术语只是一个可点的词 */
+.term-course { margin: 0 0 30px; }
+.term-course > h2 { margin: 0 0 10px; font-size: 17px; }
+.term-group { margin: 0 0 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--card-bg); }
+.term-group > h3 { margin: 0 0 8px; font-size: 14px; font-weight: 600; display: flex; gap: 8px; align-items: baseline; }
+.term-group > h3 a { color: var(--ink); }
+.term-group > h3 a:hover { color: var(--accent-ink); }
+.term-count { color: var(--muted); font-size: 12.5px; font-weight: 400; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { display: inline-block; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line);
+  background: var(--bg-soft); color: var(--ink-soft); font-size: 13.5px; line-height: 1.6; }
+.chip:hover { border-color: var(--accent); color: var(--accent-ink); background: var(--accent-soft); }
+/* 知识地图 */
+.map-head { margin: 0 0 14px; }
+.map-head h2 { margin: 0 0 4px; font-size: 17px; }
+.map-legend { margin: 0; color: var(--muted); font-size: 12.5px; }
+.map-holder { overflow-x: auto; padding: 10px; border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--card-bg); }
+.map-holder svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
+
+/* 不止一节讲过的术语：复习时最该先看的那些 */
+.chip-shared { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-ink); }
+.index-row[hidden], .index-group[hidden], .term-course[hidden], .index-notes a[hidden] { display: none; }
 /* ── 索引页：左边挑课程，右边条目一次列到底（不折叠） ── */
 .index-shell { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 30px; align-items: start; }
 .filter-rail { position: sticky; top: calc(var(--header-h) + 20px); display: flex; flex-direction: column; gap: 2px;
@@ -197,17 +208,20 @@ article .brief li { margin: 5px 0; }
 .index-group > h2 { font-size: 16px; margin: 0 0 2px; color: var(--ink-soft); }
 .index-row[hidden], .index-group[hidden], .index-notes a[hidden] { display: none; }
 
-/* ── 首页：一门课一行，课次横向排开 ── */
-.band { border-top: 1px solid var(--line); padding: 22px 0 18px; }
-.band-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 12px; }
-.band-head h2 { margin: 0; padding: 0; border: 0; font-size: 18px; text-transform: none; letter-spacing: -.01em; color: var(--ink); }
-.strip { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(228px, 264px); gap: 14px;
-  overflow-x: auto; padding: 2px 2px 12px; scroll-snap-type: x proximity; }
-.strip .card { margin: 0; scroll-snap-align: start; display: flex; flex-direction: column; height: 212px; }
-.strip .card p { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
-.strip .card .card-meta { margin-top: auto; padding-top: 10px; }
+/* ── 首页：一门课一组，课次一行一节 ── */
+.band { margin: 0 0 26px; }
+.band > h2 { margin: 0 0 8px; font-size: 17px; letter-spacing: -.01em; }
+.lesson-list { border-top: 1px solid var(--line); }
+.lesson-row { display: grid; grid-template-columns: minmax(0, 1fr) 92px 108px; gap: 14px;
+  align-items: baseline; padding: 9px 10px; border-bottom: 1px solid var(--line); }
+.lesson-row:hover { background: var(--bg-soft); }
+.lesson-title { color: var(--ink); font-size: 15.5px; }
+.lesson-meta, .lesson-date { color: var(--muted); font-size: 12.5px; text-align: right; font-family: var(--sans); }
 @media (max-width: 720px) {
-  .index-row { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .lesson-row { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .lesson-meta, .lesson-date { text-align: left; }
+}
+@media (max-width: 720px) {
   .index-shell { grid-template-columns: minmax(0, 1fr); gap: 16px; }
   .filter-rail { position: static; flex-direction: row; flex-wrap: wrap; }
   .index-body { min-width: 0; }
@@ -248,15 +262,18 @@ details.note-meta pre { background: var(--bg-soft); border-radius: var(--radius)
 .search-hint { color: var(--muted); font-size: 13px; margin: 10px 2px 0; }
 .empty { color: var(--muted); background: var(--bg-soft); border: 1px dashed var(--line-strong);
   border-radius: var(--radius); padding: 22px; text-align: center; }
-footer.site { max-width: 1140px; margin: 64px auto 0; padding: 20px 24px 40px; border-top: 1px solid var(--line);
-  color: var(--muted); font-size: 13px; display: flex; gap: 16px; flex-wrap: wrap; }
-
 /* 阅读进度与回到顶部 */
 .progress { position: fixed; top: 0; left: 0; height: 3px; width: 0; background: var(--accent); z-index: 60; }
-.totop { position: fixed; right: 22px; bottom: 22px; z-index: 60; border: 1px solid var(--line-strong);
-  background: var(--bg); color: var(--ink-soft); border-radius: 999px; padding: 9px 16px;
-  font-family: var(--sans); font-size: 14px; cursor: pointer; opacity: 0; pointer-events: none;
+/* 回到顶部：圆形图标按钮，位置让开右侧目录栏（--rail-w 之外再留 12px），
+   否则宽屏上它会压在目录条目上 */
+.totop { position: fixed; right: calc(var(--rail-w) + 34px); bottom: 24px; z-index: 60;
+  width: 38px; height: 38px; display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--line-strong); background: var(--bg); color: var(--ink-soft);
+  border-radius: 50%; cursor: pointer; opacity: 0; pointer-events: none;
   transition: opacity .18s ease; box-shadow: var(--shadow-md); }
+.totop svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+@media (max-width: 900px) { .totop { right: 18px; } }
+.reading.focus ~ .totop, .focus .totop { right: 24px; }
 .totop.show { opacity: 1; pointer-events: auto; }
 @media (prefers-reduced-motion: reduce) { .totop { transition: none; } }
 
@@ -278,8 +295,11 @@ footer.site { max-width: 1140px; margin: 64px auto 0; padding: 20px 24px 40px; b
 .rail ol.lessons a:hover { background: var(--bg-soft); color: var(--ink); }
 .rail ol.lessons a[aria-current="page"] { background: var(--accent-soft); color: var(--accent-ink); font-weight: 600; }
 /* 专注模式：把两侧收起来，正文居中放宽 */
-.reading.focus { grid-template-columns: 0 minmax(0, 1fr) 0; gap: 0; }
+/* 专注模式：两栏 rail 一 display:none，正文就成了第一个网格项，会被塞进
+   0 宽的第一列——表现是"所有文字被压成最左边一列"。所以专注模式直接换成单列。 */
+.reading.focus { grid-template-columns: minmax(0, 1fr); gap: 0; }
 .reading.focus .rail { display: none; }
+.reading.focus .col { max-width: calc(var(--measure) + 8em); margin: 0 auto; }
 
 /* 窄屏：先读正文，本课程课次挪到正文下面，本页目录再往后 */
 @media (max-width: 900px) {
@@ -291,28 +311,52 @@ footer.site { max-width: 1140px; margin: 64px auto 0; padding: 20px 24px 40px; b
   .rail nav.toc ol, .rail ol.lessons { max-height: none; overflow: visible; }
 }
 
-/* ── 右上角工具栏：全部是图标，点开一个小窄框 ── */
-.tools { position: fixed; top: calc(var(--header-h) + 10px); right: 18px; z-index: 40; display: flex; gap: 4px;
-  padding: 4px; border-radius: 999px; border: 1px solid var(--line); background: var(--card-bg);
-  box-shadow: var(--shadow-md); }
+/* ── 顶栏工具栏：全部是图标，点开一个小窄框 ──
+   放在顶栏这一排（而不是悬浮在正文右上角）：正文区域不该被浮层盖住，
+   而顶栏本来就有位置，读者也习惯在那里找工具。 */
+.tools { display: flex; gap: 2px; align-items: center; }
+@media (max-width: 720px) { .tools { gap: 0; } .tools button, .tools a { width: 30px; height: 30px; } }
 .tools button, .tools a { width: 32px; height: 32px; border-radius: 50%; border: 0; background: none; color: var(--ink-soft);
   display: inline-flex; align-items: center; justify-content: center; cursor: pointer; position: relative; }
 .tools button:hover, .tools a:hover { background: var(--bg-soft); color: var(--ink); }
 .tools button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-ink); }
 .tools svg { width: 17px; height: 17px; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
-.tools .pop { position: absolute; top: 40px; right: 0; min-width: 150px; padding: 10px 12px; border-radius: 12px;
+.tools .pop { position: absolute; top: 38px; right: 0; min-width: 150px; padding: 10px 12px; border-radius: 12px;
   border: 1px solid var(--line); background: var(--card-bg); box-shadow: var(--shadow-md); display: none; }
 .tools .open .pop { display: block; }
 .tools .dot-row { display: flex; gap: 8px; }
 .tools .paper { width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--line-strong); cursor: pointer; padding: 0; }
 .tools .paper[aria-pressed="true"] { outline: 2px solid var(--accent); outline-offset: 2px; }
 .tools input[type="range"] { width: 130px; }
+/* 当前是白天就显示太阳、夜间显示月亮：图标自己说状态，不用点开猜 */
+:root[data-theme="dark"] .tools [data-tool="theme"] .icon-sun { display: none; }
+:root:not([data-theme="dark"]) .tools [data-tool="theme"] .icon-moon { display: none; }
+.tools .swatch { width: 13px; height: 13px; border-radius: 50%; border: 1px solid var(--line-strong); display: inline-block;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .5); }
+
+/* ── 顶栏里的站点导航：阅读页收进一个下拉，和工具栏图标并排 ── */
+.navmenu { position: relative; font-family: var(--sans); }
+.navmenu > summary { list-style: none; cursor: pointer; width: 32px; height: 32px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center; color: var(--ink-soft); }
+.navmenu > summary::-webkit-details-marker { display: none; }
+.navmenu > summary:hover { background: var(--bg-soft); color: var(--ink); }
+.navmenu svg { width: 17px; height: 17px; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; }
+.navmenu[open] > summary { background: var(--accent-soft); color: var(--accent-ink); }
+.navmenu .nav-pop { position: absolute; top: 38px; right: 0; display: flex; flex-direction: column; gap: 2px;
+  min-width: 132px; padding: 6px; border-radius: 12px; border: 1px solid var(--line);
+  background: var(--card-bg); box-shadow: var(--shadow-md); z-index: 50; }
+.navmenu .nav-pop a { padding: 7px 10px; border-radius: 8px; font-size: 14px; color: var(--ink-soft); }
+.navmenu .nav-pop a:hover { background: var(--bg-soft); color: var(--ink); }
 .tools .pop a { width: auto; height: auto; border-radius: 8px; padding: 6px 8px; justify-content: flex-start; gap: 8px; font-size: 13.5px; color: var(--ink-soft); }
 
 /* ── 锚点高亮：跳过去闪一下，然后留着底色 ── */
-.anchor-flash { animation: anchorFlash 1.6s ease-out 1; }
-@keyframes anchorFlash { 0% { background: var(--accent-soft); box-shadow: 0 0 0 6px var(--accent-soft); }
-  100% { background: transparent; box-shadow: 0 0 0 0 transparent; } }
+/* 从索引跳进来时，落点要让人一眼看见：整行扫过一道底色 + 左侧竖条，再慢慢褪掉 */
+.anchor-flash { animation: anchorFlash 2.6s ease-out 1; border-radius: 6px;
+  box-shadow: inset 3px 0 0 0 var(--accent); padding-left: 10px; margin-left: -10px; }
+@keyframes anchorFlash {
+  0% { background: var(--accent-soft); box-shadow: inset 3px 0 0 0 var(--accent); }
+  60% { background: var(--accent-soft); }
+  100% { background: transparent; box-shadow: inset 3px 0 0 0 transparent; } }
 .mark-hit { background: var(--accent-soft); border-radius: 4px; }
 
 /* ── 划词批注 ── */
@@ -323,6 +367,9 @@ footer.site { max-width: 1140px; margin: 64px auto 0; padding: 20px 24px 40px; b
 @keyframes drawLine { from { background-size: 0 2px; } to { background-size: 100% 2px; } }
 .annot-mark { background-image: linear-gradient(var(--mark), var(--mark)); background-repeat: no-repeat;
   background-size: 100% 100%; }
+.annot-bold { font-weight: 700; }
+.annot-bold.animate { animation: boldPulse .4s ease-out 1; }
+@keyframes boldPulse { from { font-weight: 400; } to { font-weight: 700; } }
 .annot-mark.animate { animation: sweep .55s ease-out 1; }
 @keyframes sweep { from { background-size: 0 100%; } to { background-size: 100% 100%; } }
 .selbar { position: absolute; z-index: 60; display: none; gap: 2px; padding: 4px; border-radius: 10px;
@@ -333,7 +380,7 @@ footer.site { max-width: 1140px; margin: 64px auto 0; padding: 20px 24px 40px; b
 .selbar svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; }
 
 @media print {
-  .rail, .progress, .totop, .topbar, footer.site { display: none; }
+  .rail, .progress, .totop, .topbar { display: none; }
   .shell { display: block; max-width: none; padding: 0; }
   .col > * { max-width: none; }
   article { font-size: 11pt; }
@@ -600,7 +647,20 @@ const PREF_SCRIPT = '<script>' + [
   '  root.style.setProperty("--font-scale", String(Math.min(1.4, Math.max(0.85, scale))))',
   '})();',
   '</script>'].join('\n')
-function pageShell({ title, description, body, canonical = '', scripts = '', layout = 'page' }) {
+function pageShell({ title, description, body, canonical = '', scripts = '', layout = 'page', topRight = '' }) {
+  const navLinks = [
+    '<a href="/">全部课次</a>',
+    '<a href="/map/">知识地图</a>',
+    '<a href="/concepts/">概念索引</a>',
+    '<a href="/statutes/">法条索引</a>',
+    '<a href="/search/">搜索</a>'
+  ].join('')
+  // 阅读页顶栏要放工具栏，站点导航就收进一个下拉（读者在正文页最不需要的就是这四个链接）；
+  // 其余页面照旧平铺。
+  const navHtml = topRight
+    ? `<details class="navmenu"><summary title="站点导航" aria-label="站点导航">${svgIcon('menu')}</summary>` +
+      `<div class="nav-pop">${navLinks}</div></details>`
+    : `<nav>${navLinks}</nav>`
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -618,19 +678,12 @@ ${PREF_SCRIPT}
 <header class="topbar"><div class="inner">
   <a class="brand" href="/">课程笔记</a>
   <span class="spacer"></span>
-  <nav>
-    <a href="/">全部课次</a>
-    <a href="/concepts/">概念索引</a>
-    <a href="/statutes/">法条索引</a>
-    <a href="/search/">搜索</a>
-  </nav>
+  ${topRight}
+  ${navHtml}
 </div></header>
 ${layout === 'shell' ? '<div class="shell">' : layout === 'reading' ? '<div class="reading" id="reading">' : '<div class="wrap">'}
 ${body}
 </div>
-<footer class="site">
-  <span>${escapeHtml(SITE_NAME)} · course.law-tech.dev</span>
-</footer>
 ${scripts}
 </body>
 </html>
@@ -681,7 +734,13 @@ const NOTE_SCRIPT = `<script>
     document.querySelectorAll('.rail nav.toc a.active').forEach(function (a) { a.classList.remove('active') })
     var next = links.get(id) || [];
     next.forEach(function (a) { a.classList.add('active') })
-    followActive(next[0])
+    // 窄屏那份目录在宽屏上是 display:none：拿它算位置会得到全 0 的矩形，
+    // 结果 target 被夹到 0——表现就是"正文往下读，右侧目录反而被滚回顶部"。
+    var visible = null;
+    for (var i = 0; i < next.length; i += 1) {
+      if (next[i].getBoundingClientRect().height > 0) { visible = next[i]; break }
+    }
+    followActive(visible || next[0])
   }
 
   /**
@@ -729,38 +788,12 @@ const NOTE_SCRIPT = `<script>
   onScroll();
   if (top) top.addEventListener('click', function () { window.scrollTo({ top: 0, behavior: 'smooth' }) });
 
-  // ── 阅读控制：字号、深色、位置记忆 ──
+  // ── 阅读控制：字号、深色（顶栏工具栏）、位置记忆 ──
   var root = document.documentElement
-  var FONT_KEY = 'course.fontScale'
-  var THEME_KEY = 'course.theme'
   var POS_KEY = 'course.readPos:' + location.pathname
 
-  function applyFont (scale) {
-    var value = Math.min(1.4, Math.max(0.85, scale || 1))
-    root.style.setProperty('--font-scale', String(value))
-    try { localStorage.setItem(FONT_KEY, String(value)) } catch (e) {}
-  }
-  function applyTheme (theme) {
-    var dark = theme === 'dark'
-    root.setAttribute('data-theme', dark ? 'dark' : 'light')
-    var toggle = document.getElementById('themeToggle')
-    if (toggle) toggle.textContent = dark ? '浅色' : '深色'
-    try { localStorage.setItem(THEME_KEY, dark ? 'dark' : 'light') } catch (e) {}
-  }
-  try {
-    applyFont(parseFloat(localStorage.getItem(FONT_KEY) || '1'))
-    applyTheme(localStorage.getItem(THEME_KEY) || 'light')
-  } catch (e) { applyFont(1); applyTheme('light') }
-
-  document.addEventListener('click', function (event) {
-    var btn = event.target.closest('[data-read]')
-    if (!btn) return
-    var action = btn.dataset.read
-    var current = parseFloat(root.style.getPropertyValue('--font-scale') || '1') || 1
-    if (action === 'font-up') applyFont(current + 0.1)
-    if (action === 'font-down') applyFont(current - 0.1)
-    if (action === 'theme') applyTheme(root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark')
-  })
+  // 字号与深浅由每页开头的预置脚本负责（先应用再绘制），顶栏工具栏再改它们，
+  // 这里不再重复一份——两处开关容易各说各话。
 
   // 位置记忆：记住读到哪一小节，回来时给一个"继续"入口
   var resume = document.getElementById('resume')
@@ -833,13 +866,8 @@ export function renderNotePage(record, { siteOrigin = '', neighbours = {}, cours
 
   const railExtra = [
     neighbours.previous ? `<div class="prevnext"><span>上一讲</span><a href="${escapeHtml(neighbours.previous.slug)}.html">${escapeHtml(neighbours.previous.lessonTitle)}</a></div>` : '',
-    neighbours.next ? `<div class="prevnext"><span>下一讲</span><a href="${escapeHtml(neighbours.next.slug)}.html">${escapeHtml(neighbours.next.lessonTitle)}</a></div>` : '',
-    // 读长文真正会用到的三个开关：字号、深浅、位置。都记在本地，不需要账号。
-    `<div class="rail-controls">
-      <button type="button" data-read="font-down" aria-label="缩小字号">A−</button>
-      <button type="button" data-read="font-up" aria-label="放大字号">A+</button>
-      <button type="button" data-read="theme" id="themeToggle">深色</button>
-    </div>`
+    neighbours.next ? `<div class="prevnext"><span>下一讲</span><a href="${escapeHtml(neighbours.next.slug)}.html">${escapeHtml(neighbours.next.lessonTitle)}</a></div>` : ''
+    // 字号 / 深浅 / 底色已经在顶栏工具栏里，这里不再重复一份
   ].filter(Boolean).join('')
 
   return pageShell({
@@ -847,10 +875,11 @@ export function renderNotePage(record, { siteOrigin = '', neighbours = {}, cours
     description: record.summary,
     canonical: siteOrigin ? `${siteOrigin}/${record.slug}` : '',
     layout: 'reading',
+    // 工具（导出/复制/打印/专注/日夜/底色/字号）放顶栏，正文区右上角不再有浮层
+    topRight: toolBar(record),
     scripts: [hasMermaid(record.markdown) ? MERMAID_LOADER : '', NOTE_SCRIPT, READER_SCRIPT].filter(Boolean).join('\n'),
     body: [
       '<div class="progress" id="progress"></div>',
-      toolBar(record),
       // 左：本课程全部课次（点着就能换课，不用回首页）
       '<aside class="rail rail-left">',
       courseNav(record, courseLessons),
@@ -874,7 +903,7 @@ export function renderNotePage(record, { siteOrigin = '', neighbours = {}, cours
       `<div class="rail-desktop">${toc}</div>`,
       railExtra ? `<div class="rail-extra">${railExtra}</div>` : '',
       '</aside>',
-      '<button class="totop" id="totop" type="button">回到顶部</button>',
+      `<button class="totop" id="totop" type="button" title="回到顶部" aria-label="回到顶部">${svgIcon('arrowUp')}</button>`,
       '<div class="selbar" id="selbar"></div>'
     ].filter(Boolean).join('\n')
   })
@@ -883,89 +912,212 @@ export function renderNotePage(record, { siteOrigin = '', neighbours = {}, cours
 /**
  * 索引页：概念 / 法条 / 案例。
  *
- * 这是"治割裂"最实际的一页——复习时真正会问的是"这个概念老师在哪几讲讲讲过、
- * 每次讲法有什么不同"，而不是"这节课讲了什么"。数据全部来自各篇笔记的元数据块，
- * 不需要重跑模型。
- *
- * 左侧按课程过滤，右侧条目一次列到底：不折叠，条目直接落到笔记正文的那一节。
+ * "一条术语一行、两列排开"在两百多条时没法读：复习时真正要问的是
+ * "这门课的哪一节讲了哪些概念"。所以按 **课程 → 课次** 切分，每条只是一个可点的词；
+ * 点进去带 ?mark=，笔记页会把该术语在正文里标出来并滚到那一节。
  */
-export function renderTermIndexPage({ title, description, kind, notes = [], siteOrigin = '' } = {}) {
-  const kindOf = { concepts: 'concepts', statutes: 'statutes', cases: 'cases' }
-  const bucket = kindOf[kind] || 'concepts'
-  const entries = new Map()
-  const courses = []
+/**
+ * 知识地图：把"哪几节课在讲同一批概念"画出来。
+ *
+ * 索引页解决的是"这门课这一节有哪些概念"，地图解决的是另一个问题：**哪些概念反复出现**。
+ * 只有在一门课里出现两次以上的概念才进图——它们才是把这门课串起来的东西，
+ * 全都画上去只会得到一团毛线。
+ *
+ * 图是客户端按需渲染的：绘图库 3.5MB，进页面就下载太贵；也只在选中某门课时画那一门。
+ */
+export function renderKnowledgeMapPage({ notes = [], siteOrigin = '' } = {}) {
+  const courses = new Map()
   for (const note of notes) {
     const course = note.courseName || '未分类'
-    if (!courses.includes(course)) courses.push(course)
-    for (const value of (note.metadata?.[bucket] || [])) {
-      const key = String(value).trim()
-      if (!key) continue
-      if (!entries.has(key)) entries.set(key, [])
-      entries.get(key).push(note)
-    }
-  }
-
-  const items = [...entries.entries()]
-  const list = bucket === 'statutes'
-    ? items.sort((left, right) => {
-      const a = parseStatute(left[0]); const b = parseStatute(right[0])
-      return a.law.localeCompare(b.law, 'zh') || articleNumber(a.article) - articleNumber(b.article)
+    const terms = [...new Set((note.metadata?.concepts || []).map(term => String(term).trim()).filter(Boolean))]
+    if (!terms.length) continue
+    if (!courses.has(course)) courses.set(course, [])
+    courses.get(course).push({
+      slug: note.slug,
+      lessonTitle: note.lessonTitle,
+      publishedAt: note.publishedAt || '',
+      terms
     })
-    : items.sort((left, right) => left[0].localeCompare(right[0], 'zh'))
-
-  // 条目落到"这条术语在笔记正文里的那一节"，不是笔记开头——否则复习时还得自己再找一遍
-  const anchorOf = (note, term) => ((note.anchors && note.anchors[bucket]) || {})[term] || ''
-  const rowOf = ([term, used]) => [
-    `<div class="index-row" data-courses="${escapeHtml([...new Set(used.map(note => note.courseName || '未分类'))].join('|'))}">`,
-    `<div class="index-term">${escapeHtml(term)}${bucket === 'statutes' && parseStatute(term).article ? `<span class="index-article">第 ${escapeHtml(parseStatute(term).article)} 条</span>` : ''}</div>`,
-    '<div class="index-notes">',
-    used.map(note => {
-      const anchor = anchorOf(note, term)
-      return `<a data-course="${escapeHtml(note.courseName || '未分类')}" href="/${escapeHtml(note.slug)}.html${anchor ? `#${escapeHtml(anchor)}` : ''}">${escapeHtml(note.courseName || '')} · ${escapeHtml(note.lessonTitle)}</a>`
-    }).join(''),
-    '</div>',
-    '</div>'
-  ].join('\n')
-
-  // 法条索引按法律名分段（《刑法》《民法典》…）；概念与案例就是一整张表
-  const groups = []
-  for (const item of list) {
-    const law = bucket === 'statutes' ? (parseStatute(item[0]).law || '未标注法律') : ''
-    if (!groups.length || groups[groups.length - 1].law !== law) groups.push({ law, rows: [] })
-    groups[groups.length - 1].rows.push(rowOf(item))
   }
 
-  const filterRail = [
-    `<aside class="filter-rail" id="filter-rail" data-kind="${bucket}">`,
-    `<button type="button" data-course="" aria-pressed="true">全部<span class="filter-count">${list.length}</span></button>`,
-    courses.map(course => {
-      const count = list.filter(([, used]) => used.some(note => (note.courseName || '未分类') === course)).length
-      return count
-        ? `<button type="button" data-course="${escapeHtml(course)}" aria-pressed="false">${escapeHtml(course)}<span class="filter-count">${count}</span></button>`
-        : ''
-    }).filter(Boolean).join('\n'),
+  const payload = JSON.stringify({
+    courses: [...courses.entries()].map(([course, lessons]) => ({ course, lessons }))
+  })
+
+  const rail = [
+    '<aside class="filter-rail" id="map-rail" data-kind="map">',
+    [...courses.entries()].map(([course, lessons], index) =>
+      `<button type="button" data-course="${escapeHtml(course)}" aria-pressed="${index === 0 ? 'true' : 'false'}">` +
+      `${escapeHtml(course)}<span class="filter-count">${new Set(lessons.flatMap(lesson => lesson.terms)).size}</span></button>`
+    ).join('\n'),
     '</aside>'
   ].join('\n')
 
   const body = [
-    '<header class="site">',
-    `<h1>${escapeHtml(title)}</h1>`,
-    '</header>',
-    list.length
+    '<header class="site"><h1>知识地图</h1></header>',
+    courses.size
       ? [
         '<div class="index-shell">',
-        filterRail,
+        rail,
         '<div class="index-body">',
-        groups.map(group => [
-          '<section class="index-group">',
-          group.law ? `<h2>《${escapeHtml(group.law)}》</h2>` : '',
-          `<div class="index-list">${group.rows.join('\n')}</div>`,
-          '</section>'
-        ].filter(Boolean).join('\n')).join('\n'),
-        '</div>',
-        '</div>',
-        INDEX_FILTER_SCRIPT
+        '<div class="map-head"><h2 id="map-title"></h2><p class="map-legend">实线连接的是同一门课里出现过两次以上的概念</p></div>',
+        '<div class="map-holder" id="map-holder"></div>',
+        '<div class="map-fallback" id="map-fallback" hidden></div>',
+        '</div></div>',
+        `<script id="map-data" type="application/json">${payload}</script>`,
+        MAP_SCRIPT
       ].join('\n')
+      : '<div class="empty">还没有条目。</div>'
+  ].join('\n')
+
+  return pageShell({
+    title: `知识地图 · ${SITE_NAME}`,
+    description: '课程概念之间的关系',
+    canonical: siteOrigin ? `${siteOrigin}/map/` : '',
+    body
+  })
+}
+
+/** 绘图库按需加载：只有真的画图时才下载那 3.5MB。 */
+const MAP_SCRIPT = `<script type="module">
+const data = JSON.parse(document.getElementById('map-data').textContent)
+const holder = document.getElementById('map-holder')
+const title = document.getElementById('map-title')
+const fallback = document.getElementById('map-fallback')
+const rail = document.getElementById('map-rail')
+const MERMAID_VERSION = '${MERMAID_VERSION}'
+
+function sourceFor (course) {
+  const counts = new Map()
+  for (const lesson of course.lessons) {
+    for (const term of new Set(lesson.terms)) counts.set(term, (counts.get(term) || 0) + 1)
+  }
+  const shared = [...counts.entries()].filter(([, n]) => n > 1)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'zh'))
+    .slice(0, 40)
+  if (!shared.length) return ''
+  const lines = ['graph LR']
+  const clean = value => String(value).replace(/["\[\]()]/g, '')
+  course.lessons.slice(0, 14).forEach(function (lesson, index) {
+    lines.push('  L' + index + '["' + clean(lesson.lessonTitle) + '"]')
+  })
+  shared.forEach(function (pair, index) {
+    lines.push('  C' + index + '(["' + clean(pair[0]) + '"])')
+  })
+  course.lessons.slice(0, 14).forEach(function (lesson, lessonIndex) {
+    shared.forEach(function (pair, termIndex) {
+      if (lesson.terms.indexOf(pair[0]) >= 0) lines.push('  L' + lessonIndex + ' --> C' + termIndex)
+    })
+  })
+  return lines.join('\\n')
+}
+
+async function loadMermaid () {
+  if (window.mermaid) return window.mermaid
+  await new Promise((resolve, reject) => {
+    const script = document.createElement('script')
+    script.src = '/assets/mermaid.min.js?v=' + MERMAID_VERSION
+    script.onload = resolve
+    script.onerror = reject
+    document.head.appendChild(script)
+  })
+  window.mermaid.initialize({ startOnLoad: false, theme: 'neutral', securityLevel: 'strict' })
+  return window.mermaid
+}
+
+async function draw (courseName) {
+  const course = data.courses.find(item => item.course === courseName) || data.courses[0]
+  if (!course) return
+  title.textContent = course.course
+  const source = sourceFor(course)
+  holder.innerHTML = ''
+  fallback.hidden = true
+  const explain = () => {
+    fallback.hidden = false
+    fallback.innerHTML = '<p class="small muted">这门课里还没有跨课次重复出现的概念：每一节的概念都只在自己那节讲过。</p>'
+  }
+  if (!source) { explain(); return }
+  try {
+    const mermaid = await loadMermaid()
+    const result = await mermaid.render('map-svg-' + Date.now(), source)
+    holder.innerHTML = result.svg
+  } catch (error) {
+    explain()
+  }
+}
+
+rail.addEventListener('click', event => {
+  const button = event.target.closest('button[data-course]')
+  if (!button) return
+  rail.querySelectorAll('button[data-course]').forEach(node =>
+    node.setAttribute('aria-pressed', node === button ? 'true' : 'false'))
+  draw(button.getAttribute('data-course'))
+})
+draw(rail.querySelector('button[data-course]')?.getAttribute('data-course'))
+</script>`
+
+export function renderTermIndexPage({ title, description, kind, notes = [], siteOrigin = '' } = {}) {
+  const kindOf = { concepts: 'concepts', statutes: 'statutes', cases: 'cases' }
+  const bucket = kindOf[kind] || 'concepts'
+
+  // 课次 → 术语。同一术语出现在两节课里就出现两次：这正是"跨课次"的线索。
+  const courses = new Map()
+  for (const note of notes) {
+    const course = note.courseName || '未分类'
+    const terms = []
+    for (const value of (note.metadata?.[bucket] || [])) {
+      const term = String(value).trim()
+      if (term && !terms.includes(term)) terms.push(term)
+    }
+    if (!terms.length) continue
+    if (!courses.has(course)) courses.set(course, [])
+    courses.get(course).push({ note, terms })
+  }
+
+  // 每条术语出现在几节课里：跨课次的词是复习时最该先看的，单独标出来
+  const spread = new Map()
+  for (const lessons of courses.values()) {
+    for (const term of new Set(lessons.flatMap(lesson => lesson.terms))) {
+      spread.set(term, (spread.get(term) || 0) + 1)
+    }
+  }
+
+  const chipOf = (note, term) => {
+    const anchor = ((note.anchors && note.anchors[bucket]) || {})[term] || ''
+    const href = `/${escapeHtml(note.slug)}.html?mark=${encodeURIComponent(term)}` + (anchor ? `#${escapeHtml(anchor)}` : '')
+    const shared = (spread.get(term) || 0) > 1
+    return `<a class="chip${shared ? ' chip-shared' : ''}" href="${href}"${shared ? ' title="这门课不止一节讲过"' : ''}>${escapeHtml(term)}</a>`
+  }
+
+  const sections = [...courses.entries()].map(([course, lessons]) => [
+    `<section class="term-course" data-course="${escapeHtml(course)}">`,
+    `<h2>${escapeHtml(course)}</h2>`,
+    lessons.map(lesson => [
+      '<div class="term-group">',
+      `<h3><a href="/${escapeHtml(lesson.note.slug)}.html">${escapeHtml(lesson.note.lessonTitle)}</a>` +
+        `<span class="term-count">${lesson.terms.length}</span></h3>`,
+      '<div class="chips">',
+      lesson.terms.map(term => chipOf(lesson.note, term)).join(''),
+      '</div></div>'
+    ].join('\n')).join('\n'),
+    '</section>'
+  ].join('\n')).join('\n')
+
+  const totalTerms = new Set([...courses.values()].flatMap(lessons => lessons.flatMap(lesson => lesson.terms))).size
+  const rail = [
+    `<aside class="filter-rail" id="filter-rail" data-kind="${bucket}">`,
+    `<button type="button" data-course="" aria-pressed="true">全部<span class="filter-count">${totalTerms}</span></button>`,
+    [...courses.entries()].map(([course, lessons]) =>
+      `<button type="button" data-course="${escapeHtml(course)}" aria-pressed="false">${escapeHtml(course)}` +
+      `<span class="filter-count">${new Set(lessons.flatMap(lesson => lesson.terms)).size}</span></button>`
+    ).join('\n'),
+    '</aside>'
+  ].join('\n')
+
+  const body = [
+    `<header class="site"><h1>${escapeHtml(title)}</h1></header>`,
+    totalTerms
+      ? ['<div class="index-shell">', rail, '<div class="index-body">', sections, '</div></div>', INDEX_FILTER_SCRIPT].join('\n')
       : '<div class="empty">还没有条目。</div>'
   ].join('\n')
 
@@ -976,6 +1128,36 @@ export function renderTermIndexPage({ title, description, kind, notes = [], site
     body
   })
 }
+
+/** 首页的课程过滤：与索引页同一套交互（点一下只看这门课，选择记在本地）。 */
+const HOME_SCRIPT = `<script>
+(function () {
+  var rail = document.getElementById('course-rail');
+  var body = document.getElementById('course-body');
+  if (!rail || !body) return;
+  var key = 'course.homeFilter';
+  var saved = '';
+  try { saved = localStorage.getItem(key) || '' } catch (e) { saved = '' }
+
+  function apply (course) {
+    var buttons = rail.querySelectorAll('button[data-course]');
+    for (var i = 0; i < buttons.length; i += 1) {
+      buttons[i].setAttribute('aria-pressed', buttons[i].getAttribute('data-course') === course ? 'true' : 'false');
+    }
+    var bands = body.querySelectorAll('.band');
+    for (var j = 0; j < bands.length; j += 1) {
+      bands[j].hidden = !!course && bands[j].getAttribute('data-course') !== course;
+    }
+    try { localStorage.setItem(key, course) } catch (e) {}
+  }
+
+  rail.addEventListener('click', function (event) {
+    var button = event.target.closest ? event.target.closest('button[data-course]') : null;
+    if (button) apply(button.getAttribute('data-course') || '');
+  });
+  if (saved) apply(saved);
+})();
+</script>`
 
 /**
  * 课程过滤：一学期几十个概念，不过滤就只是一张更长的清单。
@@ -996,18 +1178,9 @@ const INDEX_FILTER_SCRIPT = `<script>
     for (var i = 0; i < buttons.length; i += 1) {
       buttons[i].setAttribute('aria-pressed', buttons[i].getAttribute('data-course') === course ? 'true' : 'false');
     }
-    var rows = document.querySelectorAll('.index-row');
-    for (var j = 0; j < rows.length; j += 1) {
-      var courses = (rows[j].getAttribute('data-courses') || '').split('|');
-      rows[j].hidden = !!course && courses.indexOf(course) < 0;
-      var links = rows[j].querySelectorAll('a[data-course]');
-      for (var k = 0; k < links.length; k += 1) {
-        links[k].hidden = !!course && links[k].getAttribute('data-course') !== course;
-      }
-    }
-    var groups = document.querySelectorAll('.index-group');
-    for (var g = 0; g < groups.length; g += 1) {
-      groups[g].hidden = !groups[g].querySelector('.index-row:not([hidden])');
+    var sections = document.querySelectorAll('.term-course');
+    for (var j = 0; j < sections.length; j += 1) {
+      sections[j].hidden = !!course && sections[j].getAttribute('data-course') !== course;
     }
     try { localStorage.setItem(key, course) } catch (e) {}
   }
@@ -1127,34 +1300,40 @@ export function renderIndexPage(records, { siteOrigin = '' } = {}) {
     groups.get(key).push(record)
   }
 
+  // 一门课一组，课次按行排：一行一节（标题 + 时长 + 日期）。
+  // 大卡片一屏放不下三门课，而这一页真正要回答的只是"这门课讲到哪儿了、点哪一节"。
   const courses = [...groups.keys()]
-  // 一门课一行、课次在行内横向排开：一屏就能看出"这门课讲到哪儿了"，
-  // 比一列到底的长清单更接近翻课件的手感（窄屏时行内左右滑）。
+  const rail = [
+    '<aside class="filter-rail" id="course-rail" data-kind="home">',
+    `<button type="button" data-course="" aria-pressed="true">全部<span class="filter-count">${records.length}</span></button>`,
+    courses.map(course =>
+      `<button type="button" data-course="${escapeHtml(course)}" aria-pressed="false">${escapeHtml(course)}<span class="filter-count">${groups.get(course).length}</span></button>`
+    ).join('\n'),
+    '</aside>'
+  ].join('\n')
+
   const body = [
-    '<section class="hero">',
-    '<h1>课程笔记</h1>',
-    `<div class="meta">共 ${records.length} 篇 · ${courses.length} 门课</div>`,
-    '</section>',
+    '<div class="index-shell">',
+    rail,
+    '<div class="index-body" id="course-body">',
     records.length
       ? [...groups.entries()].map(([course, items]) => [
-        '<section class="band">',
-        `<div class="band-head"><h2>${escapeHtml(course)} · ${items.length} 讲</h2></div>`,
-        '<div class="strip">',
+        `<section class="band" data-course="${escapeHtml(course)}">`,
+        `<h2>${escapeHtml(course)}</h2>`,
+        '<div class="lesson-list">',
         items.map(record => [
-          `<a class="card" href="${escapeHtml(record.slug)}.html">`,
-          `<h3>${escapeHtml(record.lessonTitle)}</h3>`,
-          `<p>${escapeHtml(record.summary)}</p>`,
-          '<div class="card-meta">',
-          record.readMinutes ? `<span>约 ${record.readMinutes} 分钟</span>` : '',
-          record.metadata ? `<span>${(record.metadata.concepts || []).length} 个概念 · ${(record.metadata.statutes || []).length} 条法条 · ${(record.metadata.cases || []).length} 个案例</span>` : '',
-          record.publishedAt ? `<span>${escapeHtml(String(record.publishedAt).slice(0, 10))}</span>` : '',
-          '</div>',
+          `<a class="lesson-row" href="${escapeHtml(record.slug)}.html">`,
+          `<span class="lesson-title">${escapeHtml(record.lessonTitle)}</span>`,
+          record.readMinutes ? `<span class="lesson-meta">约 ${record.readMinutes} 分钟</span>` : '',
+          record.publishedAt ? `<span class="lesson-date">${escapeHtml(String(record.publishedAt).slice(0, 10))}</span>` : '',
           '</a>'
-        ].join('\n')).join('\n'),
+        ].join('')),
         '</div>',
         '</section>'
       ].join('\n')).join('\n')
-      : '<div class="empty">还没有已发布的笔记。</div>'
+      : '<div class="empty">还没有已发布的笔记。</div>',
+    '</div></div>',
+    HOME_SCRIPT
   ].filter(Boolean).join('\n')
 
   return pageShell({
@@ -1284,6 +1463,7 @@ export function writeSite({ records = [], outputDir, siteOrigin = '' } = {}) {
     title: '案例索引', kind: 'cases', notes: sorted, siteOrigin,
     description: '课堂上讲过的案例，以及它出现在哪些课次。'
   }))
+  write('map/index.html', renderKnowledgeMapPage({ notes: sorted, siteOrigin }))
   write('search/index.html', renderSearchPage({ siteOrigin }))
   write('feed.xml', renderFeed(sorted, { siteOrigin }))
   write('notes.json', `${JSON.stringify({

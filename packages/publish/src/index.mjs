@@ -23,6 +23,7 @@ export {
   readSiteIndex,
   refreshRecord,
   renderIndexPage,
+  renderKnowledgeMapPage,
   renderNotePage,
   renderSearchPage,
   renderTermIndexPage,

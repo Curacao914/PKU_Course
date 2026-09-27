@@ -120,6 +120,41 @@ function readMeta(dir) {
 }
 
 /**
+ * 识别进度快照。
+ *
+ * 识别进程是脱离管理台那个进程跑的（上传请求等不起几分钟），所以"识别到哪一步了"
+ * 只能由它自己写下来。文件路径由管理台通过 COURSE_OCR_PROGRESS_FILE 传进来：
+ * 命令行直接跑 materials --ocr 时这个变量是空的，磁盘上不会多出任何文件。
+ *
+ * 粒度是"每份课件"：底层 Python 一次调用做完整份课件的图，中途没有可挂的钩子，
+ * 与其报一个假的百分比，不如老实说"这份正在做、之前几份做完了"。
+ */
+function ocrProgressOf(file) {
+  return String(file || process.env.COURSE_OCR_PROGRESS_FILE || '')
+}
+
+function writeOcrProgress(file, record) {
+  if (!file) return
+  try {
+    let records = []
+    try {
+      const parsed = JSON.parse(fs.readFileSync(file, 'utf8'))
+      if (Array.isArray(parsed?.records)) records = parsed.records
+    } catch { records = [] }
+    records = records.filter(item => item && item.name !== record.name)
+    records.push(record)
+    const body = `${JSON.stringify({ updatedAt: new Date().toISOString(), records: records.slice(-50) }, null, 2)}\n`
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    // 管理台在另一个进程里读它：先写临时文件再改名，免得读到写了一半的 JSON
+    const temp = `${file}.tmp`
+    fs.writeFileSync(temp, body)
+    fs.renameSync(temp, file)
+  } catch {
+    // 进度是锦上添花：写不进去也绝不能影响识别本身
+  }
+}
+
+/**
  * 收下一个课件：归档原件 + 解析出 json + 记元数据。
  *
  * @param scope       'lesson'（默认，只给这一课次）| 'course'（全课程通用）
@@ -182,7 +217,7 @@ export async function addMaterial({
 export async function ocrMaterial({
   root, course, lesson = '', name,
   runPython = defaultRunPython, python = 'python3', env = process.env,
-  ocrMaxPages = 60, ocrConcurrency = 3, at = new Date()
+  ocrMaxPages = 60, ocrConcurrency = 3, at = new Date(), progressFile = ''
 } = {}) {
   if (!root || !course || !name) throw new Error('补识别需要 root / course / name')
   const dir = materialDir({ root, course, lesson })
@@ -192,15 +227,28 @@ export async function ocrMaterial({
   if (index < 0) throw new Error(`找不到已归档的课件：${name}`)
   const entry = meta.materials[index]
   const target = path.join(dir, name)
+  const progress = ocrProgressOf(progressFile)
+  const images = Number(entry.imageCount || 0)
+  writeOcrProgress(progress, { name, status: 'running', images, pending: Number(entry.ocrPending || 0), at: at.toISOString() })
   if (!fs.existsSync(target)) {
     const skipped = { at: at.toISOString(), engine: '', attempted: 0, pending: entry.ocrPending || 0, skipped: '原件已删除，无法补识别' }
     meta.materials[index] = { ...entry, ocr: skipped }
     meta.updatedAt = at.toISOString()
+    writeOcrProgress(progress, { name, status: 'skipped', images, pending: Number(entry.ocrPending || 0), reason: skipped.skipped, at: at.toISOString() })
     fs.writeFileSync(metaPath, `${JSON.stringify(meta, null, 2)}\n`)
     return { entry: meta.materials[index], skipped: true, reason: skipped.skipped }
   }
 
-  const deck = await extractSlides({ filePath: target, runPython, python, env, ocr: true, ocrMaxPages, ocrConcurrency })
+  let deck
+  try {
+    deck = await extractSlides({ filePath: target, runPython, python, env, ocr: true, ocrMaxPages, ocrConcurrency })
+  } catch (error) {
+    writeOcrProgress(progress, {
+      name, status: 'failed', images, pending: Number(entry.ocrPending || 0),
+      error: error instanceof Error ? error.message : String(error), at: new Date().toISOString()
+    })
+    throw error
+  }
   const parsedPath = entry.parsedPath || path.join(dir, 'slides', `${name}.json`)
   const previous = fs.existsSync(parsedPath) ? JSON.parse(fs.readFileSync(parsedPath, 'utf8')) : {}
   fs.writeFileSync(parsedPath, `${JSON.stringify({ ...previous, ...deck, source: name, checksum: entry.checksum || '' }, null, 2)}\n`)
@@ -215,6 +263,10 @@ export async function ocrMaterial({
   }
   meta.updatedAt = at.toISOString()
   fs.writeFileSync(metaPath, `${JSON.stringify(meta, null, 2)}\n`)
+  writeOcrProgress(progress, {
+    name, status: 'done', images: (deck.images || []).length || images,
+    pending: Number(deck.ocrPending || 0), at: at.toISOString()
+  })
   return { entry: meta.materials[index], deck, skipped: false }
 }
 

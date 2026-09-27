@@ -27,7 +27,9 @@ import { fileURLToPath } from 'node:url'
 
 import { chromium } from 'playwright-core'
 
-import { buildNoteRecord, renderIndexPage, renderNotePage, renderSearchPage, renderTermIndexPage } from '@course/publish'
+import {
+  buildNoteRecord, renderIndexPage, renderKnowledgeMapPage, renderNotePage, renderSearchPage, renderTermIndexPage
+} from '@course/publish'
 import { openLedger } from '@course/store'
 import { startSiteServer } from '../apps/site/src/server.mjs'
 
@@ -198,7 +200,26 @@ function buildFixture() {
       '</details>'
     ].join('\n')
   })
-  const courseRecords = [record, execSecond, companyRecord, empiricalRecord]
+  const companySecond = buildNoteRecord({
+    courseName: '商法概论',
+    lessonTitle: '第3-4节 公司治理',
+    publishedAt: '2026-09-27T10:00:00.000Z',
+    markdown: [
+      '# 第3-4节 公司治理',
+      '',
+      '## 一、董事会中心主义',
+      '',
+      '法人人格否认在治理结构里是救济手段。',
+      '',
+      '<details><summary>元数据</summary>',
+      '<pre><code>',
+      'META: CONCEPT: 法人人格否认',
+      'META: CONCEPT: 董事会中心主义',
+      '</code></pre>',
+      '</details>'
+    ].join('\n')
+  })
+  const courseRecords = [record, execSecond, companyRecord, companySecond, empiricalRecord]
   for (const item of courseRecords) {
     const pageFile = path.join(siteRoot, item.slug + '.html')
     fs.mkdirSync(path.dirname(pageFile), { recursive: true })
@@ -221,6 +242,17 @@ function buildFixture() {
     images: [{ path: 'ppt/media/image1.png', bytes: 194436, width: 2360, height: 1800, slides: [2], needsOcr: true }],
     ocr: { pending: 2, attempted: 0, engine: '', errors: [{ path: '', error: '连不上 PaddleOCR' }] }
   }, null, 2))
+  // 第二份课件 12 页：预览默认只给一屏，"继续加载"与"共 N 页"要有东西可测
+  fs.writeFileSync(path.join(materialHome, '讲座课件.pptx'), 'fake-pptx')
+  fs.writeFileSync(path.join(materialHome, 'slides', '讲座课件.pptx.json'), JSON.stringify({
+    slideCount: 12,
+    slides: Array.from({ length: 12 }, (_, index) => ({
+      slideNumber: index + 1,
+      text: '第 ' + (index + 1) + ' 页：执行措施的期限与审批'
+    })),
+    images: [],
+    ocr: { pending: 0, attempted: 0, engine: '', errors: [] }
+  }, null, 2))
   fs.writeFileSync(path.join(materialHome, 'meta.json'), JSON.stringify({
     materials: [{
       name: '图片版课件.pptx',
@@ -238,12 +270,65 @@ function buildFixture() {
       ocr: { pending: 2, attempted: 0, engine: '', errors: [{ path: '', error: '连不上 PaddleOCR' }] },
       parsedPath: path.join(materialHome, 'slides', '图片版课件.pptx.json'),
       addedAt: '2026-09-25T10:00:00.000Z'
+    }, {
+      name: '讲座课件.pptx',
+      scope: 'lesson',
+      course: '刑事执行法',
+      courseKey: '',
+      lesson: '第5-6节',
+      replayKey: 'replay-audit-1',
+      appliesTo: [],
+      bytes: 8,
+      checksum: 'audit-long',
+      slideCount: 12,
+      imageCount: 0,
+      ocrPending: 0,
+      ocr: null,
+      parsedPath: path.join(materialHome, 'slides', '讲座课件.pptx.json'),
+      addedAt: '2026-09-25T10:00:00.000Z'
     }]
   }, null, 2))
   fs.writeFileSync(path.join(siteRoot, 'statutes/index.html'),
     renderTermIndexPage({ title: '法条索引', kind: 'statutes', notes: [companyRecord] }))
+  // 绘图库替身：线上是 /assets/mermaid.min.js（3.5MB，自托管）。审计只需要它
+  // "能被加载 + 返回一个 SVG"，真库的排版结果不在这里验。
+  const assetsDir = path.join(scratchRoot, 'assets')
+  fs.mkdirSync(assetsDir, { recursive: true })
+  fs.writeFileSync(path.join(assetsDir, 'mermaid.min.js'), [
+    'window.mermaid = {',
+    '  initialize: function () {},',
+    '  render: function (id, source) {',
+    "    return Promise.resolve({ svg: '<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"240\" height=\"80\" data-lines=\"' + source.split('\\n').length + '\"></svg>' })",
+    '  }',
+    '}'
+  ].join('\n'))
+  fs.mkdirSync(path.join(siteRoot, 'map'), { recursive: true })
+  fs.writeFileSync(path.join(siteRoot, 'map/index.html'),
+    renderKnowledgeMapPage({ notes: [companyRecord, companySecond, empiricalRecord] }))
 
-  return { dir, scratchRoot, siteRoot, outputDir, transcriptPath, noteUrl: '/' + record.slug + '.html' }
+  // 一个"正在后台识别"的任务：pid 用审计进程自己（活着），进度文件由识别进程写。
+  // 这里手写一份快照，界面据此画进度条；断言完再清掉，好让"重新识别"那个按钮露出来。
+  const ocrStatePath = path.join(scratchRoot, 'ocr-state.json')
+  const ocrProgressPath = path.join(scratchRoot, 'ocr', 'audit.progress.json')
+  fs.mkdirSync(path.dirname(ocrProgressPath), { recursive: true })
+  fs.writeFileSync(ocrProgressPath, JSON.stringify({
+    updatedAt: '2026-09-25T10:03:00.000Z',
+    records: [{ name: '图片版课件.pptx', status: 'running', images: 4, pending: 2, at: '2026-09-25T10:03:00.000Z' }]
+  }, null, 2))
+  fs.writeFileSync(ocrStatePath, JSON.stringify([{
+    course: '刑事执行法',
+    lesson: '第5-6节',
+    pid: process.pid,
+    startedAt: '2026-09-25T10:02:00.000Z',
+    logPath: path.join(scratchRoot, 'ocr', 'audit.log'),
+    progressPath: ocrProgressPath,
+    plan: { materials: 1, images: 4 }
+  }], null, 2))
+
+  return {
+    dir, scratchRoot, siteRoot, outputDir, transcriptPath, noteUrl: '/' + record.slug + '.html',
+    materialsRoot, ocrStatePath, ocrProgressPath
+  }
 }
 
 /** 每个按钮点下去应当看到的提示（子串匹配）；没写在这里的按"不能出现失败字样"判定。 */
@@ -272,11 +357,43 @@ const EXPECTED = {
   'pick-file': '已归档',
   'ocr-material': '完成',
   integrate: '还没做',
-  'add-tag': '先写标签名'   // 审计不填标签输入框：这条分支本来就要说"先写标签名"
+  'add-tag': '先写标签名',   // 审计不填标签输入框：这条分支本来就要说"先写标签名"
+  'cancel-upload': '取消',
+  'delete-material': '已删除',
+  'load-more': '已加载'
+}
+
+/**
+ * 这几个动作的反馈是界面状态本身（展开课件、切换设置分类），不是右下角提示条，
+ * 所以不能套"必须弹提示"那一关：改成点击后核对状态真的变了。
+ */
+const DEFERRED_ACTS = new Set(['delete-material'])
+
+/** 在页面里造一个 File 并模拟拖放——浏览器只认页面里造出来的 File 对象。 */
+async function dropFileOn(page, selector, { name, bytes, type }) {
+  await page.evaluate(({ selector, name, size, type }) => {
+    const file = new File([new Uint8Array(size)], name, { type })
+    const dataTransfer = new DataTransfer()
+    dataTransfer.items.add(file)
+    const zone = document.querySelector(selector)
+    zone.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer }))
+    zone.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer }))
+  }, { selector, name, size: bytes, type })
+}
+
+/** 模拟"剪贴板里带着一个文件"的粘贴；clipboardData 用 defineProperty 挂最稳。 */
+async function pasteFile(page, { name, text }) {
+  await page.evaluate(({ name, text }) => {
+    const dataTransfer = new DataTransfer()
+    dataTransfer.items.add(new File([text], name, { type: 'application/json' }))
+    const event = new Event('paste', { bubbles: true, cancelable: true })
+    Object.defineProperty(event, 'clipboardData', { value: dataTransfer })
+    document.dispatchEvent(event)
+  }, { name, text })
 }
 
 /** 管理台：把每个按钮点一遍，要求「立刻有反馈」且发出的命令正确。 */
-async function auditAdmin(page, site, calls, dialogs, failures) {
+async function auditAdmin(page, site, fixture, calls, dialogs, failures) {
   const results = []
   await page.goto(site.url + '/admin', { waitUntil: 'domcontentloaded' })
   await page.waitForSelector('#tab-overview .card', { timeout: 10000 })
@@ -287,6 +404,82 @@ async function auditAdmin(page, site, calls, dialogs, failures) {
   // 顶栏那个 ··· 是浮层，不展开（它会盖住内容，点了会挡住下面的按钮）
   const openAll = () => page.$$eval('main details, .card details', nodes => nodes.forEach(node => { node.open = true }))
   await openAll()
+
+  /** 选中那一节有转录稿的课次：详情面板里的按钮都挂在它身上。 */
+  const selectLesson = async () => {
+    await page.click('.seg button[data-tab="courses"]')
+    const course = await page.$('#courses .item[data-act="pick-course"]')
+    if (course) await course.click()
+    const lesson = await page.$('#lessons .item[data-act="pick-lesson"][data-value="replay-audit-1"]')
+    if (lesson) await lesson.click()
+    await page.waitForTimeout(150)
+  }
+
+  /**
+   * 这几个动作的反馈是界面状态本身，不是右下角提示条：点击之后直接核对状态，
+   * 顺带把"点了真有反应"这件事验实（比读一条提示条更接近用户看到的画面）。
+   */
+  const stateActs = {
+    'pick-pane': async (selector) => {
+      const pane = await page.getAttribute(selector, 'data-value')
+      await page.click(selector)
+      await page.waitForTimeout(120)
+      const current = await page.getAttribute('#settingsRail [aria-current="true"]', 'data-value').catch(() => null)
+      const shown = await page.getAttribute('#settingsDetail', 'data-pane').catch(() => null)
+      if (current !== pane || shown !== pane) {
+        failures.push('管理台 设置 · 切到「' + pane + '」后 aria-current 或右栏没跟着变（' + current + ' / ' + shown + '）')
+      }
+      return '切到 ' + pane
+    },
+    'pick-course': async (selector) => {
+      const course = await page.getAttribute(selector, 'data-value')
+      await page.click(selector)
+      await page.waitForTimeout(120)
+      const lessons = await page.$$eval('#lessons .item[data-act="pick-lesson"]', nodes => nodes.length)
+      const selected = await page.getAttribute('#courses .item[aria-selected="true"]', 'data-value').catch(() => null)
+      if (!lessons) failures.push('管理台 课程 · 点了课程之后课次列是空的')
+      if (selected !== course) failures.push('管理台 课程 · 点了课程之后没有选中标记（' + course + ' → ' + selected + '）')
+      return course + ' · ' + lessons + ' 节课次'
+    },
+    'pick-lesson': async (selector) => {
+      const key = await page.getAttribute(selector, 'data-value')
+      await page.click(selector)
+      await page.waitForTimeout(150)
+      const title = await page.textContent('#detail h2').catch(() => '')
+      // 选中的那一行要标出来：否则"点了没反应"和"点了没事发生"看起来一模一样
+      const selected = await page.getAttribute('#lessons .item[aria-selected="true"]', 'data-value').catch(() => null)
+      if (!title || !title.trim()) failures.push('管理台 课程 · 点了课次之后详情面板是空的')
+      if (selected !== key) failures.push('管理台 课程 · 点了课次之后没有选中标记（' + key + ' → ' + selected + '）')
+      return '详情「' + String(title).trim() + '」'
+    },
+    'open-material': async (selector) => {
+      await page.click(selector)
+      await page.waitForSelector('#detail .pages .page', { timeout: 5000 }).catch(() => {})
+      const pages = await page.$$eval('#detail .pages .page', nodes => nodes.length)
+      const expanded = await page.getAttribute(selector, 'aria-expanded')
+      if (!pages || expanded !== 'true') {
+        failures.push('管理台 课程 · 点课件行没有展开（页数 ' + pages + '，aria-expanded=' + expanded + '）')
+      }
+      return '展开 ' + pages + ' 页'
+    }
+  }
+
+  // 后台识别的进度要看得见：夹具里塞了一个"正在跑"的识别任务，
+  // 先断言进度条与 done/total 文案，再把状态清掉，好让后面「重新识别」按钮露出来
+  await selectLesson()
+  const ocrText = await page.textContent('#detail .ocr').catch(() => '')
+  const ocrWidth = await page.$eval('#detail .ocr .bar > i', el => el.style.width).catch(() => '0%')
+  if (!/已识别 2\/4 张图/.test(ocrText) || !/正在处理 图片版课件\.pptx/.test(ocrText) || parseFloat(ocrWidth) <= 0) {
+    failures.push('管理台 课程 · 识别进度没显示出来（「' + String(ocrText).trim() + '」，条宽 ' + ocrWidth + '）')
+  } else {
+    console.log('  [课件] 识别进度 ✓ ' + String(ocrText).trim() + '（条宽 ' + ocrWidth + '）')
+  }
+  fs.writeFileSync(fixture.ocrStatePath, '[]\n')
+  await page.evaluate(() => window.load())
+  await page.waitForTimeout(300)
+  if (await page.$('#detail .ocr')) failures.push('管理台 课程 · 识别任务清掉之后进度条还在')
+  await page.evaluate(() => window.load({ quiet: true }))
+  await page.waitForTimeout(200)
 
   const tabNames = ['overview', 'courses', 'settings']
   for (const tab of tabNames) {
@@ -329,11 +522,41 @@ async function auditAdmin(page, site, calls, dialogs, failures) {
       failures.push('管理台 tab · ' + tab + '：切换后选中态或显示状态不对')
     }
     await openAll()
-    const acts = await page.$$eval('#tab-' + tab + ' [data-act]', nodes => [...new Set(nodes.map(node => node.dataset.act))])
-    for (const act of acts) {
+    // 设置区是分栏：按钮只在自己那一栏里存在，所以先把每个分类都点一遍，
+    // 把"哪一栏里的哪个动作"收齐——否则只有当前可见那栏的按钮会被测到
+    const targets = []
+    if (tab === 'settings') {
+      const panes = await page.$$eval('#settingsRail [data-act="pick-pane"]', nodes => nodes.map(node => node.dataset.value))
+      for (const pane of panes) {
+        await page.click('#settingsRail [data-act="pick-pane"][data-value="' + pane + '"]')
+        await page.waitForTimeout(80)
+        const found = await page.$$eval('#tab-settings [data-act]', nodes => [...new Set(nodes.map(node => node.dataset.act))])
+        for (const act of found) if (!targets.some(item => item.act === act && item.pane === pane)) targets.push({ act, pane })
+      }
+    } else {
+      const found = await page.$$eval('#tab-' + tab + ' [data-act]', nodes => [...new Set(nodes.map(node => node.dataset.act))])
+      for (const act of found) targets.push({ act, pane: '' })
+    }
+    for (const target of targets) {
+      const act = target.act
       const selector = '#tab-' + tab + ' [data-act="' + act + '"]'
       // 每次操作后界面会重绘（折叠层又合上），所以每点一个按钮前都先展开
       await openAll()
+      // 分栏里的按钮得先切到它那一栏才在
+      if (target.pane) {
+        const rail = await page.$('#settingsRail [data-act="pick-pane"][data-value="' + target.pane + '"]')
+        if (rail) { await rail.click(); await page.waitForTimeout(80) }
+      }
+      // 删课件会把后面还要用的夹具删掉：它由课件场景单独验证
+      if (DEFERRED_ACTS.has(act)) {
+        results.push({ tab, act, toast: '（由课件场景单独验证）', argv: null })
+        continue
+      }
+      if (stateActs[act]) {
+        const detail = await stateActs[act](selector)
+        results.push({ tab, act, toast: '（界面状态变化：' + detail + '）', argv: null })
+        continue
+      }
       // 分栏界面里详情面板的按钮要"先选中课程与课次"才存在：每次点之前重新选一遍，
       // 否则前一个动作重绘之后，后面的按钮就找不到了（不是缺陷，是审计自己的前提）
       if (tab === 'courses' && !(await page.$(selector))) {
@@ -422,22 +645,32 @@ async function auditAdmin(page, site, calls, dialogs, failures) {
     }
   }
 
-  // 折叠状态必须跨重绘保持：用户点开一栏之后，轮询重绘不能把它收回去
-  // （用户报过"我什么都没动，点开的栏目自己收回去"）
+  // 状态必须跨重绘保持：用户报过"我什么都没动，点开的栏目自己收回去"。
+  // 设置区现在没有折叠块了，所以这里查两处真实状态——选中的设置分类、运行输出的展开。
   await page.click('.seg button[data-tab="settings"]')
   await openAll()
-  const foldKeys = await page.$$eval('#tab-settings details[data-fold]', nodes => nodes.map(node => node.dataset.fold))
-  if (!foldKeys.length) failures.push('管理台 · 设置区的折叠块没有 data-fold 标记：展开状态无法保持')
-  else {
-    await page.$$eval('#tab-settings details[data-fold]', nodes => nodes.forEach(node => { node.open = true }))
-    await page.evaluate(() => window.load({ quiet: true }))
-    await page.waitForTimeout(400)
-    const stillOpen = await page.$$eval('#tab-settings details[data-fold]', nodes => nodes.filter(node => node.open).length)
-    if (stillOpen !== foldKeys.length) {
-      failures.push('管理台 · 重绘之后折叠块被收回：' + stillOpen + '/' + foldKeys.length + ' 仍然展开')
-    } else {
-      console.log('  [设置] 重绘后折叠状态保持 ✓（' + stillOpen + ' 个）')
-    }
+  await page.click('#settingsRail [data-act="pick-pane"][data-value="params"]')
+  await page.$eval('#outCard', node => { node.open = true })
+  await page.evaluate(() => window.renderSettings())
+  await page.waitForTimeout(200)
+  const paneKept = await page.getAttribute('#settingsDetail', 'data-pane').catch(() => null)
+  const outOpen = await page.$eval('#outCard', node => node.open)
+  if (paneKept !== 'params') failures.push('管理台 · 重绘之后设置分类被重置（当前 ' + paneKept + '）')
+  else if (!outOpen) failures.push('管理台 · 重绘之后「运行输出」被收回')
+  else console.log('  [设置] 重绘后分类与展开状态都保持 ✓')
+
+  const settingFolds = await page.$$eval('#tab-settings details', nodes => nodes.length)
+  if (settingFolds) failures.push('管理台 · 设置区还在向下展开（' + settingFolds + ' 个折叠块），应该是分栏')
+  // 键盘：分类是 button，Tab 能到、回车能切，选中那个带 aria-current
+  await page.focus('#settingsRail [data-act="pick-pane"][data-value="password"]')
+  await page.keyboard.press('Enter')
+  await page.waitForTimeout(150)
+  const byKeyboard = await page.getAttribute('#settingsDetail', 'data-pane').catch(() => null)
+  const currentPane = await page.getAttribute('#settingsRail [aria-current="true"]', 'data-value').catch(() => null)
+  if (byKeyboard !== 'password' || currentPane !== 'password') {
+    failures.push('管理台 · 设置分类用键盘回车切不过去（右栏 ' + byKeyboard + '，aria-current ' + currentPane + '）')
+  } else {
+    console.log('  [设置] 键盘回车切分类 ✓')
   }
 
   // 「去处理」这类页内跳转：点了要切到对应 tab
@@ -461,6 +694,123 @@ async function auditAdmin(page, site, calls, dialogs, failures) {
   if (!calls.some(argv => argv[0] === 'cycle' && argv[2] === '1')) failures.push('课次行里的「跑一轮」没有按 --max-tasks 1 发出去')
   if (!calls.some(argv => argv[0] === 'notes' && argv.includes('--revise'))) failures.push('「只重写这个模块」没有走到 notes --revise')
   if (!calls.some(argv => argv[0] === 'prune' && argv.includes('--apply'))) failures.push('「清理并删除」没有带 --apply')
+
+  // 课件这一块单开一段：拖放/粘贴/取消/删除都要求按顺序来，
+  // 塞进"每个按钮点一遍"的循环里会互相拆台（删掉的那份正是后面要用的）
+  const courseware = await auditCoursewareFlow(page, site, fixture, failures)
+  for (const row of courseware) if (!row.ok) failures.push('管理台课件 · ' + row.name)
+  return results
+}
+
+/**
+ * 课件：展开收起、看全部页、拖放上传、取消上传、粘贴上传、删除。
+ *
+ * 这一段是用户逐条提的问题，所以每条都单独断言，不靠"点下去有提示"糊过去。
+ */
+async function auditCoursewareFlow(page, site, fixture, failures) {
+  const results = []
+  const record = async (name, ok, detail) => {
+    results.push({ name, ok, detail })
+    console.log('  ' + (ok ? '✔' : '✖') + ' ' + name.padEnd(20) + detail)
+    if (!ok) failures.push('管理台课件 · ' + name + '：' + detail)
+  }
+  console.log('课件上传与预览')
+
+  await page.click('.seg button[data-tab="courses"]')
+  await page.click('#courses .item[data-act="pick-course"]')
+  await page.click('#lessons .item[data-act="pick-lesson"][data-value="replay-audit-1"]')
+  await page.waitForSelector('#detail .dropzone', { timeout: 5000 })
+
+  // 展开 → 收起：用户报过"再点也收缩不回去"
+  const row = '#detail .file[data-value="讲座课件.pptx"] .name'
+  await page.click(row)
+  await page.waitForSelector('#detail .pages .page', { timeout: 5000 })
+  const opened = await page.$$eval('#detail .pages .page', nodes => nodes.length)
+  const firstLabel = (await page.textContent('#detail .pages .row span')).trim()
+  await page.click(row)
+  await page.waitForTimeout(300)
+  const closed = await page.$$eval('#detail .pages .page', nodes => nodes.length)
+  await record('课件行展开与收起', opened === 8 && closed === 0, '展开 ' + opened + ' 页 → 再点变 ' + closed + ' 页')
+  await record('说清共几页看到第几页', /共 12 页，当前显示到第 8 页/.test(firstLabel), firstLabel)
+
+  // 继续加载：一屏 8 页只是"先看这些"，不是"只能看这些"
+  await page.click(row)
+  await page.waitForSelector('#detail [data-act="load-more"]', { timeout: 5000 })
+  await page.click('#detail [data-act="load-more"]')
+  await page.waitForFunction(() => !document.querySelector('#detail [data-act="load-more"]'), { timeout: 6000 }).catch(() => {})
+  await page.waitForTimeout(200)
+  const allPages = await page.$$eval('#detail .pages .page', nodes => nodes.length)
+  const lastLabel = (await page.textContent('#detail .pages .row span')).trim()
+  await record('继续加载能看全部', allPages === 12 && /共 12 页，当前显示到第 12 页/.test(lastLabel), lastLabel + '，共 ' + allPages + ' 页')
+
+  // 20 秒轮询走的就是重绘这条路：展开的预览不能被它收回去
+  await page.evaluate(() => window.renderCourses())
+  await page.waitForTimeout(150)
+  const keptPages = await page.$$eval('#detail .pages .page', nodes => nodes.length)
+  await record('重绘不丢展开状态', keptPages === 12, '重绘后仍然 ' + keptPages + ' 页')
+  await page.click('#detail [data-act="close-material"]')
+  await page.waitForTimeout(150)
+
+  // 拖放上传：把分片请求拖慢，好让"取消"来得及点
+  let chunkCalls = 0
+  await page.route('**/api/admin/materials/chunk**', async route => {
+    if (route.request().method() === 'PUT') {
+      chunkCalls += 1
+      await new Promise(resolve => setTimeout(resolve, 400))
+    }
+    await route.continue().catch(() => {})
+  })
+  await dropFileOn(page, '#detail .dropzone', {
+    name: '大课件.pptx', bytes: 3 * 1024 * 1024, type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+  })
+  await page.waitForSelector('#detail [data-act="cancel-upload"]', { timeout: 6000 })
+  // 取消按钮一出现就说明上传已经启动，但第一个分片可能还在路上：
+  // 等它真的发出去再断言，否则测到的是"按钮比请求先出现"
+  const dropAt = Date.now()
+  while (chunkCalls < 1 && Date.now() - dropAt < 4000) await page.waitForTimeout(50)
+  await record('拖进虚线框就开始上传', chunkCalls >= 1, '已发出 ' + chunkCalls + ' 个分片')
+  await page.click('#detail [data-act="cancel-upload"]')
+  const atCancel = chunkCalls
+  await page.waitForTimeout(1600)
+  await record('取消之后不再发分片', chunkCalls === atCancel, '取消时 ' + atCancel + ' 个，1.6 秒后 ' + chunkCalls + ' 个')
+  const cancelToast = (await page.textContent('#toast')).trim()
+  await record('取消有提示', /已取消上传/.test(cancelToast), cancelToast)
+  await page.unroute('**/api/admin/materials/chunk**')
+  await page.waitForFunction(() => !document.querySelector('#detail [data-act="cancel-upload"]'), { timeout: 6000 }).catch(() => {})
+
+  // 粘贴上传：剪贴板里带文件（截图、从访达复制的课件）
+  await pasteFile(page, { name: '粘贴课件.json', text: JSON.stringify({ slides: [{ slideNumber: 1, text: '粘贴进来的第一页' }] }) })
+  const pasted = await page.waitForSelector('#detail .file[data-value="粘贴课件.json"]', { timeout: 8000 }).then(() => true).catch(() => false)
+  await record('粘贴即上传', pasted, pasted ? '粘贴课件.json 已经出现在课件列表' : '列表里没有这份文件')
+
+  // 删除：确认之后原件、解析结果、meta 里那一条一起清掉
+  const filesBefore = await page.$$eval('#detail .file', nodes => nodes.length)
+  await page.click('#detail .file[data-value="粘贴课件.json"] [data-act="delete-material"]')
+  const gone = await page.waitForFunction(() => !document.querySelector('#detail .file[data-value="粘贴课件.json"]'), { timeout: 8000 }).then(() => true).catch(() => false)
+  await page.waitForTimeout(200)
+  const filesAfter = await page.$$eval('#detail .file', nodes => nodes.length)
+  const onDisk = fs.existsSync(path.join(fixture.materialsRoot, '刑事执行法', '第5-6节', '粘贴课件.json'))
+  const deletedToast = (await page.textContent('#toast')).trim()
+  await record('删除课件', gone && !onDisk && filesAfter === filesBefore - 1 && /已删除/.test(deletedToast),
+    '列表 ' + filesBefore + ' → ' + filesAfter + '，磁盘上' + (onDisk ? '还在' : '已经没了'))
+
+  // 卡在哪、为什么：阶段说人话、错误给原文、退避时间写出来（夹具里第 7-8 节是失败停下的那节）
+  await page.click('#lessons .item[data-act="pick-lesson"][data-value="replay-audit-2"]')
+  await page.waitForTimeout(250)
+  const stuck = await page.evaluate(() => ({
+    row: document.querySelector('#detail .block .row').textContent.replace(/\s+/g, ' ').trim(),
+    err: (document.querySelector('#detail .errbox pre') || {}).textContent || '',
+    actions: [...document.querySelectorAll('#detail .action-item')].map(node => node.textContent.replace(/\s+/g, ' ').trim())
+  }))
+  await record('说清卡在哪、为什么',
+    /连续失败已停/.test(stuck.row) && /needs_attention/.test(stuck.row) &&
+    /尝试 1 次/.test(stuck.row) && /下次重试/.test(stuck.row) && stuck.err === '模型连续返回空结果',
+    stuck.row + '｜原文：' + stuck.err)
+  await record('两个按钮改名带说明',
+    stuck.actions.some(text => text.includes('立即跑这一节') && text.includes('从当前阶段继续跑到发布')) &&
+    stuck.actions.some(text => text.includes('清除失败、重新排队') && text.includes('清掉失败状态与退避时间')),
+    stuck.actions.join(' / '))
+
   return results
 }
 
@@ -478,24 +828,60 @@ async function auditNotePage(page, site, noteUrl, failures) {
   await page.goto(site.url + noteUrl, { waitUntil: 'domcontentloaded' })
   await page.waitForSelector('article h2', { timeout: 8000 })
 
-  // 字号：点两下要看得见变大，并且记住
+  // 工具在顶栏这一排，正文右上角不该再有浮层（用户明确要求）
+  const toolsInTopbar = await page.$eval('.topbar', el => !!el.querySelector('#tools'))
+  const floatingTools = await page.$eval('#tools', el => getComputedStyle(el).position === 'fixed')
+  await record('工具排在顶栏里', toolsInTopbar && !floatingTools, toolsInTopbar ? '顶栏里能找到工具栏' : '工具栏不在顶栏里')
+  // 顶栏那几条站点链接（含知识地图）收进下拉，点开才出现
+  await page.click('.navmenu > summary')
+  await page.waitForTimeout(120)
+  const navShown = await page.$eval('.navmenu .nav-pop', el => el.getBoundingClientRect().height > 0)
+  const navLinks = await page.$$eval('.navmenu .nav-pop a', nodes => nodes.length)
+  await record('导航收进下拉', navShown && navLinks === 5, '点开后 ' + navLinks + ' 条链接可见')
+  await page.keyboard.press('Escape')
+  await page.click('article h2')
+  await page.waitForTimeout(120)
+
+  // 字号：滑块改一下就变大，并且记住
   const before = parseFloat(await scale() || '1')
-  await page.click('[data-read="font-up"]')
+  await page.click('[data-tool="font"]')
+  await page.$eval('#fontRange', el => { el.value = '1.25'; el.dispatchEvent(new Event('input', { bubbles: true })) })
   const bigger = parseFloat(await scale() || '1')
-  await page.click('[data-read="font-down"]')
+  await page.$eval('#fontRange', el => { el.value = '1'; el.dispatchEvent(new Event('input', { bubbles: true })) })
   const back = parseFloat(await scale() || '1')
   const savedFont = await page.evaluate(() => localStorage.getItem('course.fontScale'))
-  await record('A+ 放大字号', bigger > before, '点之前 ' + before + '，点之后 ' + bigger)
-  await record('A− 缩小字号', back <= bigger, '点之后 ' + back)
+  await record('字号滑块放大', bigger > before, '滑块 1 → 1.25，字号 ' + before + ' → ' + bigger)
   await record('字号写进本地存储', savedFont != null, 'localStorage.course.fontScale=' + savedFont)
+  await record('字号能调回去', back <= bigger, '回到 ' + back)
 
-  // 深色：切换后 html[data-theme] 要变，按钮文字也要跟着变
+  // 深色：切换后 html[data-theme] 要变，太阳/月亮图标要跟着换
+  const shownIcon = async () => page.$eval('[data-tool="theme"]', el => {
+    const sun = el.querySelector('.icon-sun')
+    const moon = el.querySelector('.icon-moon')
+    return { sun: getComputedStyle(sun).display !== 'none', moon: getComputedStyle(moon).display !== 'none' }
+  })
+  const iconBefore = await shownIcon()
   const themeBefore = await page.getAttribute('html', 'data-theme')
-  await page.click('[data-read="theme"]')
+  await page.click('#toolTheme')
   const themeAfter = await page.getAttribute('html', 'data-theme')
-  const label = await page.textContent('#themeToggle')
+  const iconAfter = await shownIcon()
   await record('深色切换', themeBefore !== themeAfter && themeAfter === 'dark', themeBefore + ' → ' + themeAfter)
-  await record('深色按钮改字', /浅色/.test(label || ''), '按钮显示「' + label + '」')
+  await record('图标跟着换', iconBefore.sun && !iconBefore.moon && iconAfter.moon && !iconAfter.sun,
+    '日间显示太阳、夜间显示月亮')
+  await page.click('#toolTheme')
+
+  // 调色盘：按钮里的圆点要显示当前底色，选了豆沙绿就变 rgb(199, 237, 204)
+  await page.click('[data-tool="paper"]')
+  const swatchBefore = await page.$eval('#paperSwatch', el => getComputedStyle(el).backgroundColor)
+  await page.click('[data-paper="green"]')
+  await page.waitForTimeout(150)
+  const swatchGreen = await page.$eval('#paperSwatch', el => getComputedStyle(el).backgroundColor)
+  const bodyGreen = await page.evaluate(() => getComputedStyle(document.body).backgroundColor)
+  await record('色板显示当前底色', swatchBefore !== swatchGreen && swatchGreen === bodyGreen,
+    '现在 ' + swatchGreen + '（页面底色一致）')
+  await record('豆沙绿是 199/237/204', swatchGreen === 'rgb(199, 237, 204)', '实际 ' + swatchGreen)
+  await page.click('[data-paper=""]')
+  await page.keyboard.press('Escape')
 
   // 进度条与回到顶部
   await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight))
@@ -537,6 +923,93 @@ async function auditNotePage(page, site, noteUrl, failures) {
     await page.waitForTimeout(900)
     await record('点它真的滚过去', (await page.evaluate(() => window.scrollY)) > 100, '滚动位置 ' + await page.evaluate(() => window.scrollY))
   }
+
+  // 专注模式：两侧收起后正文必须还是正常宽度（用户报过"文字被压成最左边一列"）
+  await page.evaluate(() => window.scrollTo(0, 0))
+  await page.click('[data-tool="focus"]')
+  await page.waitForTimeout(200)
+  const focusWidth = await page.$eval('article', el => el.getBoundingClientRect().width)
+  const focusLeft = await page.$eval('article', el => el.getBoundingClientRect().left)
+  await record('专注模式不压列', focusWidth > 400 && focusLeft > 40,
+    '正文宽 ' + Math.round(focusWidth) + 'px，左边距 ' + Math.round(focusLeft) + 'px')
+  await page.click('[data-tool="focus"]')
+  await page.waitForTimeout(150)
+
+  // 回到顶部：图标按钮，且让开右侧目录栏
+  const topButton = await page.$eval('#totop', el => {
+    const rect = el.getBoundingClientRect()
+    const rail = document.querySelector('.rail-right')
+    const railRect = rail ? rail.getBoundingClientRect() : null
+    return {
+      hasIcon: !!el.querySelector('svg'),
+      overlapsRail: Boolean(railRect && rect.left < railRect.right && rect.right > railRect.left &&
+        rect.top < railRect.bottom && rect.bottom > railRect.top)
+    }
+  })
+  await record('回到顶部是图标', topButton.hasIcon, topButton.hasIcon ? '按钮里是 SVG' : '仍然是文字')
+  await record('回到顶部不压目录', !topButton.overlapsRail, topButton.overlapsRail ? '与右侧目录重叠' : '位置让开了目录')
+
+  // 划词：浮出像 Word 的小工具条（加粗/下划线/高亮/复制），快捷键 ⌘B/⌘U/⌘H 都要能用
+  const selectSomeText = async () => {
+    await page.evaluate(() => {
+      const node = document.querySelector('article p')
+      const range = document.createRange()
+      range.selectNodeContents(node)
+      const selection = window.getSelection()
+      selection.removeAllRanges()
+      selection.addRange(range)
+      node.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
+    })
+    await page.waitForTimeout(150)
+  }
+  await selectSomeText()
+  const annotButtons = await page.$$eval('#selbar button', nodes => nodes.map(node => node.dataset.annot))
+  const selbarAbove = await page.evaluate(() => {
+    const bar = document.getElementById('selbar')
+    const selection = window.getSelection()
+    const rect = selection.getRangeAt(0).getBoundingClientRect()
+    return { shown: bar.classList.contains('show'), above: bar.getBoundingClientRect().bottom <= rect.top + 4 }
+  })
+  await record('划词浮出工具条', selbarAbove.shown && annotButtons.length === 4,
+    '按钮：' + annotButtons.join(' / '))
+  await record('工具条在选区上方', selbarAbove.above, selbarAbove.above ? '出现在选区上方' : '出现在了选区下方')
+
+  await page.click('#selbar button[data-annot="bold"]')
+  await page.waitForTimeout(200)
+  const bolded = await page.$$eval('article .annot-bold', nodes => nodes.length)
+  // 断言"比周围重"，而不是逐字比较 '700'：浏览器对字重的计算值写法不止一种
+  const boldWeight = await page.evaluate(() => {
+    const span = document.querySelector('article .annot-bold')
+    if (!span) return { span: null, parent: null }
+    const weight = value => Number(String(value).replace('bold', '700').replace('normal', '400')) || 400
+    return { span: weight(getComputedStyle(span).fontWeight), parent: weight(getComputedStyle(span.parentElement).fontWeight) }
+  })
+  await record('加粗真的加粗', bolded >= 1 && boldWeight.span > boldWeight.parent,
+    '正文里 ' + bolded + ' 处加粗，字重 ' + boldWeight.parent + ' → ' + boldWeight.span)
+
+  await selectSomeText()
+  await page.keyboard.press('Meta+u')
+  await page.waitForTimeout(200)
+  const underlined = await page.$$eval('article .annot-underline', nodes => nodes.length)
+  await record('⌘U 下划线', underlined >= 1, '正文里出现 ' + underlined + ' 处下划线')
+
+  await selectSomeText()
+  await page.keyboard.press('Meta+h')
+  await page.waitForTimeout(200)
+  const marked = await page.$$eval('article .annot-mark', nodes => nodes.length)
+  await record('⌘H 高亮', marked >= 1, '正文里出现 ' + marked + ' 处高亮')
+
+  await selectSomeText()
+  await page.keyboard.press('Meta+b')
+  await page.waitForTimeout(200)
+  const boldAgain = await page.$$eval('article .annot-bold', nodes => nodes.length)
+  await record('⌘B 加粗', boldAgain > bolded, '加粗从 ' + bolded + ' 处变成 ' + boldAgain + ' 处')
+
+  const annotsKept = await page.evaluate(() => {
+    const raw = localStorage.getItem('course.annots:' + location.pathname)
+    return raw ? JSON.parse(raw).length : 0
+  })
+  await record('批注存在浏览器里', annotsKept >= 4, 'localStorage 里 ' + annotsKept + ' 条')
 
   // 目录：点一条要跳到对应小节，且当前小节会被高亮
   await page.evaluate(() => window.scrollTo(0, 0))
@@ -593,63 +1066,112 @@ async function auditIndexPages(page, site, failures) {
   }
   console.log('首页与索引页')
 
-  // 首页：一门课一行，课次在行内横向排开（同一 y、x 递增），不是一列到底
+  // 首页：一门课一组，课次一行一节（比大卡片密得多），左侧有课程筛选
   await page.goto(site.url + '/index.html', { waitUntil: 'domcontentloaded' })
   await page.waitForSelector('.band', { timeout: 8000 })
-  const bands = await page.$$eval('.band', nodes => nodes.map(node => {
-    const cards = [...node.querySelectorAll('.strip .card')].map(card => card.getBoundingClientRect())
-    return {
-      title: (node.querySelector('h2') || {}).textContent || '',
-      tops: cards.map(rect => Math.round(rect.top)),
-      lefts: cards.map(rect => Math.round(rect.left))
-    }
-  }))
-  const execBand = bands.find(band => band.title.indexOf('刑事执行法') >= 0) || { tops: [], lefts: [] }
-  const sameRow = execBand.tops.length > 1 && execBand.tops.every(top => Math.abs(top - execBand.tops[0]) <= 2)
-  const runningRight = execBand.lefts.length > 1 && execBand.lefts[1] > execBand.lefts[0]
-  await record('一门课一行', bands.length === 3, '共 ' + bands.length + ' 行：' + bands.map(band => band.title).join(' / '))
-  await record('课次横向排开', sameRow && runningRight, '同一行 y=' + execBand.tops.join(',') + '，x=' + execBand.lefts.join(','))
+  const bands = await page.$$eval('.band', nodes => nodes.map(node => ({
+    course: node.getAttribute('data-course'),
+    lessons: node.querySelectorAll('.lesson-row').length
+  })))
+  await record('一门课一组', bands.length === 3, '共 ' + bands.length + ' 组：' + bands.map(band => band.course).join(' / '))
+  await record('课次一行一节', bands.every(band => band.lessons >= 1) && !(await page.$('.card')),
+    bands.map(band => band.course + ' ' + band.lessons + ' 节').join('，'))
+  await page.click('#course-rail button[data-course="商法概论"]')
+  await page.waitForTimeout(150)
+  const visibleBands = await page.$$eval('.band', nodes => nodes.filter(node => !node.hidden).length)
+  await record('首页按课程筛选', visibleBands === 1, '可见 ' + visibleBands + ' 组')
+  await page.click('#course-rail button[data-course=""]')
+  await page.waitForTimeout(120)
 
-  // 索引页：左侧挑课程，条目一次列到底，不做折叠
+  // 索引页：课程 → 课次切分，术语是可点的词；不做折叠
   await page.goto(site.url + '/concepts/index.html', { waitUntil: 'domcontentloaded' })
-  await page.waitForSelector('.index-row', { timeout: 8000 })
-  const visibleRows = () => page.$$eval('.index-row', nodes => nodes.filter(node => !node.hidden).length)
-  const visibleLinks = () => page.$$eval('.index-notes a', nodes => nodes.filter(node => !node.hidden).map(node => node.getAttribute('href')))
+  await page.waitForSelector('.chip', { timeout: 8000 })
+  const groupCount = await page.$$eval('.term-group', nodes => nodes.length)
+  const chipCount = await page.$$eval('.chip', nodes => nodes.length)
   const folds = await page.$$eval('details', nodes => nodes.length)
-  await record('索引不折叠', folds === 0, '没有折叠块，' + (await visibleRows()) + ' 条一次列出')
+  await record('概念按课次切分', groupCount >= 2 && chipCount >= groupCount, groupCount + ' 个课次分组 / ' + chipCount + ' 个术语')
+  await record('索引不折叠', folds === 0, '没有折叠块，一次列到底')
+  const sharedChips = await page.$$eval('.chip-shared', nodes => nodes.length)
+  await record('标出跨课次的概念', sharedChips >= 1, sharedChips + ' 个术语不止一节讲过')
 
-  await page.click('#filter-rail button[data-course="商法概论"]')
+  await page.click('#filter-rail button[data-course="法律实证分析"]')
   await page.waitForTimeout(150)
-  const oneCourse = await visibleRows()
-  const oneLinks = await visibleLinks()
-  await record('按课程过滤', oneCourse === 1 && oneLinks.length === 1 && oneLinks[0].indexOf('商法概论') >= 0,
-    '选中商法概论后可见 ' + oneCourse + ' 条 / ' + oneLinks.length + ' 个出处')
-
+  const visibleCourses = await page.$$eval('.term-course', nodes => nodes.filter(node => !node.hidden).map(node => node.dataset.course))
+  await record('按课程切分', visibleCourses.length === 1 && visibleCourses[0] === '法律实证分析', '可见：' + visibleCourses.join(' / '))
   await page.reload({ waitUntil: 'domcontentloaded' })
-  await page.waitForTimeout(200)
-  const persisted = await page.$eval('#filter-rail button[data-course="商法概论"]', node => node.getAttribute('aria-pressed'))
-  await record('过滤选择记在本地', persisted === 'true' && (await visibleRows()) === 1, '刷新后仍选中商法概论')
+  await page.waitForTimeout(250)
+  const persisted = await page.$eval('#filter-rail button[data-course="法律实证分析"]', node => node.getAttribute('aria-pressed'))
+  await record('过滤选择记在本地', persisted === 'true', '刷新后仍选中法律实证分析')
 
-  await page.click('#filter-rail button[data-course=""]')
-  await page.waitForTimeout(150)
-  await record('切回全部', (await visibleRows()) === 2 && (await visibleLinks()).length === 3,
-    '可见 ' + (await visibleRows()) + ' 条 / ' + (await visibleLinks()).length + ' 个出处')
-
-  // 条目要落到正文里那一节，不是笔记开头
-  await page.goto(site.url + '/statutes/index.html', { waitUntil: 'domcontentloaded' })
-  await page.waitForSelector('.index-notes a', { timeout: 8000 })
-  const href = await page.$eval('.index-notes a', node => node.getAttribute('href'))
-  const lawGroup = await page.$$eval('.index-group h2', nodes => nodes.map(node => node.textContent))
-  await record('法条按法律名分段', lawGroup.length === 1 && lawGroup[0].indexOf('公司法') >= 0, lawGroup.join(' / '))
-  await record('条目落到具体一节', /#三-法条依据$/.test(href || ''), '链接 ' + href)
-
-  await page.click('.index-notes a')
+  // 点一个术语：要滚到正文那一节、闪一下、并把术语在正文里标出来（?mark=）
+  const chipHref = await page.$eval('.term-course:not([hidden]) .chip', node => node.getAttribute('href'))
+  await page.click('.term-course:not([hidden]) .chip')
   await page.waitForSelector('article h2', { timeout: 8000 })
-  const headingId = await page.evaluate(() => decodeURIComponent(location.hash.replace(/^#/, '')))
-  const headingExists = await page.evaluate(id => !!document.getElementById(id), headingId)
-  await record('点击后落到正文位置', headingExists, '落在 ' + headingId + '，页面 ' + decodeURIComponent(page.url().split('/').pop()))
+  // 标记是进页面后等 DOM 稳定再打的（120ms 与 load 各一次），这里等它出现再断言
+  await page.waitForSelector('.mark-hit', { timeout: 2500 }).catch(() => {})
+  const landed = await page.evaluate(() => ({
+    scrollY: window.scrollY,
+    marks: document.querySelectorAll('.mark-hit').length,
+    hash: decodeURIComponent(location.hash.replace(/^#/, '')),
+    exists: !!document.getElementById(decodeURIComponent(location.hash.replace(/^#/, '')))
+  }))
+  await record('术语跳到正文那一节', landed.exists, '落在「' + landed.hash + '」，链接 ' + chipHref.slice(0, 60))
+  // 落点要对齐到视野顶部附近：只判断 scrollY 会误伤"目标本来就在第一屏"的情况
+  const landedTop = await page.evaluate(() => {
+    const id = decodeURIComponent(location.hash.replace(/^#/, ''))
+    const node = document.getElementById(id)
+    return node ? Math.round(node.getBoundingClientRect().top) : null
+  })
+  // 短笔记滚不到顶部（页面本身没那么长），所以只要求"落点在视野里"
+  const landedVisible = await page.evaluate(() => {
+    const id = decodeURIComponent(location.hash.replace(/^#/, ''))
+    const node = document.getElementById(id)
+    if (!node) return false
+    const top = node.getBoundingClientRect().top
+    return top >= -12 && top < window.innerHeight * 0.6
+  })
+  await record('落点滚动到位', landedVisible, '目标标题距视野顶部 ' + landedTop + 'px')
   const flashed = await page.waitForSelector('.anchor-flash', { timeout: 2500 }).then(() => true).catch(() => false)
-  await record('落点高亮', flashed, flashed ? '目标小节带 anchor-flash' : '没有看到高亮')
+  await record('落点高亮闪一下', flashed, flashed ? '目标小节带 anchor-flash' : '没有看到高亮')
+  await record('正文里标出这个术语', landed.marks >= 1, landed.marks + ' 处高亮')
+
+  // 知识地图：按课程画"哪几节在讲同一批概念"
+  await page.goto(site.url + '/map/index.html', { waitUntil: 'domcontentloaded' })
+  await page.waitForSelector('#map-rail button[data-course]', { timeout: 8000 })
+  const mapCourses = await page.$$eval('#map-rail button[data-course]', nodes => nodes.length)
+  const mapData = await page.$eval('#map-data', node => JSON.parse(node.textContent))
+  const sharedTerms = mapData.courses
+    .flatMap(course => course.lessons.flatMap(lesson => lesson.terms))
+    .filter((term, index, all) => all.indexOf(term) !== index)
+  await record('地图数据完整', mapCourses >= 1 && sharedTerms.length >= 1,
+    mapCourses + ' 门课可选；跨课次概念 ' + [...new Set(sharedTerms)].length + ' 个')
+  const firstTitle = await page.textContent('#map-title')
+  // 有跨课次概念的那门课必须画出图；只有一节讲过概念的课要给出说明而不是空白
+  await page.click('#map-rail button[data-course="商法概论"]')
+  await page.waitForTimeout(1500)
+  const richCourse = await page.evaluate(() => ({
+    title: document.getElementById('map-title').textContent,
+    svg: document.querySelectorAll('#map-holder svg').length,
+    edges: document.querySelectorAll('#map-holder svg [data-lines]').length
+  }))
+  await record('地图跟着课程切换', richCourse.title === '商法概论' && richCourse.svg >= 1,
+    (firstTitle || '') + ' → ' + richCourse.title + '，画布 ' + richCourse.svg + ' 张图')
+  await page.click('#map-rail button[data-course="法律实证分析"]')
+  await page.waitForTimeout(1200)
+  const thinCourse = await page.evaluate(() => ({
+    title: document.getElementById('map-title').textContent,
+    explained: !document.getElementById('map-fallback').hidden
+  }))
+  await record('没有跨课次概念时给说明', thinCourse.title === '法律实证分析' && thinCourse.explained,
+    thinCourse.title + '：' + (thinCourse.explained ? '给了说明' : '一片空白'))
+  // 本地夹具没有绘图库（线上才有 /assets/mermaid.min.js），所以这里只要求"不出错、
+  // 要么画出图、要么给出为什么没画"
+  const mapState = await page.evaluate(() => ({
+    svg: document.querySelectorAll('#map-holder svg').length,
+    explained: !document.getElementById('map-fallback').hidden
+  }))
+  await record('地图有图或有说明', mapState.svg > 0 || mapState.explained,
+    mapState.svg > 0 ? '已画出 ' + mapState.svg + ' 张图' : '给出了"没有跨课次概念"的说明')
 
   return results
 }
@@ -663,6 +1185,7 @@ async function main() {
     adminToken: TOKEN,
     scratchRoot: fixture.scratchRoot,
     materialsRoot: path.join(fixture.scratchRoot, 'materials'),
+    assetsDir: path.join(fixture.scratchRoot, 'assets'),
     workerPath: path.join(repoRoot, 'apps/worker/bin/course.mjs'),
     // 关键：真的流水线不跑，只把 argv 记下来
     runCommand: async (args) => {
@@ -695,7 +1218,7 @@ async function main() {
   await page.addInitScript(token => { try { localStorage.setItem('course.admin.token', token) } catch (e) {} }, TOKEN)
 
   try {
-    await auditAdmin(page, site, calls, dialogs, failures)
+    await auditAdmin(page, site, fixture, calls, dialogs, failures)
     console.log('')
     await auditNotePage(page, site, fixture.noteUrl, failures)
     console.log('')

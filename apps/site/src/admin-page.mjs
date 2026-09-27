@@ -179,9 +179,34 @@ pre{background:var(--sunken);border-radius:var(--r-md);padding:14px;overflow:aut
 .toast.show{opacity:1;transform:none}
 .toast.ok{border-color:#cfe4d8;background:var(--accent-soft);color:var(--accent-ink)}
 .toast.error{border-color:#eccac7;background:var(--danger-soft);color:var(--danger)}
+/* ── 课件：拖放区、展开指示、识别进度 ── */
+.dropzone{border:2px dashed var(--line-2);border-radius:var(--r-md);padding:16px;text-align:center;color:var(--ink-2);
+  font-size:13.5px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px}
+.dropzone:hover{border-color:var(--ink-3);color:var(--ink)}
+.dropzone.over{border-color:var(--accent);background:var(--accent-soft);color:var(--accent-ink)}
+.dropzone:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.file .chev{display:flex;color:var(--ink-3);transition:transform .2s ease}
+.file.open .chev{transform:rotate(90deg)}
+.ocr{margin-top:10px}
+.errbox{background:var(--danger-soft);border-radius:var(--r-md);padding:10px 12px;margin-top:8px}
+.errbox pre{background:none;padding:0;max-height:220px;color:var(--danger)}
+.action-item{display:flex;flex-direction:column;gap:3px;align-items:flex-start}
+.action-item .hint{color:var(--ink-3);font-size:12.5px;margin:0;max-width:230px}
+
+/* ── 设置：与课程区一样的分栏（左类别、右内容），不再竖排展开 ── */
+.split{display:grid;grid-template-columns:196px minmax(0,1fr);background:var(--card);border:1px solid var(--line);
+  border-radius:var(--r-lg);box-shadow:var(--shadow);overflow:hidden}
+.split .col{border-right:1px solid var(--line);min-width:0;max-height:74vh;overflow:auto;padding:8px 0}
+.split .col:last-child{border-right:0;padding:0}
+.split .pane{padding:18px 20px}
+button.item{width:100%;border:0;background:none;font:inherit;text-align:left;color:inherit}
+button.item:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+
 @media (max-width:900px){
   .board,.board.rail-hidden{grid-template-columns:1fr}
   .board .col{max-height:none;border-right:0;border-bottom:1px solid var(--line)}
+  .split{grid-template-columns:1fr}
+  .split .col{max-height:none;border-right:0;border-bottom:1px solid var(--line)}
 }
 </style>
 </head>
@@ -231,8 +256,10 @@ var SEL_KEY = 'course.admin.sel'
 var state = {
   status: null, balance: null, config: null, storage: null,
   tab: 'overview', busy: false, requests: {}, uploads: {}, open: {},
-  sel: { tag: '', year: 'all', course: '', lesson: '', sort: 'desc', rail: false },
-  preview: null
+  sel: { tag: '', year: 'all', course: '', lesson: '', sort: 'desc', rail: false, pane: 'maintenance' },
+  preview: null,
+  // 没保存的运行参数改动：20 秒轮询重绘与分栏切换都不该把它抹掉
+  configDraft: {}
 }
 try {
   var savedOpen = JSON.parse(localStorage.getItem(OPEN_KEY) || '{}')
@@ -248,11 +275,12 @@ var LABELS = {
   revise: '按新要求重写模块', 'notify-retry': '重发失败通知'
 }
 var MODULE_TEXT = { approved: '已通过', draft: '草稿', reviewing: '审查中', revising: '重写中', pending: '待写', failed: '失败' }
+// 阶段名要说人话：光看"待处理 · 尝试 0 次"没人知道它卡在哪一步
 var STAGE_TEXT = {
-  discovered: '待处理', queued: '排队中', downloading: '下载中', downloaded: '已下载',
-  transcribing: '转写中', transcript_ready: '待写笔记', writing: '写笔记中',
-  notes_ready: '待发布', publishing: '发布中', published: '已发布',
-  needs_attention: '卡住了', failed: '失败', completed: '已完成'
+  discovered: '刚发现未下载', queued: '排队等下载', downloading: '正在下载',
+  downloaded: '已下载待转写', transcribing: '正在转写', transcript_ready: '已转写待写笔记',
+  writing: '正在写笔记', notes_ready: '笔记好了待发布', publishing: '正在发布',
+  published: '已发布', needs_attention: '连续失败已停', failed: '失败', completed: '已完成'
 }
 var STAGE_CLASS = { published: 'ok', completed: 'ok', needs_attention: 'bad', failed: 'bad', discovered: '', transcript_ready: 'warn', notes_ready: 'warn' }
 var INTEGRATION_KINDS = [
@@ -303,17 +331,14 @@ function icon (name) {
     image: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="M21 16l-5-5-6 6"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
     refresh: '<path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/>',
-    trash: '<path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/>'
+    trash: '<path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/>',
+    close: '<path d="M6 6l12 12M18 6L6 18"/>'
   }
   return '<svg class="i" viewBox="0 0 24 24" aria-hidden="true">' + (paths[name] || '') + '</svg>'
 }
 function setOpen (key, value) {
   state.open[key] = value
   try { localStorage.setItem(OPEN_KEY, JSON.stringify(state.open)) } catch (e) {}
-}
-function foldAttrs (key, forceOpen) {
-  var open = forceOpen === undefined ? state.open[key] === true : forceOpen
-  return ' data-fold="' + esc(key) + '"' + (open ? ' open' : '')
 }
 function saveSel () {
   try { localStorage.setItem(SEL_KEY, JSON.stringify(state.sel)) } catch (e) {}
@@ -382,7 +407,7 @@ function isDirty () {
   if (active && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName)) return true
   var boxes = document.querySelectorAll('[data-request],[data-pw="next"],[data-newtag]')
   for (var i = 0; i < boxes.length; i += 1) if (boxes[i].value) return true
-  return false
+  return Object.keys(state.configDraft).length > 0
 }
 function refreshBalance () {
   state.balance = null
@@ -599,42 +624,33 @@ function detailHtml () {
   var lesson = task.lesson || {}
   var tags = ((tagsOf().lessons || {})[task.replayKey] || [])
   var head = '<h2>' + esc(task.title) + '</h2>' +
-    '<p class="sub">' + esc(task.courseName) + ' · <span class="pill ' + (STAGE_CLASS[task.stage] || '') + '">' + esc(STAGE_TEXT[task.stage] || task.stage) + '</span>' +
-    ' · 尝试 ' + task.attempts + ' 次 · 转写 ' + money(cost.asrCny) + ' · 笔记 ' + money(cost.notesCny) + '</p>' +
-    (task.lastError ? '<p class="small" style="color:var(--danger)">' + esc(String(task.lastError).slice(0, 200)) + '</p>' : '')
+    '<p class="sub">' + esc(task.courseName) + ' · 转写 ' + money(cost.asrCny) + ' · 笔记 ' + money(cost.notesCny) + '</p>'
 
-  var actions = '<div class="block"><h3>操作</h3><div class="row">' +
-    '<button class="act primary" data-act="cycle" data-key="' + esc(task.replayKey) + '">现在处理这一节</button>' +
-    '<button class="act" data-act="retry" data-key="' + esc(task.replayKey) + '">解除卡住，放回队列</button>' +
+  // 卡在哪、为什么：阶段说人话，错误给原文，退避时间写出来——
+  // "尝试 0 次"这种数字本身不解释任何事
+  var progress = '<div class="block"><h3>进度</h3><div class="row">' +
+    '<span class="pill ' + (STAGE_CLASS[task.stage] || '') + '"><span class="dot"></span>' + esc(STAGE_TEXT[task.stage] || task.stage) + '</span>' +
+    '<span class="tiny muted">' + esc(task.stage) + '</span>' +
+    '<span class="tiny muted">尝试 ' + Number(task.attempts || 0) + ' 次</span>' +
+    '<span class="tiny muted">下次重试 ' + (formatTime(task.nextAttemptAt) || '—') + '</span>' +
+    '</div>' +
+    (task.lastError ? '<div class="errbox"><pre>' + esc(String(task.lastError)) + '</pre></div>' : '') +
+    '</div>'
+
+  var actions = '<div class="block"><h3>操作</h3><div class="row" style="align-items:flex-start">' +
+    '<div class="action-item"><button class="act primary" data-act="cycle" data-key="' + esc(task.replayKey) + '">立即跑这一节</button>' +
+    '<p class="hint">从当前阶段继续跑到发布</p></div>' +
+    '<div class="action-item"><button class="act" data-act="retry" data-key="' + esc(task.replayKey) + '">清除失败、重新排队</button>' +
+    '<p class="hint">清掉失败状态与退避时间，交给定时任务重跑</p></div>' +
     (task.artifacts && task.artifacts.transcriptPath ? '<button class="act" data-act="republish" data-key="' + esc(task.replayKey) + '">重新发布</button>' : '') +
     (task.artifacts && task.artifacts.slug ? '<a class="act" target="_blank" rel="noopener" href="/' + esc(task.artifacts.slug) + '.html">看笔记</a>' : '') +
     '</div></div>'
 
-  var files = (task.materials || []).map(function (material) {
-    var selected = state.preview && state.preview.course === task.courseName && state.preview.name === material.name
-    return '<div class="file" data-act="open-material" data-value="' + esc(material.name) + '"' + (selected ? ' aria-selected="true"' : '') + '>' +
-      icon('file') + '<span class="name">' + esc(material.name) + (material.scope === 'course' ? ' · 全课程' : '') + '</span>' +
-      '<span class="meta">' + material.slideCount + ' 页' +
-        (material.imageCount ? ' · 图 ' + material.imageCount : '') +
-        (material.ocrPending ? ' · 待识别 ' + material.ocrPending : '') + '</span></div>'
-  }).join('')
-  var deck = '<div class="block"><h3>课件</h3>' + (files || '<p class="small muted">无课件</p>') +
-    '<div class="row" style="margin-top:8px">' +
-    '<input class="hidden-file" type="file" multiple data-file="' + esc(task.replayKey) + '" accept=".pptx,.pdf,.docx,.xlsx,.md,.txt">' +
-    '<button class="act" data-act="pick-file" data-key="' + esc(task.replayKey) + '">' + icon('plus') + '上传课件</button>' +
-    // 图片文字是上传后自动识别的（后台跑，不用点）；这里只在"还有没识别完的图"时
-    // 提供一个补识别的入口——识别失败、或一次超过上限时的补救手段
-    (task.ocrRunning
-      ? '<span class="small muted">正在后台识别图片文字…</span>'
-      : ((task.materials || []).some(function (material) { return material.ocrPending > 0 })
-        ? '<button class="act" data-act="ocr-material" data-key="' + esc(task.replayKey) + '">' + icon('image') + '重新识别图片文字</button>'
-        : '')) +
-    '<span class="status" data-status="' + esc(task.replayKey) + '">' + esc(state.uploads[task.replayKey] || '') + '</span>' +
-    '</div>' + previewHtml(task) + '</div>'
+  var deck = deckHtml(task)
 
   var tagBlock = '<div class="block"><h3>标签</h3>' +
     (tags.length ? tags.map(function (tag) {
-      return '<span class="tag">' + esc(tag) + '<button data-act="remove-tag" data-key="' + esc(task.replayKey) + '" data-tag="' + esc(tag) + '" title="移除">×</button></span>'
+      return '<span class="tag">' + esc(tag) + '<button data-act="remove-tag" data-key="' + esc(task.replayKey) + '" data-tag="' + esc(tag) + '" title="移除标签" aria-label="移除标签 ' + esc(tag) + '">' + icon('close') + '</button></span>'
     }).join('') : '<span class="small muted">暂无标签</span>') +
     '<div class="row" style="margin-top:8px"><input data-newtag="' + esc(task.replayKey) + '" placeholder="新增标签，回车确认" style="max-width:240px">' +
     '<button class="act" data-act="add-tag" data-key="' + esc(task.replayKey) + '">添加</button></div></div>'
@@ -652,21 +668,86 @@ function detailHtml () {
       '<button class="act" data-act="revise-first" data-key="' + esc(task.replayKey) + '">按这个要求重写</button></div></div>'
     : ''
 
-  return head + actions + deck + tagBlock + noteBlock
+  return head + progress + actions + deck + tagBlock + noteBlock
+}
+
+/** 时间戳给人看：账本里存的是 ISO，界面上要的是"月-日 时:分"。 */
+function formatTime (value) {
+  var date = new Date(value)
+  if (!value || isNaN(date.getTime())) return ''
+  var pad = function (n) { return String(n).padStart(2, '0') }
+  return pad(date.getMonth() + 1) + '-' + pad(date.getDate()) + ' ' + pad(date.getHours()) + ':' + pad(date.getMinutes())
+}
+
+function deckHtml (task) {
+  var uploading = activeUpload && activeUpload.key === task.replayKey
+  var files = (task.materials || []).map(function (material) {
+    var selected = state.preview && state.preview.course === task.courseName && state.preview.name === material.name
+    return '<div class="file' + (selected ? ' open' : '') + '" data-act="open-material" data-value="' + esc(material.name) + '"' +
+      ' role="button" tabindex="0" aria-expanded="' + (selected ? 'true' : 'false') + '"' + (selected ? ' aria-selected="true"' : '') + '>' +
+      icon('file') + '<span class="name">' + esc(material.name) + (material.scope === 'course' ? ' · 全课程' : '') + '</span>' +
+      '<span class="meta">' + material.slideCount + ' 页' +
+        (material.imageCount ? ' · 图 ' + material.imageCount : '') +
+        (material.ocrPending ? ' · 待识别 ' + material.ocrPending : '') + '</span>' +
+      '<span class="chev">' + icon('chevron') + '</span>' +
+      // 删除按钮嵌在整行可点的课件行里：点击时 closest('[data-act]') 先命中它，不会误触发预览
+      '<button class="act icon danger" data-act="delete-material" data-key="' + esc(task.replayKey) + '"' +
+      ' data-name="' + esc(material.name) + '" data-scope="' + esc(material.scope || 'lesson') + '"' +
+      ' title="删除这份课件" aria-label="删除 ' + esc(material.name) + '">' + icon('trash') + '</button>' +
+      '</div>'
+  }).join('')
+
+  var pending = (task.materials || []).some(function (material) { return material.ocrPending > 0 })
+  var ocr = task.ocrRunning
+    ? ocrProgressHtml(task)
+    // 图片文字是上传后自动识别的（后台跑，不用点）；这里只在"还有没识别完的图"时
+    // 提供一个补识别的入口——识别失败、或一次超过上限时的补救手段
+    : (pending
+      ? '<div class="row" style="margin-top:8px"><button class="act" data-act="ocr-material" data-key="' + esc(task.replayKey) + '">' + icon('image') + '重新识别图片文字</button></div>'
+      : '')
+
+  return '<div class="block"><h3>课件</h3>' +
+    '<div class="dropzone" data-act="pick-file" data-key="' + esc(task.replayKey) + '" data-drop="' + esc(task.replayKey) + '"' +
+    ' role="button" tabindex="0">' + icon('up') + '<span>拖到这里上传，或按 ⌘/Ctrl+V 粘贴</span></div>' +
+    (files ? '<div style="margin-top:10px">' + files + '</div>' : '<p class="small muted" style="margin:10px 0 0">无课件</p>') +
+    '<div class="row" style="margin-top:10px">' +
+    '<input class="hidden-file" type="file" multiple data-file="' + esc(task.replayKey) + '" accept=".pptx,.pdf,.docx,.xlsx,.md,.txt,.json">' +
+    '<button class="act" data-act="pick-file" data-key="' + esc(task.replayKey) + '">' + icon('plus') + '上传课件</button>' +
+    (uploading && activeUpload.phase === 'uploading'
+      ? '<button class="act danger" data-act="cancel-upload" data-key="' + esc(task.replayKey) + '">取消上传</button>'
+      : '') +
+    '<span class="status" data-status="' + esc(task.replayKey) + '">' + esc(state.uploads[task.replayKey] || '') + '</span>' +
+    '</div>' + ocr + previewHtml(task) + '</div>'
+}
+
+/** 后台识别的进度：分母在排队时就定下来了，这里只负责画出来。 */
+function ocrProgressHtml (task) {
+  var ocr = task.ocr || { total: 0, done: 0, current: '' }
+  var percent = ocr.total ? Math.max(2, Math.min(100, Math.round((ocr.done / ocr.total) * 100))) : 0
+  return '<div class="ocr"><div class="bar"><i style="width:' + percent + '%"></i></div>' +
+    '<div class="tiny muted" style="margin-top:6px">已识别 ' + Number(ocr.done || 0) + '/' + Number(ocr.total || 0) + ' 张图' +
+    (ocr.current ? ' · 正在处理 ' + esc(ocr.current) : '') + '</div></div>'
 }
 
 function previewHtml (task) {
   var preview = state.preview
-  if (!preview || preview.course !== task.courseName || preview.loading) {
-    return preview && preview.loading ? '<div class="pages">加载中…</div>' : ''
-  }
-  var pages = (preview.pages || []).map(function (page) {
+  if (!preview || preview.course !== task.courseName) return ''
+  if (preview.loading) return '<div class="pages" style="margin-top:8px">加载中…</div>'
+  var shown = preview.pages || []
+  var pages = shown.map(function (page) {
     return '<div class="page"><div class="no">第 ' + page.slideNumber + ' 页</div>' + esc(page.text || '（本页无文字）') + '</div>'
   }).join('')
+  // 一屏 8 页只是"先看这些"，不是"只能看这些"：到底了才收起「继续加载」
+  var last = shown.length ? shown[shown.length - 1].slideNumber : 0
   return '<div class="pages" style="margin-top:8px">' +
-    '<div class="row" style="justify-content:space-between"><span class="tiny muted">' + esc(preview.name) + ' · 共 ' + preview.slideCount + ' 页</span>' +
-    '<button class="icon" data-act="close-material" title="关闭预览">×</button></div>' +
-    (pages || '<div class="muted small">没有文字</div>') + '</div>'
+    '<div class="row" style="justify-content:space-between"><span class="tiny muted">' + esc(preview.name) +
+    ' · 共 ' + Number(preview.slideCount || 0) + ' 页，当前显示到第 ' + last + ' 页</span>' +
+    '<button class="icon" data-act="close-material" title="收起预览" aria-label="收起预览">' + icon('close') + '</button></div>' +
+    (pages || '<div class="muted small">没有文字</div>') +
+    (preview.hasMore
+      ? '<div class="row" style="justify-content:center;margin-top:8px"><button class="act quiet" data-act="load-more">继续加载</button></div>'
+      : '') +
+    '</div>'
 }
 
 function integrationHtml () {
@@ -683,27 +764,67 @@ function integrationHtml () {
 function courseTagHtml (course) {
   var tags = ((tagsOf().courses || {})[course] || [])
   return (tags.length ? tags.map(function (tag) {
-    return '<span class="tag">' + esc(tag) + '<button data-act="remove-course-tag" data-course="' + esc(course) + '" data-tag="' + esc(tag) + '" title="移除">×</button></span>'
+    return '<span class="tag">' + esc(tag) + '<button data-act="remove-course-tag" data-course="' + esc(course) + '" data-tag="' + esc(tag) + '" title="移除标签" aria-label="移除标签 ' + esc(tag) + '">' + icon('close') + '</button></span>'
   }).join('') : '<span class="small muted">暂无标签</span>') +
     '<div class="row" style="margin-top:8px"><input data-newcoursetag="' + esc(course) + '" placeholder="给这门课加标签，回车确认" style="max-width:260px">' +
     '<button class="act" data-act="add-course-tag" data-course="' + esc(course) + '">添加</button></div>'
 }
 
-/* ── 设置 ── */
+/* ── 设置：与课程区一样的分栏（左类别、右内容），不再用竖排展开 ── */
+var SETTINGS_PANES = [
+  { key: 'maintenance', label: '维护' },
+  { key: 'deliveries', label: '通知记录' },
+  { key: 'storage', label: '存储占用' },
+  { key: 'params', label: '运行参数' },
+  { key: 'password', label: '登录密码' }
+]
+
+function settingsPane () {
+  var key = state.sel.pane
+  return SETTINGS_PANES.some(function (item) { return item.key === key }) ? key : 'maintenance'
+}
+
+/** 分类右端只放数据：条目数、占用、密码设了没——不放解释。 */
+function paneMeta (key) {
+  if (key === 'deliveries') return String(((state.status.ledger || {}).deliveries || []).length)
+  if (key === 'storage') return state.storage ? bytes(state.storage.totalBytes) : ''
+  if (key === 'password') return (state.status.auth && state.status.auth.passwordSet) ? '已设置' : '未设置'
+  return ''
+}
+
+function maintenancePane () {
+  return '<h2>维护</h2>' +
+    '<div class="row" style="margin-bottom:14px"><button class="act primary" data-act="cycle-all">跑一轮完整链路</button>' +
+    '<button class="act" data-act="discover">扫描教学网</button></div>' +
+    '<div class="row"><button class="act" data-act="notify">投递通知</button>' +
+    '<button class="act" data-act="doctor">体检</button><button class="act" data-act="backup">备份账本</button>' +
+    '<button class="act" data-act="prune">清理预演</button><button class="act danger" data-act="prune-apply">清理并删除</button></div>'
+}
+
+function deliveriesPane (deliveries, rows, failed) {
+  return '<h2>通知记录</h2><p class="small muted">最近 ' + Math.min(10, deliveries.length) + ' 条</p>' +
+    (rows ? '<table><tbody>' + rows + '</tbody></table>' : '<p class="muted small">队列为空</p>') +
+    (failed ? '<div class="row" style="margin-top:10px"><button class="act primary" data-act="notify-retry">把 ' + failed + ' 条失败通知放回队列</button></div>' : '')
+}
+
 function renderSettings () {
   var c = state.config || { values: {}, editable: {} }
   var fields = Object.keys(c.editable || {}).map(function (key) {
     var spec = c.editable[key]
-    var value = c.values && c.values[key] != null ? c.values[key] : ''
+    var saved = c.values && c.values[key] != null ? c.values[key] : ''
+    // 没保存的改动优先：切分栏、20 秒轮询重绘都不能把用户刚敲进去的数字抹掉
+    var value = state.configDraft[key] != null ? state.configDraft[key] : saved
     var input
     if (spec.enum) {
       input = '<select data-cfg="' + key + '">' + spec.enum.map(function (o) {
-        return '<option' + (String(value) === o ? ' selected' : '') + '>' + esc(o) + '</option>'
+        return '<option value="' + esc(o) + '"' + (String(value) === String(o) ? ' selected' : '') + '>' + esc(o) + '</option>'
       }).join('') + '</select>'
     } else if (spec.type === 'boolean') {
-      input = '<select data-cfg="' + key + '"><option value=""' + (value === '' ? ' selected' : '') + '>跟随环境变量</option>' +
-        '<option value="true"' + (value === true ? ' selected' : '') + '>开启</option>' +
-        '<option value="false"' + (value === false ? ' selected' : '') + '>关闭</option></select>'
+      var on = value === true || String(value) === 'true'
+      var off = value === false || String(value) === 'false'
+      input = '<select data-cfg="' + key + '"><option value=""' + (on || off ? '' : ' selected') + '>跟随环境变量</option>' +
+        '<option value="true"' + (on ? ' selected' : '') + '>开启</option>' +
+        '<option value="false"' + (off ? ' selected' : '') + '>关闭</option></select>'
     } else {
       input = '<input data-cfg="' + key + '" type="' + (spec.type === 'number' ? 'number' : 'text') + '" value="' + esc(value) + '" placeholder="跟随环境变量">'
     }
@@ -719,23 +840,24 @@ function renderSettings () {
       '<td class="tiny muted">' + esc(String(x.last_error || '').slice(0, 60)) + '</td></tr>'
   }).join('')
 
-  $('tab-settings').innerHTML =
-    card('<div class="row"><button class="act primary" data-act="cycle-all">跑一轮完整链路</button>' +
-      '<button class="act" data-act="discover">扫描教学网</button></div>') +
-    card('<details class="d"' + foldAttrs('settings:maintenance', false) + '><summary><span class="ttl">维护</span><span class="muted small">通知、体检、备份、清理</span></summary>' +
-      '<div class="body"><div class="row"><button class="act" data-act="notify">投递通知</button>' +
-      '<button class="act" data-act="doctor">体检</button><button class="act" data-act="backup">备份账本</button>' +
-      '<button class="act" data-act="prune">清理预演</button><button class="act danger" data-act="prune-apply">清理并删除</button></div></div></details>' +
-      '<details class="d"' + foldAttrs('settings:notify') + '><summary><span class="ttl">通知记录</span><span class="muted small">最近 ' + Math.min(10, deliveries.length) + ' 条</span></summary>' +
-      '<div class="body">' + (rows ? '<table><tbody>' + rows + '</tbody></table>' : '<p class="muted small">队列为空</p>') +
-      (failed ? '<div class="row" style="margin-top:10px"><button class="act primary" data-act="notify-retry">把 ' + failed + ' 条失败通知放回队列</button></div>' : '') + '</div></details>') +
-    card('<details class="d"' + foldAttrs('settings:storage') + '><summary><span class="ttl">存储占用</span><span class="muted small">' + (state.storage ? bytes(state.storage.totalBytes) : '点开查看') + '</span></summary>' +
-      '<div class="body" id="storageBody">' + storageHtml() + '</div></details>') +
-    card('<details class="d"' + foldAttrs('settings:params') + '><summary><span class="ttl">运行参数</span><span class="muted small">篇幅、并发、成本窗口</span></summary>' +
-      '<div class="body">' + fields + '<div class="row"><button class="act primary" data-act="save-config">保存设置</button></div>' +
-      '<div class="tiny muted" style="margin-top:8px">' + esc(c.path || '') + '</div></div></details>' +
-      '<details class="d"' + foldAttrs('settings:password') + '><summary><span class="ttl">登录密码</span><span class="muted small">' +
-      ((state.status.auth && state.status.auth.passwordSet) ? '已设置' : '未设置') + '</span></summary><div class="body">' + passwordPanel() + '</div></details>')
+  var pane = settingsPane()
+  var rail = SETTINGS_PANES.map(function (item) {
+    return '<button type="button" class="item" data-act="pick-pane" data-value="' + item.key + '"' +
+      (pane === item.key ? ' aria-current="true"' : '') + '>' +
+      '<span class="name">' + esc(item.label) + '</span>' +
+      '<span class="meta">' + esc(paneMeta(item.key)) + '</span></button>'
+  }).join('')
+  var body = pane === 'maintenance' ? maintenancePane()
+    : pane === 'deliveries' ? deliveriesPane(deliveries, rows, failed)
+      : pane === 'storage' ? '<h2>存储占用</h2><div id="storageBody">' + storageHtml() + '</div>'
+        : pane === 'params' ? '<h2>运行参数</h2>' + fields +
+          '<div class="row"><button class="act primary" data-act="save-config">保存设置</button></div>' +
+          '<div class="tiny muted" style="margin-top:8px">' + esc(c.path || '') + '</div>'
+          : '<h2>登录密码</h2>' + passwordPanel()
+
+  $('tab-settings').innerHTML = '<div class="split">' +
+    '<div class="col" id="settingsRail"><div class="colhead"><span>设置</span></div>' + rail + '</div>' +
+    '<div class="col" id="settingsDetail" data-pane="' + esc(pane) + '"><div class="pane">' + body + '</div></div></div>'
 }
 
 function storageHtml () {
@@ -794,83 +916,200 @@ function setStatus (key, text, kind) {
   el.textContent = text
 }
 
+/** 每次请求都换一个可中止的句柄：取消时打断的是"正在飞"的那一个。 */
+function jobSignal (job) {
+  job.controller = typeof AbortController === 'function' ? new AbortController() : null
+  return job.controller ? job.controller.signal : undefined
+}
+
+/** 取消不是错误，是一条独立的分支：用这个标记把它和真正的失败分开。 */
+function canceled () {
+  var error = new Error('已取消上传')
+  error.canceled = true
+  return error
+}
+
+/**
+ * 上传一批文件（文件框、拖放、粘贴都走这里）。
+ *
+ * 取消的实现方式：把 job 记在 activeUpload 上，每个分片前先看一眼标记——标记一旦
+ * 立起来就不再发下一个请求，同时在途的那个 fetch 直接 abort。**不能只改界面文案**，
+ * 否则用户看到"已取消"而分片还在后台继续灌。
+ */
 async function uploadFiles (key, fileList, btn) {
   var task = taskByKey(key)
   if (!task || !task.courseName) { toast('找不到这条课次的课程名', 'error'); return }
   var files = [].slice.call(fileList || [])
   if (!files.length) { toast('先选文件', 'error'); return }
+  if (activeUpload) { toast('已经有一个上传在进行，先等它结束或点取消', 'error'); return }
+  // phase：分片还在传时可以取消；已经交给服务端解析之后就不该再说"已取消"——
+  // 那时服务端收不到取消信号，文件多半已经归档了，说取消了是骗人
+  var job = { key: key, canceled: false, name: files[0].name, controller: null, uploadId: '', phase: 'uploading' }
+  activeUpload = job
   var restore = busyButton(btn, '上传中…')
-  for (var i = 0; i < files.length; i += 1) {
-    var file = files[i]
-    var sizeMb = (file.size / 1048576).toFixed(1)
-    try {
-      var data
-      if (file.size > 2 * CHUNK_SIZE) {
-        var uploadId = 'u' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10)
-        var total = Math.ceil(file.size / CHUNK_SIZE)
-        for (var index = 0; index < total; index += 1) {
-          setStatus(key, '上传中 ' + Math.round((index / total) * 100) + '%（' + file.name + '）')
-          await putChunk(uploadId, index, file.slice(index * CHUNK_SIZE, (index + 1) * CHUNK_SIZE))
-        }
-        setStatus(key, '解析中…（' + file.name + '）')
-        var res = await fetch('/api/admin/materials/commit', {
-          method: 'POST', headers: headers(true),
-          body: JSON.stringify({ uploadId: uploadId, course: task.courseName, lesson: task.title, scope: 'lesson', name: file.name, chunks: total })
-        })
-        data = await res.json().catch(function () { return {} })
-      } else {
-        var params = new URLSearchParams({ course: task.courseName, lesson: task.title, scope: 'lesson', name: file.name })
-        var single = await fetch('/api/admin/materials?' + params.toString(), { method: 'PUT', headers: headers(false), body: file })
-        data = await single.json().catch(function () { return {} })
-      }
+  renderCourses()
+  try {
+    for (var i = 0; i < files.length; i += 1) {
+      var file = files[i]
+      job.name = file.name
+      if (job.canceled) throw canceled()
+      var data = await uploadOne(task, file, job)
+      if (job.canceled) throw canceled()
+      // 图上的字是上传后自动识别的：说清楚"已经在后台跑了"，别让人以为要再点一下
       if (data.ok) {
-    // 图上的字是上传后自动识别的：说清楚"已经在后台跑了"，别让人以为要再点一下
-    toast('已归档：' + data.name + '（' + data.slideCount + ' 页' +
-      (data.ocr && data.ocr.queued ? '，' + (data.imageCount || 0) + ' 张图正在后台识别' : '') + '）', 'ok')
-  }
-      else { toast('上传失败：' + (data.message || data.error), 'error'); break }
-    } catch (error) {
-      toast('上传失败：' + error, 'error')
-      break
+        toast('已归档：' + data.name + '（' + data.slideCount + ' 页' +
+          (data.ocr && data.ocr.queued ? '，' + (data.imageCount || 0) + ' 张图正在后台识别' : '') + '）', 'ok')
+      } else {
+        toast('上传失败：' + (data.message || data.error), 'error')
+        break
+      }
     }
+    if (job.canceled) toast('已取消上传：' + job.name, 'info')
+  } catch (error) {
+    if (error && error.canceled) toast('已取消上传：' + job.name, 'info')
+    else toast('上传失败：' + error, 'error')
+  } finally {
+    if (job.canceled && job.uploadId) {
+      // 已经落盘的分片由服务端收掉；这是善后，失败也不该冒出来打扰用户
+      fetch('/api/admin/materials/chunk?uploadId=' + encodeURIComponent(job.uploadId), { method: 'DELETE', headers: headers(false) }).catch(function () {})
+    }
+    activeUpload = null
+    restore()
+    setStatus(key, '')
+    renderCourses()
+    load()
   }
-  restore()
-  setStatus(key, '')
-  load()
 }
 
-async function putChunk (uploadId, index, blob) {
+/** 单个文件：大的走分片，小的直接 PUT。 */
+async function uploadOne (task, file, job) {
+  if (file.size > 2 * CHUNK_SIZE) {
+    var uploadId = 'u' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10)
+    job.uploadId = uploadId
+    var total = Math.ceil(file.size / CHUNK_SIZE)
+    for (var index = 0; index < total; index += 1) {
+      if (job.canceled) throw canceled()
+      setStatus(task.replayKey, '上传中 ' + Math.round((index / total) * 100) + '%（' + file.name + '）')
+      await putChunk(uploadId, index, file.slice(index * CHUNK_SIZE, (index + 1) * CHUNK_SIZE), job)
+    }
+    if (job.canceled) throw canceled()
+    job.phase = 'parsing'
+    setStatus(task.replayKey, '解析中…（' + file.name + '）')
+    renderCourses()
+    var res = await fetch('/api/admin/materials/commit', {
+      method: 'POST', headers: headers(true),
+      body: JSON.stringify({ uploadId: uploadId, course: task.courseName, lesson: task.title, scope: 'lesson', name: file.name, chunks: total }),
+      signal: jobSignal(job)
+    })
+    return await res.json().catch(function () { return {} })
+  }
+  setStatus(task.replayKey, '上传中…（' + file.name + '）')
+  var params = new URLSearchParams({ course: task.courseName, lesson: task.title, scope: 'lesson', name: file.name })
+  var single = await fetch('/api/admin/materials?' + params.toString(), {
+    method: 'PUT', headers: headers(false), body: file, signal: jobSignal(job)
+  })
+  return await single.json().catch(function () { return {} })
+}
+
+async function putChunk (uploadId, index, blob, job) {
   var lastError = null
   for (var attempt = 1; attempt <= 3; attempt += 1) {
+    if (job && job.canceled) throw canceled()
     try {
       var res = await fetch('/api/admin/materials/chunk?uploadId=' + encodeURIComponent(uploadId) + '&index=' + index, {
-        method: 'PUT', headers: headers(false), body: blob
+        method: 'PUT', headers: headers(false), body: blob, signal: jobSignal(job)
       })
       var data = await res.json().catch(function () { return {} })
       if (res.ok && data.ok) return data
       lastError = new Error(data.message || data.error || ('分片 ' + index + ' 失败（HTTP ' + res.status + '）'))
-    } catch (error) { lastError = error }
+    } catch (error) {
+      if (job && job.canceled) throw canceled()
+      lastError = error
+    } finally {
+      if (job) job.controller = null
+    }
     await new Promise(function (done) { setTimeout(done, 600 * attempt) })
   }
   throw lastError
 }
 
+/** 点课件行：展开看这一页页的文字，再点一次收起——不是只能开不能关。 */
+function toggleMaterial (name) {
+  var task = taskByKey(state.sel.lesson)
+  if (!task) return
+  if (state.preview && state.preview.course === task.courseName && state.preview.name === name) {
+    state.preview = null
+    renderCourses()
+    return
+  }
+  return openMaterial(name)
+}
+
 async function openMaterial (name) {
   var task = taskByKey(state.sel.lesson)
   if (!task) return
-  state.preview = { course: task.courseName, name: name, loading: true, pages: [] }
+  state.preview = { course: task.courseName, name: name, loading: true, pages: [], slideCount: 0, offset: 0, hasMore: false }
   renderCourses()
   try {
     var params = new URLSearchParams({ course: task.courseName, lesson: task.title, name: name, pages: '8' })
     var res = await fetch('/api/admin/material?' + params.toString(), { headers: headers(false) })
     var data = await res.json().catch(function () { return {} })
     if (!data.ok) throw new Error(data.message || data.error || '读不到课件')
-    state.preview = { course: task.courseName, name: data.name, slideCount: data.slideCount, pages: data.pages || [] }
+    state.preview = {
+      course: task.courseName, name: data.name, slideCount: data.slideCount,
+      pages: data.pages || [], offset: (data.pages || []).length, hasMore: Boolean(data.hasMore)
+    }
   } catch (error) {
     state.preview = null
     toast('预览失败：' + error, 'error')
   }
   renderCourses()
+}
+
+/** 继续加载：一次 8 页往下接，直到整份课件都看过。 */
+async function loadMorePages (btn) {
+  var preview = state.preview
+  var task = taskByKey(state.sel.lesson)
+  if (!preview || !preview.hasMore || !task) return
+  var restore = busyButton(btn, '加载中…')
+  try {
+    var params = new URLSearchParams({
+      course: preview.course, lesson: task.title, name: preview.name,
+      pages: '8', offset: String(preview.offset || 0)
+    })
+    var res = await fetch('/api/admin/material?' + params.toString(), { headers: headers(false) })
+    var data = await res.json().catch(function () { return {} })
+    if (!data.ok) throw new Error(data.message || data.error || '读不到更多页')
+    preview.pages = (preview.pages || []).concat(data.pages || [])
+    preview.offset = preview.pages.length
+    preview.hasMore = Boolean(data.hasMore)
+    preview.slideCount = data.slideCount || preview.slideCount
+    var last = preview.pages.length ? preview.pages[preview.pages.length - 1].slideNumber : 0
+    toast('已加载到第 ' + last + ' 页（共 ' + preview.slideCount + ' 页）', 'ok')
+  } catch (error) {
+    toast('加载失败：' + error, 'error')
+  } finally { restore() }
+  renderCourses()
+}
+
+/** 删除一份已归档的课件：确认之后才动手，删完刷新列表。 */
+async function deleteMaterial (key, name, scope, btn) {
+  var task = taskByKey(key)
+  if (!task) { toast('找不到这条课次', 'error'); return }
+  if (!window.confirm('删除「' + name + '」？原件与解析出的文字都会删掉，写笔记前需要重新上传。')) return
+  var restore = busyButton(btn, '…')
+  try {
+    var params = new URLSearchParams({ course: task.courseName, lesson: task.title, scope: scope || 'lesson', name: name })
+    var res = await fetch('/api/admin/materials?' + params.toString(), { method: 'DELETE', headers: headers(false) })
+    var data = await res.json().catch(function () { return {} })
+    if (!data.ok) throw new Error(data.message || data.error || '删除失败')
+    if (state.preview && state.preview.name === name) state.preview = null
+    toast('已删除：' + name, 'ok')
+  } catch (error) {
+    toast('删除失败：' + error, 'error')
+  } finally { restore() }
+  renderCourses()
+  load()
 }
 
 async function saveTags (patch) {
@@ -963,7 +1202,8 @@ async function saveConfig (btn) {
     var res = await fetch('/api/admin/config', { method: 'PUT', headers: headers(true), body: JSON.stringify({ values: values }) })
     var data = await res.json().catch(function () { return {} })
     out(JSON.stringify(data, null, 2))
-    if (data.ok) toast('设置已保存：' + (data.applied || []).join('、'), 'ok')
+    // 保存成功后草稿就作废了：留着一个"未保存"的键会让后续重绘一直被 isDirty 挡住
+    if (data.ok) { state.configDraft = {}; toast('设置已保存：' + (data.applied || []).join('、'), 'ok') }
     else toast('没保存：' + ((data.errors || []).join('；') || data.error), 'error')
   } catch (error) { toast('保存失败：' + error, 'error') } finally { restore() }
   state.config = null
@@ -1014,8 +1254,28 @@ function handleAct (act, btn) {
   }
   if (act === 'pick-lesson') { state.sel.lesson = value; state.preview = null; saveSel(); renderCourses(); return }
   if (act === 'pick-file') { var input = document.querySelector('[data-file="' + key + '"]'); if (input) input.click(); return }
-  if (act === 'open-material') return openMaterial(value)
+  if (act === 'open-material') return toggleMaterial(value)
   if (act === 'close-material') { state.preview = null; renderCourses(); return }
+  if (act === 'load-more') return loadMorePages(btn)
+  if (act === 'delete-material') return deleteMaterial(key, btn.dataset.name, btn.dataset.scope, btn)
+  if (act === 'cancel-upload') {
+    if (!activeUpload) { toast('现在没有正在上传的文件'); return }
+    if (activeUpload.phase !== 'uploading') { toast('这一份已经在解析，等它结束'); return }
+    // 先立标记再 abort：标记保证后面的分片不再发出去，abort 打断正在飞的那一个
+    activeUpload.canceled = true
+    if (activeUpload.controller) activeUpload.controller.abort()
+    setStatus(activeUpload.key, '正在取消…（' + activeUpload.name + '）')
+    toast('正在取消上传：' + activeUpload.name, 'info')
+    return
+  }
+  if (act === 'pick-pane') {
+    state.sel.pane = value
+    saveSel()
+    renderSettings()
+    var rail = document.querySelector('#settingsRail [data-act="pick-pane"][data-value="' + value + '"]')
+    if (rail) rail.focus()
+    return
+  }
   if (act === 'storage-load') return loadStorage(btn)
   if (act === 'add-tag') { var box = document.querySelector('[data-newtag="' + key + '"]'); return addTag(key, box && box.value, 'lesson') }
   if (act === 'remove-tag') return removeTag(key, btn.dataset.tag, 'lesson')
@@ -1059,6 +1319,8 @@ function handleAct (act, btn) {
 
 var CHUNK_SIZE = 1024 * 1024
 var dragFrom = null
+// 正在进行的上传（同一时刻只允许一个）：里面有取消标记与可中止的请求句柄
+var activeUpload = null
 
 document.addEventListener('click', function (event) {
   var menu = $('menu')
@@ -1086,6 +1348,38 @@ document.addEventListener('change', function (event) {
   input.value = ''
 })
 
+/** 拖放上传：只有落在这个课次的虚线框里才算数，别的地方拖进来一律不管。 */
+document.addEventListener('dragover', function (event) {
+  var zone = event.target.closest ? event.target.closest('.dropzone') : null
+  if (!zone || dragFrom !== null) return
+  event.preventDefault()
+  zone.classList.add('over')
+})
+document.addEventListener('dragleave', function (event) {
+  var zone = event.target.closest ? event.target.closest('.dropzone') : null
+  if (zone) zone.classList.remove('over')
+})
+document.addEventListener('drop', function (event) {
+  var zone = event.target.closest ? event.target.closest('.dropzone') : null
+  if (!zone || dragFrom !== null) return
+  event.preventDefault()
+  zone.classList.remove('over')
+  var files = event.dataTransfer && event.dataTransfer.files
+  if (!files || !files.length) return
+  var key = zone.dataset.drop
+  run(function () { return uploadFiles(key, files, null) })
+})
+
+/** 粘贴上传：剪贴板里带文件（截图、从访达复制的课件）就直接归档到当前课次。 */
+document.addEventListener('paste', function (event) {
+  var files = event.clipboardData && event.clipboardData.files
+  if (!files || !files.length) return
+  event.preventDefault()
+  var key = state.sel.lesson
+  if (!key || key === '__multi__') { toast('先在课次里选一节课，再粘贴课件', 'error'); return }
+  run(function () { return uploadFiles(key, files, null) })
+})
+
 document.addEventListener('dragstart', function (event) {
   var row = event.target.closest ? event.target.closest('.tag-row[data-tag]') : null
   if (!row) return
@@ -1111,8 +1405,17 @@ document.addEventListener('dragend', function () {
 })
 
 document.addEventListener('input', function (event) {
-  var box = event.target && event.target.closest ? event.target.closest('[data-request]') : null
-  if (box) state.requests[box.dataset.request] = box.value
+  var target = event.target
+  if (!target || !target.closest) return
+  var box = target.closest('[data-request]')
+  if (box) { state.requests[box.dataset.request] = box.value; return }
+  // 运行参数的改动先记在本地：切分栏或 20 秒轮询重绘都不该把它抹掉
+  var cfg = target.closest('[data-cfg]')
+  if (cfg) state.configDraft[cfg.dataset.cfg] = cfg.value
+})
+document.addEventListener('change', function (event) {
+  var cfg = event.target && event.target.closest ? event.target.closest('[data-cfg]') : null
+  if (cfg) state.configDraft[cfg.dataset.cfg] = cfg.value
 })
 document.addEventListener('toggle', function (event) {
   var node = event.target
@@ -1121,9 +1424,27 @@ document.addEventListener('toggle', function (event) {
 }, true)
 document.addEventListener('keydown', function (event) {
   if (event.key === 'Escape') { var menu = $('menu'); if (menu && menu.open) menu.open = false; return }
-  if (event.key !== 'Enter') return
   var target = event.target
   if (!target || !target.dataset) return
+  // 设置分栏：上下箭头在类别之间走，与访达里用键盘挑分类的习惯一致
+  if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && target.closest && target.closest('#settingsRail')) {
+    event.preventDefault()
+    var index = SETTINGS_PANES.findIndex(function (item) { return item.key === settingsPane() })
+    var step = event.key === 'ArrowDown' ? 1 : -1
+    var pane = SETTINGS_PANES[(index + step + SETTINGS_PANES.length) % SETTINGS_PANES.length]
+    var next = document.querySelector('#settingsRail [data-act="pick-pane"][data-value="' + pane.key + '"]')
+    if (next) next.click()
+    return
+  }
+  if (event.key !== 'Enter' && event.key !== ' ') return
+  // 整行可点的元素（课件行、拖放区）不是 <button>，回车/空格要等同点一下
+  var row = target.closest ? target.closest('[data-act][role="button"]') : null
+  if (row && target.tagName !== 'BUTTON') {
+    event.preventDefault()
+    run(function () { return handleAct(row.dataset.act, row) })
+    return
+  }
+  if (event.key !== 'Enter') return
   if (target.dataset.newtag) { event.preventDefault(); run(function () { return addTag(target.dataset.newtag, target.value, 'lesson') }); return }
   if (target.dataset.newcoursetag) { event.preventDefault(); run(function () { return addTag('', target.value, 'course', target.dataset.newcoursetag) }); return }
   if (target.dataset.request) {

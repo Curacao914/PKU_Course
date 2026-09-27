@@ -5,7 +5,7 @@ import path from 'node:path'
 
 import { clearPassword, asrCostCny, noteCostCny, readPasswordRecord, resolvePricing, validatePassword, verifyPassword, writePassword } from '@course/core'
 import { WECHAT_SESSION_MAX_AGE_MINUTES, wechatSessionState } from '@course/notify'
-import { addMaterial, listMaterials, readDecks, unassignedDir } from '@course/materials'
+import { addMaterial, listMaterials, materialDir, readDecks, unassignedDir } from '@course/materials'
 
 import { ADMIN_HTML } from './admin-page.mjs'
 import { readSiteIndex } from '@course/publish'
@@ -160,6 +160,106 @@ export function safeMaterialName(value) {
     .trim()
     .replace(/^[. ]+|[. ]+$/g, '')
     .slice(0, 120) || 'slides.pptx'
+}
+
+/** 归档目录里的 meta.json：谁在归档里，以它为准；读坏了就当空的（宁可说"不在归档里"）。 */
+function readMaterialMeta(metaPath) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(metaPath, 'utf8'))
+    return parsed && typeof parsed === 'object' ? parsed : { materials: [] }
+  } catch {
+    return { materials: [] }
+  }
+}
+
+/** 删完之后把空目录往上收：归档树里不该剩下没有课件的课次目录（连 slides/ 一起）。 */
+function pruneEmptyDirs(start, stopAt) {
+  const stop = path.resolve(stopAt)
+  let current = path.resolve(start)
+  while (current !== stop && current.startsWith(`${stop}${path.sep}`)) {
+    let entries = []
+    try { entries = fs.readdirSync(current, { withFileTypes: true }) } catch { return }
+    // 先把里面空掉的子目录（slides/）收掉，再看自己是不是也空了
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      const child = path.join(current, entry.name)
+      try { if (!fs.readdirSync(child).length) fs.rmdirSync(child) } catch { /* 收不掉就留着 */ }
+    }
+    try { entries = fs.readdirSync(current) } catch { return }
+    if (entries.length) return
+    try { fs.rmdirSync(current) } catch { return }
+    current = path.dirname(current)
+  }
+}
+
+/**
+ * 删掉一份已归档的课件。
+ *
+ * 三样东西要一起清：归档目录里的原件、slides/<名>.json 里的解析结果、meta.json 里的那一条。
+ * 少清一样都会留下麻烦——要么磁盘上堆着界面上看不见的文件，要么列表里留着一条指向
+ * 不存在文件的记录（写笔记时去读它，然后报一个谁都看不懂的错）。
+ * 只有 meta.json 里登记过的名字才允许删：它是唯一一份可信的清单，别的名字一律拒绝，
+ * 这样即使参数被拼成奇怪的样子也删不到归档目录之外的东西。
+ */
+export function removeMaterial({ root, course, lesson = '', scope = 'lesson', name } = {}) {
+  const fileName = safeMaterialName(name)
+  if (!root || !course || !fileName) throw new Error('删除课件需要 course / name')
+  const dir = materialDir({ root, course, lesson: scope === 'course' ? '' : lesson })
+  const metaPath = path.join(dir, 'meta.json')
+  const meta = readMaterialMeta(metaPath)
+  const entry = (meta.materials || []).find(item => item.name === fileName)
+  if (!entry) throw new Error(`这份课件不在归档里：${fileName}`)
+  const inside = target => String(target || '').startsWith(`${path.resolve(dir)}${path.sep}`)
+  const removed = []
+  for (const target of [path.join(dir, entry.name), entry.parsedPath || path.join(dir, 'slides', `${entry.name}.json`)]) {
+    // parsedPath 是我们自己写进 meta.json 的，但仍然核对一次：删错文件是收不回来的
+    if (!inside(target) || !fs.existsSync(target)) continue
+    fs.rmSync(target, { force: true })
+    removed.push(path.basename(target))
+  }
+  const kept = (meta.materials || []).filter(item => item.name !== fileName)
+  if (kept.length) {
+    fs.writeFileSync(metaPath, `${JSON.stringify({ ...meta, materials: kept, updatedAt: new Date().toISOString() }, null, 2)}\n`)
+  } else {
+    fs.rmSync(metaPath, { force: true })
+  }
+  pruneEmptyDirs(dir, root)
+  return { name: fileName, scope, removed, remaining: kept.length }
+}
+
+/** 后台识别进程写的进度快照；读不到就当没有（进度是可选项，缺了不该让状态页报错）。 */
+export function readOcrProgress(file) {
+  if (!file) return []
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'))
+    return Array.isArray(parsed?.records) ? parsed.records.filter(Boolean) : []
+  } catch { return [] }
+}
+
+/**
+ * 把进度换算成界面要的两个数。
+ *
+ * 分母在排队那一刻就定下来（plan.images），分子用"现在还剩几张没识别"倒推：
+ * 识别进程只在每份课件开始/结束时落一次盘，中途没有更细的钩子。这样算出来的
+ * 数字与列表里的"待识别"永远对得上，也不会因为重试而往前跳。
+ */
+export function describeOcrProgress(job = {}, materials = []) {
+  const records = readOcrProgress(job.progressPath)
+  const current = [...records].reverse().find(item => item && item.status === 'running') || null
+  const pending = materials.reduce((sum, item) => sum + Number(item.ocrPending || 0), 0)
+  const planned = Number(job.plan?.images || 0)
+  const total = planned > 0 ? planned : pending
+  const done = Math.max(0, Math.min(total, total - pending))
+  return {
+    running: true,
+    total,
+    done,
+    percent: total > 0 ? Math.round((done / total) * 100) : 0,
+    current: current ? String(current.name || '') : '',
+    currentImages: Number(current?.images || 0),
+    materials: Number(job.plan?.materials || 0),
+    startedAt: job.startedAt || null
+  }
 }
 
 /**
@@ -399,6 +499,17 @@ export function createAdminHandler({
     return live
   }
 
+  /** 排队时算一次"这次要识别多少张图"：进度条的分母必须有个人先定下来。 */
+  function ocrPlan(course, lesson = '') {
+    try {
+      const targets = listMaterials({ root: materialsRoot, course, lesson }).filter(item => item.ocrPending > 0)
+      return {
+        materials: targets.length,
+        images: targets.reduce((sum, item) => sum + Number(item.ocrPending || 0), 0)
+      }
+    } catch { return { materials: 0, images: 0 } }
+  }
+
   function queueOcr({ course, lesson }) {
     if (!workerPath || !course) return { queued: 0, reason: 'no_worker' }
     const pendingTask = runningOcr().find(item => item.course === course && item.lesson === (lesson || ''))
@@ -407,7 +518,11 @@ export function createAdminHandler({
     const logDir = path.join(scratchRoot, 'ocr')
     fs.mkdirSync(logDir, { recursive: true })
     const stamp = new Date(now()).toISOString().replace(/[:.]/g, '-')
-    const logPath = path.join(logDir, `${stamp}-${safeMaterialName(course)}-${safeMaterialName(lesson || 'course')}.log`)
+    const stem = `${stamp}-${safeMaterialName(course)}-${safeMaterialName(lesson || 'course')}`
+    const logPath = path.join(logDir, `${stem}.log`)
+    // 识别进程把"做到哪一份了"写在这里（store.mjs 读 COURSE_OCR_PROGRESS_FILE）：
+    // 它是脱离本进程跑的，管理台只能靠文件看它的进展
+    const progressPath = path.join(logDir, `${stem}.progress.json`)
     const args = [
       workerPath, 'materials', '--ocr',
       '--course', course,
@@ -415,15 +530,16 @@ export function createAdminHandler({
     ]
     let started
     try {
-      started = spawnOcr({ args, env: { ...process.env, ...workerEnv }, logPath })
+      started = spawnOcr({ args, env: { ...process.env, ...workerEnv, COURSE_OCR_PROGRESS_FILE: progressPath }, logPath })
     } catch (error) {
       return { queued: 0, reason: error instanceof Error ? error.message : String(error) }
     }
     writeOcrState([...readOcrState(), {
       course, lesson: lesson || '', pid: started.pid,
-      startedAt: new Date(now()).toISOString(), logPath
+      startedAt: new Date(now()).toISOString(), logPath, progressPath,
+      plan: ocrPlan(course, lesson)
     }])
-    return { queued: 1, pid: started.pid, logPath }
+    return { queued: 1, pid: started.pid, logPath, progressPath }
   }
 
   function clientKey(req) {
@@ -603,6 +719,8 @@ export function createAdminHandler({
       site: null,
       runs: []
     }
+    // 活着的识别进程只查一次：逐课次去读那个文件等于把同一份 ocr-state.json 读 60 遍
+    const liveOcr = runningOcr()
     try {
       const store = openLedger(path.resolve(scratchRoot, 'ledger.sqlite'))
       try {
@@ -613,6 +731,19 @@ export function createAdminHandler({
           const materials = task.course_name && task.title
             ? listMaterials({ root: materialsRoot, course: task.course_name, lesson: task.title, replayKey: task.replay_key })
             : []
+          const ocrJob = liveOcr.find(item => item.course === task.course_name && item.lesson === (task.title || '')) || null
+          const materialList = materials.map(item => ({
+            name: item.name,
+            scope: item.scope,
+            slideCount: item.slideCount,
+            // 图片与待识别数量要露出来：详情面板据此说明"图片版课件还有几张图没识别"
+            imageCount: item.imageCount || 0,
+            ocrPending: item.ocrPending || 0,
+            ocrEngine: item.ocr?.engine || '',
+            addedAt: item.addedAt,
+            bytes: item.bytes || 0,
+            kind: String(item.name || '').slice(String(item.name || '').lastIndexOf('.') + 1).toLowerCase()
+          }))
           return {
             replayKey: task.replay_key,
             courseName: task.course_name,
@@ -631,19 +762,9 @@ export function createAdminHandler({
             },
             hasTranscript: Boolean(artifacts.transcriptPath && fs.existsSync(artifacts.transcriptPath)),
             // 后台正在识别图片文字：界面据此显示进度，而不是让人以为要点按钮
-            ocrRunning: runningOcr().some(item => item.course === task.course_name && item.lesson === task.title),
-            materials: materials.map(item => ({
-              name: item.name,
-              scope: item.scope,
-              slideCount: item.slideCount,
-              // 图片与待识别数量要露出来：详情面板据此说明"图片版课件还有几张图没识别"
-              imageCount: item.imageCount || 0,
-              ocrPending: item.ocrPending || 0,
-              ocrEngine: item.ocr?.engine || '',
-              addedAt: item.addedAt,
-              bytes: item.bytes || 0,
-              kind: String(item.name || '').slice(String(item.name || '').lastIndexOf('.') + 1).toLowerCase()
-            })),
+            ocrRunning: Boolean(ocrJob),
+            ocr: ocrJob ? describeOcrProgress(ocrJob, materialList) : null,
+            materials: materialList,
             lesson,
             cost: lessonCostOf(task, lesson, pricing)
           }
@@ -815,6 +936,23 @@ export function createAdminHandler({
       return true
     }
 
+    /**
+     * 放弃一次分片上传。
+     *
+     * 取消上传时客户端不再发后续分片，已经落盘的几片就留在 tmp 里等清理——与其等
+     * 下一次 prune，不如让取消这个动作把它收干净（用户点了取消，就该什么都没留下）。
+     */
+    if (pathname === `${ADMIN_PREFIX}materials/chunk` && req.method === 'DELETE') {
+      const uploadId = String(url.searchParams.get('uploadId') || '')
+      if (!/^[A-Za-z0-9_-]{6,64}$/.test(uploadId)) {
+        sendJson(res, 400, { ok: false, error: 'bad_upload_id' })
+        return true
+      }
+      fs.rmSync(path.join(scratchRoot, 'tmp', 'uploads', uploadId), { recursive: true, force: true })
+      sendJson(res, 200, { ok: true, canceled: true, uploadId })
+      return true
+    }
+
     if (pathname === `${ADMIN_PREFIX}materials/commit` && req.method === 'POST') {
       let payload = {}
       try {
@@ -896,6 +1034,25 @@ export function createAdminHandler({
       } finally {
         fs.rmSync(tempPath, { force: true })
         fs.rmSync(dir, { recursive: true, force: true })
+      }
+      return true
+    }
+
+    /** 删除一份已归档的课件：原件、解析结果、meta.json 里的那一条一起清。 */
+    if (pathname === `${ADMIN_PREFIX}materials` && req.method === 'DELETE') {
+      const course = String(url.searchParams.get('course') || '').trim()
+      const lesson = String(url.searchParams.get('lesson') || '').trim()
+      const scope = String(url.searchParams.get('scope') || 'lesson').trim()
+      const name = String(url.searchParams.get('name') || '').trim()
+      if (!course || !name) {
+        sendJson(res, 400, { ok: false, error: 'missing_target', message: '要说清删哪门课的哪份课件' })
+        return true
+      }
+      try {
+        const result = removeMaterial({ root: materialsRoot, course, lesson, scope, name })
+        sendJson(res, 200, { ok: true, ...result })
+      } catch (error) {
+        sendJson(res, 404, { ok: false, error: 'material_not_found', message: error instanceof Error ? error.message : String(error) })
       }
       return true
     }
@@ -1003,7 +1160,10 @@ export function createAdminHandler({
       const course = String(url.searchParams.get('course') || '').trim()
       const lesson = String(url.searchParams.get('lesson') || '').trim()
       const name = String(url.searchParams.get('name') || '').trim()
-      const limit = Math.min(24, Math.max(1, Number(url.searchParams.get('pages') || 6)))
+      // 一次给一屏（默认 8 页），要看全就带 offset 继续拿：一份 80 页的课件
+      // 一次全塞进响应既慢又没人真的一口气读完，但"只能看 8 页"更糟
+      const limit = Math.min(200, Math.max(1, Number(url.searchParams.get('pages') || 8)))
+      const offset = Math.max(0, Number(url.searchParams.get('offset') || 0))
       if (!course) {
         sendJson(res, 400, { ok: false, error: 'missing_course' })
         return true
@@ -1015,14 +1175,17 @@ export function createAdminHandler({
           sendJson(res, 404, { ok: false, error: 'no_material' })
           return true
         }
+        const slides = deck.slides || []
         sendJson(res, 200, {
           ok: true,
           name: deck.name,
           scope: deck.scope,
-          slideCount: deck.slideCount || (deck.slides || []).length,
+          slideCount: deck.slideCount || slides.length,
           addedAt: deck.addedAt || null,
           bytes: deck.bytes || 0,
-          pages: (deck.slides || []).slice(0, limit).map(slide => ({ slideNumber: slide.slideNumber, text: String(slide.text || '').slice(0, 2000) }))
+          offset,
+          hasMore: offset + limit < slides.length,
+          pages: slides.slice(offset, offset + limit).map(slide => ({ slideNumber: slide.slideNumber, text: String(slide.text || '').slice(0, 2000) }))
         })
       } catch (error) {
         sendJson(res, 500, { ok: false, error: 'material_unreadable', message: error instanceof Error ? error.message : String(error) })

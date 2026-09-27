@@ -12,6 +12,7 @@ import {
   parseStatute,
   readSiteIndex,
   renderIndexPage,
+  renderKnowledgeMapPage,
   renderFeed,
   renderNotePage,
   renderSearchPage,
@@ -103,11 +104,12 @@ test('the 3.5MB diagram library is only fetched after the reader opens the fold'
 })
 
 test('the note page ships reading controls that work without an account', () => {
-  // 字号、深浅、位置记忆都只依赖浏览器本地存储——个人笔记站不该为这三件小事引入登录
+  // 字号、深浅、位置记忆都只依赖浏览器本地存储——个人笔记站不该为这三件小事引入登录。
+  // 这三个开关现在只有顶栏工具栏这一份（顺手滑到左栏底部还有一份是重复品，已去掉）。
   const html = renderNotePage(record({ markdown: NOTE }))
-  assert.match(html, /data-read="font-up"/)
-  assert.match(html, /data-read="font-down"/)
-  assert.match(html, /data-read="theme"/)
+  assert.match(html, /id="fontRange"/)
+  assert.match(html, /data-tool="theme"/)
+  assert.ok(!html.includes('data-read="font-up"'), '工具不该在页面上出现两份')
   assert.match(html, /id="resume"/, '位置记忆的入口要存在（有没有历史由脚本决定）')
   assert.match(html, /course\.readPos:/, '位置按页面路径分别记录')
   assert.match(html, /--font-scale/, '字号要真的驱动正文尺寸，而不是只改一个没人用的变量')
@@ -134,7 +136,11 @@ test('the rail toc scrolls itself so the current section stays visible', () => {
   assert.match(html, /function followActive/, '要有一个把目录滚到当前条目的函数')
   assert.match(html, /rail\.scrollTo\(/, '滚的是目录栏本身，不是整页')
   assert.match(html, /rail\.scrollHeight <= rail\.clientHeight \+ 8/, '目录没超出可视区时不要乱滚')
-  assert.match(html, /setActive\(current\.id\)[\s\S]{0,200}followActive|followActive\(next\[0\]\)/, '高亮与滚动要一起发生')
+  assert.match(html, /function setActive \(id\)[\s\S]{0,900}followActive\(visible/, '高亮与滚动要一起发生')
+  // 宽屏/窄屏各有一份目录，藏在 display:none 里的那份量出来是 0 尺寸：
+  // 拿它算位置会把目录滚回顶部（正文往下读、目录反着往上走）
+  assert.match(html, /getBoundingClientRect\(\)\.height > 0/, '要挑看得见的那份目录算位置')
+  assert.match(html, /followActive\(visible \|\| next\[0\]\)/)
 })
 
 test('the reading page carries a course rail, a toolbar and the reader script', () => {
@@ -161,15 +167,56 @@ test('the reading page carries a course rail, a toolbar and the reader script', 
   assert.match(html, /data-tool="copy"/)
   assert.match(html, /href="\/md\//, '导出 Markdown 的链接')
   assert.ok(!/[\u{1F300}-\u{1FAFF}]/u.test(html), '工具栏不许用 emoji')
-  // 划词批注：下划线 / 高亮 / 复制，快捷键 Cmd-U 与 Cmd-H（加粗不做）
+  // 划词之后浮出像 Word 的小工具条：加粗 / 下划线 / 高亮 / 复制，四种都要有
   assert.match(html, /id="selbar"/)
+  assert.match(html, /data-annot="bold"/)
   assert.match(html, /data-annot="underline"/)
   assert.match(html, /data-annot="mark"/)
-  assert.match(html, /key === 'u'/)
-  assert.match(html, /key === 'h'/)
+  assert.match(html, /data-annot="copy"/)
+  assert.match(html, /annot-bold \{ font-weight: 700/, '加粗要真的加粗')
+  // 快捷键 ⌘B / ⌘U / ⌘H：event.key 受输入法影响，用 event.code 兜底
+  assert.match(html, /hit\('b'\)/)
+  assert.match(html, /hit\('u'\)/)
+  assert.match(html, /hit\('h'\)/)
+  assert.match(html, /code === 'Key' \+ letter\.toUpperCase\(\)/)
   assert.match(html, /course\.annots:/, '批注按页面路径存本地')
   assert.match(html, /drawLine/, '下划线要有从左到右画出来的动画')
   assert.match(html, /anchor-flash/, '锚点高亮')
+})
+
+test('the reading page keeps its tools in the top bar instead of a floating panel', () => {
+  const html = renderNotePage(record({ markdown: NOTE }), { siteOrigin: '' })
+  // 工具直接排在顶栏这一行，正文右上角不再有浮层
+  assert.match(html, /<header class="topbar">[\s\S]{0,600}id="tools"/, '工具栏要在顶栏里')
+  assert.ok(!/\.tools \{ position: fixed/.test(html), '工具栏不再是悬浮窗')
+  // 顶栏那四个站点链接收进下拉，与图标并排
+  assert.match(html, /<details class="navmenu">/)
+  assert.match(html, /class="nav-pop"/)
+  // 首页/索引页照旧平铺导航，不必点开
+  const home = renderIndexPage([record()])
+  assert.match(home, /<nav><a href="\/">全部课次<\/a>/)
+  assert.ok(!home.includes('<details class="navmenu">'), '只有阅读页需要收起导航')
+})
+
+test('the reading page extras match what the reader asked for', () => {
+  const html = renderNotePage(record({ markdown: NOTE }), { siteOrigin: '' })
+  // 打印图标看出来是打印机，不再是引号
+  assert.match(html, /data-tool="print"[\s\S]{0,200}<rect x="3.5" y="9"/)
+  // 日/夜各一个图标，由主题决定显示哪个；调色盘里显示当前底色
+  assert.match(html, /class="icon-sun"/)
+  assert.match(html, /class="icon-moon"/)
+  assert.match(html, /:root\[data-theme="dark"\] \.tools \[data-tool="theme"\] \.icon-sun \{ display: none; \}/)
+  assert.match(html, /id="paperSwatch"/)
+  assert.match(html, /getPropertyValue\('--bg'\)/, '色块颜色取实际底色，不写死')
+  assert.match(html, /--bg: #c7edcc/, '豆沙绿就是 rgb(199, 237, 204)')
+  // 回到顶部是图标按钮，且让开右侧目录栏
+  assert.match(html, /id="totop"[\s\S]{0,120}<svg/)
+  assert.match(html, /\.totop \{ position: fixed; right: calc\(var\(--rail-w\) \+ 34px\)/)
+  // 专注模式不能把正文塞进 0 宽的第一列
+  assert.match(html, /\.reading\.focus \{ grid-template-columns: minmax\(0, 1fr\); gap: 0; \}/)
+  // 页脚整块去掉
+  assert.ok(!html.includes('footer class="site"'), '页脚不需要')
+  assert.ok(!html.includes('course.law-tech.dev</span>'))
 })
 
 test('the index groups by course and lists newest first', () => {
@@ -178,10 +225,13 @@ test('the index groups by course and lists newest first', () => {
     record({ lessonTitle: '第10-12节 共犯与罪数', publishedAt: '2026-09-25T00:00:00.000Z' }),
     record({ courseName: '国际法学', lessonTitle: '第3-4节', publishedAt: '2026-09-10T00:00:00.000Z' })
   ])
-  assert.match(html, /<h2>刑法分论 · 2 讲<\/h2>/, '课程分组标题带课次数')
-  assert.match(html, /<h2>国际法学 · 1 讲<\/h2>/)
+  assert.match(html, /<h2>刑法分论<\/h2>/, '一门课一组')
+  assert.match(html, /<h2>国际法学<\/h2>/)
   assert.ok(html.indexOf('第10-12节 共犯与罪数') < html.indexOf('第1-2节'), '同一课程内新的在前')
-  assert.match(html, /共 3 篇/)
+  // 左侧课程筛选：和索引页同一套（点一下只看这门课）
+  assert.match(html, /id="course-rail"/)
+  assert.match(html, /data-course="刑法分论" aria-pressed="false">刑法分论<span class="filter-count">2<\/span>/)
+  assert.match(html, /course\.homeFilter/, '选择记在本地')
 
   const empty = renderIndexPage([])
   assert.match(empty, /还没有已发布的笔记/)
@@ -201,6 +251,7 @@ test('writeSite lays out the whole site and can be regenerated from scratch', ()
     'concepts/index.html',
     'statutes/index.html',
     'cases/index.html',
+    'map/index.html',
     'search/index.html',
     'feed.xml'
   ].sort())
@@ -303,7 +354,58 @@ test('rebuilding from the publish library refreshes derived fields instead of re
   const notePage = fs.readFileSync(path.join(dir2, 'notes/刑法分论/第10-12节-共犯与罪数.html'), 'utf8')
   assert.match(notePage, /href="#一-共犯的成立条件"/, '目录要按正文重算出来')
   const concepts = fs.readFileSync(path.join(dir2, 'concepts/index.html'), 'utf8')
-  assert.match(concepts, /href="\/notes\/刑法分论\/第10-12节-共犯与罪数\.html#一-共犯的成立条件"/, '索引锚点也要重算')
+  assert.match(concepts, /#一-共犯的成立条件"/, '索引锚点也要重算')
+})
+
+test('the knowledge map groups lessons and their shared concepts', () => {
+  const build = (lesson, terms) => record({
+    lessonTitle: lesson,
+    markdown: [
+      '# ' + lesson,
+      '',
+      '## 一、本节',
+      '',
+      '正文。',
+      '',
+      '<details><summary>元数据</summary>',
+      '<pre><code>',
+      ...terms.map(term => 'META: CONCEPT: ' + term),
+      '</code></pre>',
+      '</details>'
+    ].join('\n')
+  })
+  const html = renderKnowledgeMapPage({
+    notes: [
+      build('第1-2节 数据评价', ['抽样框', '变量测量']),
+      build('第3节 抽样', ['抽样框', '简单随机抽样'])
+    ]
+  })
+  // 数据以 JSON 内嵌，画图时才由脚本算"哪些概念跨了课次"
+  const payload = JSON.parse(html.match(/<script id="map-data" type="application\/json">([\s\S]*?)<\/script>/)[1])
+  assert.equal(payload.courses.length, 1)
+  assert.deepEqual(payload.courses[0].lessons.map(lesson => lesson.lessonTitle), ['第1-2节 数据评价', '第3节 抽样'])
+  assert.deepEqual(payload.courses[0].lessons[0].terms, ['抽样框', '变量测量'])
+  // 绘图库按需加载：进页面不下载 3.5MB
+  assert.match(html, /mermaid\.min\.js\?v=/, '绘图库按需加载，且自托管')
+  assert.match(html, /type="module"/)
+  assert.match(html, /if \(!source\) \{ explain\(\); return \}/, '没有跨课次概念时要给说明，而不是空白')
+  assert.match(html, /id="map-rail"/)
+})
+
+test('the home page and the index pages share one course filter', () => {
+  const html = renderIndexPage([record(), record({ courseName: '国际法学', lessonTitle: '第3-4节' })])
+  assert.match(html, /id="course-rail"/)
+  assert.match(html, /class="filter-rail"/)
+  assert.match(html, /bands\[j\]\.hidden/, '首页过滤的是整组课程')
+  const concepts = renderTermIndexPage({
+    title: '概念索引',
+    kind: 'concepts',
+    notes: [record({
+      markdown: [NOTE, '', '<details><summary>元数据</summary>', '<pre><code>', 'META: CONCEPT: 共同故意', '</code></pre>', '</details>'].join('\n')
+    })]
+  })
+  assert.match(concepts, /id="filter-rail"/)
+  assert.match(concepts, /querySelectorAll\('\.term-course'\)/, '按课程区块显隐')
 })
 
 test('a corrupt index is reported rather than silently treated as empty', () => {
@@ -367,9 +469,12 @@ test('index entries jump to the section where the term actually appears', () => 
   assert.equal(withEarlyFold.anchors.concepts['共同故意'], '一-共犯的成立条件', '早期折叠块不能截断正文')
 
   const html = renderTermIndexPage({ title: '概念索引', kind: 'concepts', notes: [note] })
-  assert.match(html, /href="\/notes\/刑法分论\/第10-12节-共犯与罪数\.html#一-共犯的成立条件"/)
+  // 点进去要带 ?mark=：笔记页会把该术语在正文里标出来，并滚到那一节
+  assert.match(html, /href="\/notes\/刑法分论\/第10-12节-共犯与罪数\.html\?mark=%E5%85%B1%E5%90%8C%E6%95%85%E6%84%8F#一-共犯的成立条件"/)
   assert.match(html, /id="filter-rail"/, '左侧按课程过滤')
-  assert.match(html, /data-course="刑法分论"/)
+  assert.match(html, /class="term-course" data-course="刑法分论"/, '按课程切分')
+  assert.match(html, /<div class="term-group">/, '课程内再按课次切分')
+  assert.match(html, /class="chip/, '每条术语只是一个可点的词')
   assert.ok(!html.includes('<details'), '索引页不做折叠，一屏看到底')
   assert.ok(!/篇笔记|已索引|发布过/.test(html), '页面上不写解释站点自身的话')
 })
@@ -379,10 +484,43 @@ test('the home page lays every course out as a horizontal strip of lessons', () 
     record({ lessonTitle: '第1-2节', publishedAt: '2026-09-01T00:00:00.000Z' }),
     record({ lessonTitle: '第10-12节 共犯与罪数', publishedAt: '2026-09-25T00:00:00.000Z' })
   ])
-  assert.match(html, /<section class="band">/)
-  assert.match(html, /<div class="strip">/)
-  assert.match(html, /\.strip \{ display: grid; grid-auto-flow: column;/, '课次横向排开，而不是一列到底')
-  assert.ok(!html.includes('course-group'), '纵向一列到底的旧版式已经换掉')
+  assert.match(html, /<section class="band" data-course="刑法分论">/)
+  assert.match(html, /<a class="lesson-row" href="notes\/刑法分论\/第10-12节-共犯与罪数\.html">/)
+  assert.match(html, /<span class="lesson-title">/)
+  assert.ok(!html.includes('class="card"'), '大卡片换成了一行一节')
+  assert.ok(!html.includes('个概念'), '卡片上那串"几个概念几条法条"不再显示')
+  assert.ok(!html.includes('共 3 篇'), '顶部那行统计不需要')
+})
+
+test('every page inline script parses — a syntax error means a blank page', () => {
+  const pages = {
+    笔记页: renderNotePage(record({ markdown: NOTE }), { siteOrigin: '', courseLessons: [] }),
+    首页: renderIndexPage([record()]),
+    概念索引: renderTermIndexPage({
+      title: '概念索引',
+      kind: 'concepts',
+      notes: [record({
+        markdown: [NOTE, '', '<details><summary>元数据</summary>', '<pre><code>', 'META: CONCEPT: 共同故意', '</code></pre>', '</details>'].join('\n')
+      })]
+    }),
+    知识地图: renderKnowledgeMapPage({ notes: [record({ markdown: NOTE })] })
+  }
+  for (const [name, html] of Object.entries(pages)) {
+    const scripts = []
+    let at = 0
+    for (;;) {
+      const start = html.indexOf('<script', at)
+      if (start < 0) break
+      const open = html.indexOf('>', start) + 1
+      const end = html.indexOf('</script>', open)
+      scripts.push(html.slice(open, end))
+      at = end + 9
+    }
+    assert.ok(scripts.length >= 1, name + ' 应该至少有一段内联脚本')
+    scripts.forEach((script, index) => {
+      assert.doesNotThrow(() => new Function(script), name + ' 的第 ' + (index + 1) + ' 段脚本语法错误（整页会白屏）')
+    })
+  }
 })
 
 test('the pages carry no broken inline script', () => {

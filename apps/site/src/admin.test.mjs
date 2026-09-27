@@ -680,12 +680,38 @@ test('non-admin paths are left to the static handler', async () => {
  *   3. 每个动作最终拼出的 argv，其命令名与旗标必须在 CLI 的用法文本里真的存在
  *      （否则界面会照常弹"已开始"，而命令其实跑不起来）。
  */
+/** 把页面里每一段内联脚本切出来：整页白屏这种故障只有解析一遍才挡得住。 */
+function inlineScriptsOf(html) {
+  const scripts = []
+  let at = 0
+  for (;;) {
+    const start = html.indexOf('<script', at)
+    if (start < 0) break
+    const open = html.indexOf('>', start) + 1
+    const end = html.indexOf('</script>', open)
+    if (end < 0) break
+    scripts.push(html.slice(open, end))
+    at = end + 9
+  }
+  return scripts
+}
+
 test('the console inline script actually parses', async () => {
   // 这一条是被真事逼出来的：模板字符串里一个没转义的换行会变成字符串里的真实换行，
   // 整段脚本语法错误——页面白屏，而单元测试全绿（因为测试只检查字符串，不解析它）。
-  const script = ADMIN_HTML.match(/<script>([\s\S]*)<\/script>/)
-  assert.ok(script, '页面里要有内联脚本')
-  assert.doesNotThrow(() => new Function(script[1]), '内联脚本必须能被解析')
+  // 与 site.test.mjs 同一套做法：逐段切出来解析，将来再加一段也照样挡得住。
+  const scripts = inlineScriptsOf(ADMIN_HTML)
+  assert.ok(scripts.length >= 1, '页面里要有内联脚本')
+  scripts.forEach((script, index) => {
+    assert.doesNotThrow(() => new Function(script), '管理台第 ' + (index + 1) + ' 段内联脚本语法错误（整页会白屏）')
+  })
+
+  // 图标是拼字符串拼出来的：写错名字不会报错，只会画出一个空方块，
+  // 所以把"用到的图标"和"定义过的图标"对一遍
+  const defined = new Set([...ADMIN_HTML.matchAll(/^\s{4}([a-z]+): '<(?:path|rect|circle)/gm)].map(match => match[1]))
+  const used = new Set([...ADMIN_HTML.matchAll(/icon\('([a-z]+)'\)/g)].map(match => match[1]))
+  assert.ok(defined.size >= 8, '图标表里应当有足够多的图标')
+  assert.deepEqual([...used].filter(name => !defined.has(name)), [], '这些图标没有定义，画出来是空的')
 })
 
 test('every button in the console is wired to a handler, and no handler is orphaned', async () => {
@@ -784,5 +810,181 @@ test('the whitelist covers exactly the actions the console can send', async () =
   for (const action of [...sent, ...passthrough]) {
     assert.ok(ALLOWED_ACTIONS.has(action), '界面会发 ' + action + '，但它不在服务端白名单里，点了必定 400')
   }
+})
+
+/** 课件归档的夹具：手写 meta.json 与解析结果，免得为了两页文字去依赖 python。 */
+function writeDeck(scratchRoot, { course = '刑法分论', lesson = '第10-12节', name, slideCount = 1, images = 0 }) {
+  const dir = path.join(scratchRoot, 'materials', course, lesson)
+  fs.mkdirSync(path.join(dir, 'slides'), { recursive: true })
+  const parsedPath = path.join(dir, 'slides', `${name}.json`)
+  fs.writeFileSync(path.join(dir, name), 'fake')
+  fs.writeFileSync(parsedPath, JSON.stringify({
+    slideCount,
+    slides: Array.from({ length: slideCount }, (_, index) => ({ slideNumber: index + 1, text: `第 ${index + 1} 页` })),
+    images: Array.from({ length: images }, () => ({ path: 'ppt/media/image1.png', needsOcr: true })),
+    ocr: { pending: images }
+  }, null, 2))
+  const metaPath = path.join(dir, 'meta.json')
+  const meta = fs.existsSync(metaPath) ? JSON.parse(fs.readFileSync(metaPath, 'utf8')) : { materials: [] }
+  meta.materials = [...(meta.materials || []).filter(item => item.name !== name), {
+    name,
+    scope: 'lesson',
+    course,
+    lesson,
+    replayKey: 'replay-1',
+    appliesTo: [],
+    bytes: 4,
+    checksum: 'fixture',
+    slideCount,
+    imageCount: images,
+    ocrPending: images,
+    ocr: { pending: images },
+    parsedPath,
+    addedAt: '2026-09-25T10:00:00.000Z'
+  }]
+  fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2))
+  return { dir, parsedPath, metaPath }
+}
+
+test('a courseware file can be deleted from the console and leaves nothing behind', async () => {
+  const { handler, scratchRoot } = fixture()
+  const deck = Buffer.from(JSON.stringify({ slides: [{ slideNumber: 1, text: '第一页' }] }))
+  const params = new URLSearchParams({ course: '刑法分论', lesson: '第10-12节', scope: 'lesson', name: '待删课件.json' })
+  const uploaded = await call(handler, { method: 'PUT', url: `/api/admin/materials?${params.toString()}`, body: deck })
+  assert.equal(uploaded.body.ok, true)
+  const dir = path.join(scratchRoot, 'materials', '刑法分论', '第10-12节')
+  assert.ok(fs.existsSync(path.join(dir, '待删课件.json')))
+  assert.ok(fs.existsSync(path.join(dir, 'slides', '待删课件.json.json')), '解析结果也要在')
+
+  const removed = await call(handler, { method: 'DELETE', url: `/api/admin/materials?${params.toString()}` })
+  assert.equal(removed.res.state.status, 200)
+  assert.equal(removed.body.ok, true)
+  assert.equal(removed.body.remaining, 0)
+  assert.ok(!fs.existsSync(path.join(dir, '待删课件.json')), '原件要删掉')
+  assert.ok(!fs.existsSync(path.join(dir, 'slides', '待删课件.json.json')), '解析结果要删掉')
+  assert.ok(!fs.existsSync(path.join(dir, 'meta.json')), '一份课件都不剩时不该留着 meta.json')
+  assert.ok(!fs.existsSync(dir), '课次目录空了就一并收掉，不留空壳')
+  assert.ok(!fs.existsSync(path.join(scratchRoot, 'materials', '刑法分论')), '课程目录空了也一样')
+
+  const status = await call(handler, { url: '/api/admin/status' })
+  assert.deepEqual(status.body.ledger.tasks[0].materials, [], '列表里不能剩一条指向不存在文件的记录')
+
+  // 不在归档里的名字：明确拒绝，而不是"看起来删了其实什么也没发生"
+  const missing = await call(handler, { method: 'DELETE', url: `/api/admin/materials?${params.toString()}` })
+  assert.equal(missing.res.state.status, 404)
+  assert.equal(missing.body.error, 'material_not_found')
+})
+
+test('deleting one deck keeps the others listed', async () => {
+  const { handler, scratchRoot } = fixture()
+  writeDeck(scratchRoot, { name: '留下的课件.pptx', slideCount: 3 })
+  const { metaPath } = writeDeck(scratchRoot, { name: '要删的课件.pptx', slideCount: 2 })
+
+  const params = new URLSearchParams({ course: '刑法分论', lesson: '第10-12节', scope: 'lesson', name: '要删的课件.pptx' })
+  const removed = await call(handler, { method: 'DELETE', url: `/api/admin/materials?${params.toString()}` })
+  assert.equal(removed.body.remaining, 1)
+  const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'))
+  assert.deepEqual(meta.materials.map(item => item.name), ['留下的课件.pptx'])
+  assert.ok(!fs.existsSync(path.join(scratchRoot, 'materials', '刑法分论', '第10-12节', '要删的课件.pptx')))
+
+  const status = await call(handler, { url: '/api/admin/status' })
+  assert.deepEqual(status.body.ledger.tasks[0].materials.map(item => item.name), ['留下的课件.pptx'])
+})
+
+test('an abandoned chunked upload is cleaned up when the user cancels', async () => {
+  const { handler, scratchRoot } = fixture()
+  const chunked = await call(handler, {
+    method: 'PUT', url: '/api/admin/materials/chunk?uploadId=cancel123456&index=0', body: Buffer.from('前半段')
+  })
+  assert.equal(chunked.body.ok, true)
+  const dir = path.join(scratchRoot, 'tmp', 'uploads', 'cancel123456')
+  assert.ok(fs.existsSync(dir))
+
+  const canceled = await call(handler, { method: 'DELETE', url: '/api/admin/materials/chunk?uploadId=cancel123456' })
+  assert.equal(canceled.body.canceled, true)
+  assert.ok(!fs.existsSync(dir), '取消之后分片不该留在磁盘上')
+
+  const bad = await call(handler, { method: 'DELETE', url: '/api/admin/materials/chunk?uploadId=../etc' })
+  assert.equal(bad.res.state.status, 400)
+})
+
+test('the console shows how far background OCR has got', async () => {
+  const { handler, scratchRoot } = fixture()
+  writeDeck(scratchRoot, { name: '图片版课件.pptx', slideCount: 1, images: 2 })
+
+  // 识别进程写的进度快照 + 排队时定下的分母
+  const progressPath = path.join(scratchRoot, 'ocr', 'job.progress.json')
+  fs.mkdirSync(path.dirname(progressPath), { recursive: true })
+  fs.writeFileSync(progressPath, JSON.stringify({
+    records: [{ name: '图片版课件.pptx', status: 'running', images: 4, pending: 2 }]
+  }))
+  const job = {
+    course: '刑法分论', lesson: '第10-12节', pid: process.pid,
+    startedAt: '2026-09-25T10:02:00.000Z',
+    logPath: path.join(scratchRoot, 'ocr', 'job.log'),
+    progressPath,
+    plan: { materials: 1, images: 4 }
+  }
+  const ocrStatePath = path.join(scratchRoot, 'ocr-state.json')
+  fs.writeFileSync(ocrStatePath, JSON.stringify([job]))
+
+  const running = await call(handler, { url: '/api/admin/status' })
+  const task = running.body.ledger.tasks[0]
+  assert.equal(task.ocrRunning, true)
+  assert.deepEqual(task.ocr, {
+    running: true, total: 4, done: 2, percent: 50,
+    current: '图片版课件.pptx', currentImages: 4, materials: 1, startedAt: job.startedAt
+  })
+
+  // 进程没了就不该再报"正在识别"：死条目顺手清掉，免得进度条永远停在那
+  fs.writeFileSync(ocrStatePath, JSON.stringify([{ ...job, pid: 1_073_741_824 }]))
+  const done = await call(handler, { url: '/api/admin/status' })
+  assert.equal(done.body.ledger.tasks[0].ocrRunning, false)
+  assert.equal(done.body.ledger.tasks[0].ocr, null)
+  assert.deepEqual(JSON.parse(fs.readFileSync(ocrStatePath, 'utf8')), [], '死进程的条目要清掉')
+})
+
+test('a long deck can be read past the first screen', async () => {
+  const { handler, scratchRoot } = fixture()
+  writeDeck(scratchRoot, { name: '长课件.pptx', slideCount: 12 })
+  const params = new URLSearchParams({ course: '刑法分论', lesson: '第10-12节', name: '长课件.pptx', pages: '8' })
+
+  const first = await call(handler, { url: `/api/admin/material?${params.toString()}` })
+  assert.equal(first.body.pages.length, 8)
+  assert.equal(first.body.slideCount, 12)
+  assert.equal(first.body.hasMore, true, '还有 4 页没给：界面要能继续加载')
+
+  const more = await call(handler, { url: `/api/admin/material?${params.toString()}&offset=8` })
+  assert.equal(more.body.pages.length, 4)
+  assert.equal(more.body.pages[0].slideNumber, 9)
+  assert.equal(more.body.hasMore, false)
+})
+
+test('the courseware panel takes files by drag, paste, cancel and delete', async () => {
+  assert.match(ADMIN_HTML, /class="dropzone"/, '课件区要有虚线拖放区')
+  assert.match(ADMIN_HTML, /data-drop="/, '拖放区要知道自己属于哪节课')
+  assert.match(ADMIN_HTML, /addEventListener\('paste'/, '页面级粘贴要认剪贴板里的文件')
+  assert.match(ADMIN_HTML, /act === 'cancel-upload'/, '上传要能取消')
+  assert.match(ADMIN_HTML, /act === 'delete-material'/, '已上传的课件要能删')
+  assert.match(ADMIN_HTML, /method: 'DELETE'/, '删除走 DELETE（同样过 admin 令牌鉴权）')
+  assert.match(ADMIN_HTML, /data-act="load-more"/, '预览要能继续加载')
+  assert.match(ADMIN_HTML, /当前显示到第/, '要说清当前显示到第几页')
+  assert.match(ADMIN_HTML, /已识别 ' \+ Number\(ocr\.done/, '识别进度要有 done/total')
+  assert.ok(!/正在后台识别图片文字/.test(ADMIN_HTML), '识别状态换成进度条，不再只是一句话')
+
+  // 卡在哪、为什么：阶段说人话、错误给原文、退避时间写出来
+  assert.match(ADMIN_HTML, /discovered: '刚发现未下载'/)
+  assert.match(ADMIN_HTML, /downloaded: '已下载待转写'/)
+  assert.match(ADMIN_HTML, /transcript_ready: '已转写待写笔记'/)
+  assert.match(ADMIN_HTML, /needs_attention: '连续失败已停'/)
+  assert.match(ADMIN_HTML, /class="errbox"><pre>' \+ esc\(String\(task\.lastError\)\)/, 'last_error 要给原文，不截断')
+  assert.match(ADMIN_HTML, /下次重试 /)
+  assert.match(ADMIN_HTML, /立即跑这一节/); assert.match(ADMIN_HTML, /从当前阶段继续跑到发布/)
+  assert.match(ADMIN_HTML, /清除失败、重新排队/); assert.match(ADMIN_HTML, /清掉失败状态与退避时间/)
+
+  // 设置改成与课程区一致的分栏：没有折叠块，分类是 button 且带 aria-current
+  assert.match(ADMIN_HTML, /data-act="pick-pane"/)
+  assert.match(ADMIN_HTML, /aria-current/)
+  assert.ok(!/settings:/.test(ADMIN_HTML), '设置区的折叠键（settings:*）已经删干净，不再有向下展开')
 })
 

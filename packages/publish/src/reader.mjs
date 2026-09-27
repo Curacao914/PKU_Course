@@ -21,12 +21,25 @@ export const READER_ICONS = {
   focus: '<path d="M4 9V5h4M20 9V5h-4M4 15v4h4M20 15v4h-4"/>',
   underline: '<path d="M7 4v6a5 5 0 0 0 10 0V4"/><path d="M6 20h12"/>',
   mark: '<path d="M4 20h16"/><path d="M6 16l3.5-11 4 8 4.5-5.5"/>',
-  quote: '<path d="M7 7h4v6H7zM13 7h4v6h-4z"/><path d="M7 13c0 3-1 4-3 5M13 13c0 3-1 4-3 5"/>'
+  // 加粗与下划线照 Word 的样子画：B 用两段实心笔画，U 用一根底线，扫一眼就认得出
+  bold: '<path d="M7 4h6.2a3.9 3.9 0 0 1 0 7.8H7z" stroke-width="2"/><path d="M7 11.8h7.1a4.1 4.1 0 0 1 0 8.2H7z" stroke-width="2"/>',
+  // 打印机：看得出是打印——上半是机身，下半吐出一张纸
+  printer: '<path d="M7 9V3.8h10V9"/><rect x="3.5" y="9" width="17" height="7.2" rx="1.6"/><path d="M7 14.2h10V20H7z"/>',
+  arrowUp: '<path d="M12 19V6"/><path d="M6.5 11.5L12 6l5.5 5.5"/>',
+  menu: '<path d="M4 7h16M4 12h16M4 17h16"/>'
 }
 
 export function svgIcon(name) {
   return `<svg viewBox="0 0 24 24" aria-hidden="true">${READER_ICONS[name] || ''}</svg>`
 }
+
+// 划词工具条的四个图标：**必须定义在 READER_SCRIPT 之前**——脚本是模板字符串，
+// ${...} 在模块加载时就求值，写在后面会直接 TDZ 报错（原来的写法干脆没插值，
+// 于是那排按钮在浏览器里根本画不出来）。
+const ICON_BOLD = `<svg viewBox="0 0 24 24" aria-hidden="true">${READER_ICONS.bold}</svg>`
+const ICON_UNDERLINE = `<svg viewBox="0 0 24 24" aria-hidden="true">${READER_ICONS.underline}</svg>`
+const ICON_MARK = `<svg viewBox="0 0 24 24" aria-hidden="true">${READER_ICONS.mark}</svg>`
+const ICON_COPY = `<svg viewBox="0 0 24 24" aria-hidden="true">${READER_ICONS.copy}</svg>`
 
 /**
  * 右上角工具栏。
@@ -40,12 +53,16 @@ export function toolBar(record = {}) {
   return [
     '<div class="tools" id="tools">',
     `<a href="/md/${encodeURIComponent(fileName)}" download title="下载 Markdown" aria-label="下载 Markdown">${svgIcon('export')}</a>`,
-    `<button type="button" data-tool="print" title="打印 / 存为 PDF" aria-label="打印或存为 PDF">${svgIcon('quote')}</button>`,
+    `<button type="button" data-tool="print" title="打印 / 存为 PDF" aria-label="打印或存为 PDF">${svgIcon('printer')}</button>`,
     `<button type="button" data-tool="copy" title="复制 Markdown" aria-label="复制 Markdown">${svgIcon('copy')}</button>`,
     `<button type="button" data-tool="focus" title="专注模式" aria-label="专注模式">${svgIcon('focus')}</button>`,
-    `<button type="button" data-tool="theme" id="toolTheme" title="深浅色" aria-label="深浅色">${svgIcon('moon')}${svgIcon('sun')}</button>`,
+    // 日/夜各一个图标，用当前主题决定显示哪个（CSS 切，不在 JS 里换 innerHTML）
+    `<button type="button" data-tool="theme" id="toolTheme" title="深浅色" aria-label="深浅色">` +
+      `<span class="icon-sun">${svgIcon('sun')}</span><span class="icon-moon">${svgIcon('moon')}</span></button>`,
     '<div class="tool-wrap">',
-    `<button type="button" data-tool="paper" title="背景色" aria-label="背景色">${svgIcon('palette')}</button>`,
+    // 调色盘按钮里直接显示当前底色：不用点开就知道现在是什么颜色
+    `<button type="button" data-tool="paper" title="背景色" aria-label="背景色">` +
+      `<span class="swatch" id="paperSwatch"></span>${svgIcon('palette')}</button>`,
     '<div class="pop" id="paperPop"><div class="dot-row">',
     '<button class="paper" type="button" data-paper="" style="background:#ffffff" title="纸白" aria-label="纸白"></button>',
     '<button class="paper" type="button" data-paper="green" style="background:#c7edcc" title="豆沙绿" aria-label="豆沙绿"></button>',
@@ -106,7 +123,16 @@ export const READER_SCRIPT = '<script>' + String.raw`
     document.querySelectorAll('[data-paper]').forEach(function (dot) {
       dot.setAttribute('aria-pressed', dot.getAttribute('data-paper') === (paper || '') ? 'true' : 'false')
     })
+    paintSwatch()
   }
+  /** 调色盘按钮里的圆点 = 当前实际底色。取算出来的值，免得色板和页面各说各话。 */
+  function paintSwatch () {
+    var swatch = document.getElementById('paperSwatch')
+    if (!swatch) return
+    var value = getComputedStyle(root).getPropertyValue('--bg').trim()
+    swatch.style.background = value || '#ffffff'
+  }
+  window.addEventListener('resize', function () { setTimeout(paintSwatch, 0) })
   function applyFont (scale) {
     var value = Math.min(1.4, Math.max(0.85, Number(scale) || 1))
     root.style.setProperty('--font-scale', String(value))
@@ -118,10 +144,16 @@ export const READER_SCRIPT = '<script>' + String.raw`
   applyTheme(store.get('course.theme', 'light') === 'dark')
   applyPaper(store.get('course.paper', ''))
   applyFont(store.get('course.fontScale', '1'))
+  paintSwatch()
 
   function closePops () {
     document.querySelectorAll('.tool-wrap.open').forEach(function (node) { node.classList.remove('open') })
   }
+  // 顶栏的站点导航是个 <details>：原生不会"点别处就收起"，点开之后会一直盖在
+  // 工具栏的小框上。这里手动收——点外面、按 Esc、或打开别的浮层时都收起。
+  var navMenu = document.querySelector('.navmenu')
+  function closeNav () { if (navMenu && navMenu.open) navMenu.open = false }
+  if (navMenu) navMenu.addEventListener('toggle', function () { if (navMenu.open) closePops() })
 
   if (tools) {
     tools.addEventListener('click', function (event) {
@@ -131,7 +163,7 @@ export const READER_SCRIPT = '<script>' + String.raw`
       if (!button) return
       var tool = button.getAttribute('data-tool')
       var wrap = button.parentElement
-      if (tool === 'theme') { applyTheme(root.getAttribute('data-theme') !== 'dark'); return }
+      if (tool === 'theme') { applyTheme(root.getAttribute('data-theme') !== 'dark'); paintSwatch(); return }
       if (tool === 'focus') {
         var on = reading.classList.toggle('focus')
         button.setAttribute('aria-pressed', on ? 'true' : 'false')
@@ -160,6 +192,7 @@ export const READER_SCRIPT = '<script>' + String.raw`
       if (tool === 'paper' || tool === 'font') {
         var open = wrap.classList.contains('open')
         closePops()
+        closeNav()
         if (!open) wrap.classList.add('open')
       }
     })
@@ -176,23 +209,50 @@ export const READER_SCRIPT = '<script>' + String.raw`
   }
   document.addEventListener('click', function (event) {
     if (!event.target.closest('#tools')) closePops()
+    if (!event.target.closest('.navmenu')) closeNav()
   }, true)
+  document.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape') { closeNav(); closePops() }
+  })
 
   // ── 锚点高亮：跳过去、闪一下、底色留着 ──
   var HASH_KEY = 'course.marks:' + location.pathname
   function flash (node) {
     if (!node) return
+    node.classList.remove('anchor-flash')
+    // 强制重排再加类：重复点同一条目录时动画要能重放，不然第二次看不出闪
+    void node.offsetWidth
     node.classList.add('anchor-flash')
-    setTimeout(function () { node.classList.remove('anchor-flash') }, 1800)
+    clearTimeout(node.__flashTimer)
+    node.__flashTimer = setTimeout(function () { node.classList.remove('anchor-flash') }, 2600)
   }
   function goHash (smooth) {
     var id = decodeURIComponent(location.hash.replace(/^#/, ''))
     if (!id) return
     var node = document.getElementById(id)
     if (!node) return
-    if (smooth) node.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    node.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto', block: 'start' })
     flash(node)
     highlightMarks(id)
+  }
+
+  /**
+   * 锚点所在的"这一节"。
+   *
+   * 标题上的锚点拿到的是 <h2> 本身，只在那几个字里找术语等于白找：范围要扩到
+   * 标题之后、下一个同级或更高级标题之前——这才是读者理解的"这一节"。
+   */
+  function sectionNodes (heading) {
+    var level = Number(String(heading.tagName || '').replace('H', '')) || 6
+    var nodes = [heading]
+    var node = heading.nextElementSibling
+    while (node) {
+      var tag = String(node.tagName || '')
+      if (/^H[1-6]$/.test(tag) && Number(tag.replace('H', '')) <= level) break
+      nodes.push(node)
+      node = node.nextElementSibling
+    }
+    return nodes
   }
 
   /** 概念高亮：从索引页跳进来时带着 ?mark=概念名，在正文里把命中的词标出来（不消失）。 */
@@ -203,17 +263,20 @@ export const READER_SCRIPT = '<script>' + String.raw`
       node.replaceWith(document.createTextNode(node.textContent))
     })
     if (!mark) return
-    var scope = id ? document.getElementById(id) : document.querySelector('article')
-    if (!scope) return
-    var walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT, null)
+    var anchor = id ? document.getElementById(id) : null
+    var roots = anchor ? sectionNodes(anchor) : [document.querySelector('article')]
     var targets = []
-    while (walker.nextNode()) {
-      var text = walker.currentNode.nodeValue || ''
-      if (text.indexOf(mark) >= 0 && walker.currentNode.parentElement &&
-          !['A', 'CODE', 'SCRIPT', 'STYLE'].includes(walker.currentNode.parentElement.tagName)) {
-        targets.push(walker.currentNode)
+    roots.forEach(function (root) {
+      if (!root || !root.nodeType) return
+      var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null)
+      while (walker.nextNode()) {
+        var text = walker.currentNode.nodeValue || ''
+        var parent = walker.currentNode.parentElement
+        if (text.indexOf(mark) >= 0 && parent && ['A', 'CODE', 'SCRIPT', 'STYLE'].indexOf(parent.tagName) < 0) {
+          targets.push(walker.currentNode)
+        }
       }
-    }
+    })
     targets.slice(0, 12).forEach(function (node) {
       var parts = node.nodeValue.split(mark)
       var fragment = document.createDocumentFragment()
@@ -240,7 +303,13 @@ export const READER_SCRIPT = '<script>' + String.raw`
     if (tocLink) setTimeout(function () { goHash(true) }, 0)
   })
   window.addEventListener('hashchange', function () { goHash(true) })
-  if (location.hash) setTimeout(function () { goHash(true) }, 250)
+  // 进来时定位要"钉住"：正文里有表格与图，字体与图落位后高度会变，
+  // 只跳一次常会停在错的地方——所以再补两次（load 之后、以及稍晚一点）
+  if (location.hash) {
+    setTimeout(function () { goHash(true) }, 120)
+    window.addEventListener('load', function () { setTimeout(function () { goHash(false) }, 60) })
+    setTimeout(function () { goHash(false) }, 900)
+  }
 
   // ── 划词批注：下划线 / 高亮 / 复制；存浏览器，下次进来还在 ──
   var ANNOT_KEY = 'course.annots:' + location.pathname
@@ -263,9 +332,11 @@ export const READER_SCRIPT = '<script>' + String.raw`
     }
   }
 
+  var KINDS = { underline: 'underline', mark: 'mark', bold: 'bold' }
+
   function wrapRange (range, kind, animate) {
     var span = document.createElement('span')
-    span.className = 'annot annot-' + (kind === 'mark' ? 'mark' : 'underline') + (animate ? ' animate' : '')
+    span.className = 'annot annot-' + (KINDS[kind] || 'underline') + (animate ? ' animate' : '')
     try { range.surroundContents(span) } catch (e) {
       // 跨元素的选择没法整段包起来：退化成"只标记首段"，总比丢掉强
       try { range.collapse(true); return null } catch (e2) { return null }
@@ -316,9 +387,10 @@ export const READER_SCRIPT = '<script>' + String.raw`
   function showSelbar (rect) {
     if (!selbar) return
     selbar.innerHTML = [
-      '<button type="button" data-annot="underline" title="下划线（⌘U）" aria-label="下划线">' + ICON_UNDERLINE + '</button>',
-      '<button type="button" data-annot="mark" title="高亮（⌘H）" aria-label="高亮">' + ICON_MARK + '</button>',
-      '<button type="button" data-annot="copy" title="复制" aria-label="复制">' + ICON_COPY + '</button>'
+      '<button type="button" data-annot="bold" title="加粗（⌘B）" aria-label="加粗">' + ${JSON.stringify(ICON_BOLD)} + '</button>',
+      '<button type="button" data-annot="underline" title="下划线（⌘U）" aria-label="下划线">' + ${JSON.stringify(ICON_UNDERLINE)} + '</button>',
+      '<button type="button" data-annot="mark" title="高亮（⌘H）" aria-label="高亮">' + ${JSON.stringify(ICON_MARK)} + '</button>',
+      '<button type="button" data-annot="copy" title="复制" aria-label="复制">' + ${JSON.stringify(ICON_COPY)} + '</button>'
     ].join('')
     selbar.classList.add('show')
     var top = rect.top + window.scrollY - selbar.offsetHeight - 8
@@ -358,13 +430,15 @@ export const READER_SCRIPT = '<script>' + String.raw`
   document.addEventListener('keydown', function (event) {
     var meta = event.metaKey || event.ctrlKey
     if (!meta) return
+    // 用 event.code 兜底：中文输入法下 event.key 可能不是 'b'（某些键盘布局/输入源尤其明显），
+    // 快捷键"有时灵有时不灵"多半就是这里
     var key = (event.key || '').toLowerCase()
-    if (key === 'u') { event.preventDefault(); applyAnnotation('underline') }
-    else if (key === 'h') { event.preventDefault(); applyAnnotation('mark') }
+    var code = String(event.code || '')
+    var hit = function (letter) { return key === letter || code === 'Key' + letter.toUpperCase() }
+    if (hit('b')) { event.preventDefault(); applyAnnotation('bold') }
+    else if (hit('u')) { event.preventDefault(); applyAnnotation('underline') }
+    else if (hit('h')) { event.preventDefault(); applyAnnotation('mark') }
   })
 })();
 </script>`
 
-const ICON_UNDERLINE = `<svg viewBox="0 0 24 24" aria-hidden="true">${READER_ICONS.underline}</svg>`
-const ICON_MARK = `<svg viewBox="0 0 24 24" aria-hidden="true">${READER_ICONS.mark}</svg>`
-const ICON_COPY = `<svg viewBox="0 0 24 24" aria-hidden="true">${READER_ICONS.copy}</svg>`
