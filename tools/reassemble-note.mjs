@@ -23,14 +23,16 @@ function parseArgs(argv) {
   let write = false
   let course = ''
   let teacher = ''
+  let allowMissingCourse = false
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index]
     if (token === '--write') write = true
     else if (token === '--course') course = argv[++index] || ''
     else if (token === '--teacher') teacher = argv[++index] || ''
+    else if (token === '--allow-missing-course') allowMissingCourse = true
     else files.push(token)
   }
-  return { files, write, course, teacher }
+  return { files, write, course, teacher, allowMissingCourse }
 }
 
 /** 统计成品的结构指纹：改排版前后一眼能看出差别。 */
@@ -56,9 +58,19 @@ function reassembleOne(file, options) {
   const spliceData = lesson.finalNote?.assembly?.spliceData
   if (!spliceData) throw new Error(`${file} 里没有接缝段数据（finalNote.assembly.spliceData），无法离线重拼`)
 
+  /**
+   * 课程名是成品前言的一部分（"> 课程：国际刑法学 · 转录 L1–L843"）。
+   * 状态文件里没有课程名又不传 --course 时，以前会静默拼出"课程： · "这种残缺前言，
+   * 而且一路发到站点上（真实发生过：七篇笔记的前言里课程名是空的）。
+   * 宁可在这里停住，也不产出半成品。
+   */
+  const courseName = options.course || lesson.courseName || lesson.courseSpec?.courseName || ''
+  if (!courseName && !options.allowMissingCourse) {
+    throw new Error('缺少课程名：请在状态文件里带上 courseName，或用 --course 指定（不希望中断时加 --allow-missing-course）')
+  }
   const before = lesson.finalNote?.markdown || ''
   const after = buildFinalNoteMarkdown({
-    courseSpec: { courseName: options.course || lesson.courseName || '', teacher: options.teacher || '' },
+    courseSpec: { courseName, teacher: options.teacher || lesson.teacher || '' },
     lesson,
     spliceData: normalizedSpliceData(lesson, spliceData)
   })
@@ -69,7 +81,7 @@ function reassembleOne(file, options) {
 function main() {
   const options = parseArgs(process.argv.slice(2))
   if (!options.files.length) {
-    console.error('用法：node tools/reassemble-note.mjs <lesson-state.json> [...] [--course 名称] [--teacher 姓名] [--write]')
+    console.error('用法：node tools/reassemble-note.mjs <lesson-state.json> [...] [--course 名称] [--teacher 姓名] [--write] [--allow-missing-course]')
     process.exit(2)
   }
   let changed = 0
