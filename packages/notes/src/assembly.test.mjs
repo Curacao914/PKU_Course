@@ -76,6 +76,26 @@ const goodSpliceData = () => ({
   appendix: { terms: [{ term: '共犯', original: 'joint crime', definition: '二人以上共同故意犯罪' }] }
 })
 
+test('章节总结把正文原样搬过去时退回结构性总结：同一段话不该读两遍', () => {
+  // 接缝层与正文是两条来源：模型有时直接把正文第一句抄成"本节总结"。
+  // 程序只做机械判定，不做语义判断——真重复就换掉，不重复的原样保留。
+  const body = '共同故意与共同行为是共犯成立的两个要件，缺一不可；判断标准是各行为人之间是否存在相互利用、补充的意思联络。'
+  const lesson = {
+    title: '第10-12节',
+    blueprint: { mainLine: '主线' },
+    outline: [{ id: 'o1', title: '一、共犯的成立条件' }],
+    nodes: [approvedNode('n1', 'o1', body)]
+  }
+  const copied = normalizedSpliceData(lesson, { sectionSummaries: { o1: body } })
+  assert.ok(!copied.sectionSummaries.o1.includes('共同故意与共同行为是共犯成立的两个要件'), '照搬的总结必须被换掉')
+  assert.match(copied.sectionSummaries.o1, /本节围绕共犯的成立条件展开/)
+
+  const honest = normalizedSpliceData(lesson, {
+    sectionSummaries: { o1: '本节承担本课的第一个论证环节，先确立共犯的成立条件与两个要件的分工，为后文罪数判断提供前置概念。' }
+  })
+  assert.match(honest.sectionSummaries.o1, /本节承担本课的第一个论证环节/, '不是照搬的总结要原样保留')
+})
+
 test('stripMetaBlock removes both metadata styles', () => {
   const draft = '正文第一段\n\n<!-- META\nCONCEPT: 共犯\n-->\n\n正文第二段'
   assert.equal(stripMetaBlock(draft), '正文第一段\n\n正文第二段')

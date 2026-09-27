@@ -1,6 +1,7 @@
 import { cleanText, transcriptLines } from '@course/core'
 
 import { coversOutline, outlineIdsOf } from './outline-ids.mjs'
+import { isVerbatimCopy, sectionBodyIndex } from './splice-evidence.mjs'
 
 /**
  * 机械拼装：把已批准节点、接缝数据与元数据合成单课最终笔记。
@@ -275,9 +276,13 @@ export function normalizedSpliceData(lesson = {}, value = {}) {
   const incomingQuizzes = value.sectionQuizzes || value.h1Quizzes || value.h1_quizzes || {}
   const sectionSummaries = {}
   const sectionQuizzes = {}
+  // 接缝层与正文是两条来源：总结段若原样搬了正文，读者会把同一段话读两遍。
+  // 程序只做机械判定（窗口比对），不做语义判断——真重复就退回结构性兜底。
+  const bodyIndex = sectionBodyIndex(lesson)
   outline.forEach(node => {
     const topic = outlineTopic(node)
-    const rawSummary = spliceString(incomingSummaries[node.id], node.rationale || '')
+    const given = spliceString(incomingSummaries[node.id], node.rationale || '')
+    const rawSummary = isVerbatimCopy(given, bodyIndex.get(node.id)) ? '' : given
     const fallbackSummary = `本节围绕${topic}展开，承担本课主线中的一个独立论证环节。通过已批准节点中的概念、规则、案例或教师讲授内容，本节说明该问题如何与前后章节衔接，并为后续理解和应用提供基础。`
     sectionSummaries[node.id] = rawSummary.length >= 45 ? rawSummary : [rawSummary, fallbackSummary].filter(Boolean).join(' ')
     // 兜底自测题按调研的题型优先级出：写出规则/要件 > Why/How/区别 > 情境应用。

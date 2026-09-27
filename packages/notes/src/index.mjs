@@ -45,6 +45,15 @@ export {
 } from './brief.mjs'
 
 export {
+  SPLICE_EVIDENCE,
+  draftsByOutline,
+  isVerbatimCopy,
+  nodeEvidence,
+  sectionBodyIndex,
+  spliceEvidence
+} from './splice-evidence.mjs'
+
+export {
   BRIEF_SOURCE_BUDGET,
   assertBriefBinding,
   buildBriefSourceFromFinalNote,

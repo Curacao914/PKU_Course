@@ -2,6 +2,7 @@ import { cleanText, transcriptLines } from '@course/core'
 
 import { buildPrompt, callCourseModel } from './ai-adapter.mjs'
 import { outlineIdsOf } from './outline-ids.mjs'
+import { spliceEvidence } from './splice-evidence.mjs'
 // 审查只回答"要不要重写这一段"，不再有五项评分，因此这里也不需要量纲归一化。
 
 /**
@@ -360,7 +361,8 @@ export async function executeCourseTask(task, options = {}) {
             'sectionSummaries 与 sectionQuizzes 的键必须使用上述 outline id；threads[].sections 必须使用上述 outline id。',
             '知识地图用 Mermaid 的 flowchart：节点是本课的核心概念或环节，边表示"先有 A 才能理解 B"这样的依赖关系；不要写装饰性的话，不要用 sequenceDiagram。',
             '体系线索是本节要交付的重点：把散在各节里的同一条论证线串起来（例如"同一条主线在不同小节各推进一步"），3—5 条。',
-            '索引表只收纳本课确实出现过的概念、法条、案例；说明列写不出来就留空，不要编。'
+            '索引表只收纳本课确实出现过的概念、法条、案例；说明列写不出来就留空，不要编。',
+            '补充材料里的"依据摘录"是各节已批准正文的要点句：写总结、索引说明、自测题答案与方法卡时以它为准，摘录里没有依据的内容留空；也不得把摘录整句照搬进接缝层（接缝是索引与导航，不是第二份正文）。'
           ].join('')
         },
         writerBrief: {
@@ -374,7 +376,9 @@ export async function executeCourseTask(task, options = {}) {
         },
         sourceText: splicePlaceholderContext(task.lesson),
         // 课件摘要：术语与结构对照的依据。只给每页文字并截断，避免把接缝上下文挤掉。
-        pptText: summarizeDecks(task.lesson.pptText),
+        // 依据摘录也挂在这一块（它是"补充材料"）：接缝层要写的索引、总结、自测答案
+        // 得有依据，否则只能凭标题与术语名编——摘录是节选，正文仍不整篇给它。
+        pptText: [summarizeDecks(task.lesson.pptText), spliceEvidence(task.lesson).text].filter(Boolean).join('\n\n'),
         schema: {
           courseOverview: { coreQuestions: ['string'], shouldBeAbleTo: ['string'], lectureThread: 'string' },
           systemLayer: {

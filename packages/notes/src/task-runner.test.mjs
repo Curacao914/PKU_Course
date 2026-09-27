@@ -227,13 +227,19 @@ test('review-node stamps the reviewed draft version', async () => {
 })
 
 test('assemble asks the splicer only for seams and validates its shape', async () => {
+  // 接缝模型拿到的是**依据摘录**：正文的要点句，不是整段正文。要点句之外的展开不进去，
+  // 它才不会把已批准的正文改写成"第二份正文"。
+  const draft = [1, 2, 3, 4, 5, 6].map(index => [
+    `第${index}点：共犯成立需要共同故意与共同行为，二者缺一不可，这就是判断标准。`,
+    `第${index}点的其余展开只是铺垫、举例与闲聊，不构成要点句。`
+  ].join('')).join('\n\n')
   const lesson = {
     title: '第10-12节',
     blueprint: { mainLine: '主线' },
     outline: [{ id: 'o1', title: '共犯' }],
     nodes: [{
       id: 'o1-node-1', outlineNodeId: 'o1', title: '共犯 · 1/1', lineRange: [1, 40], versions: [{}],
-      draft: '这段已审查通过的正文绝不能被接缝模型看到'
+      draft
     }]
   }
   const { callModel, calls } = fakeModel(modelReply({
@@ -251,8 +257,12 @@ test('assemble asks the splicer only for seams and validates its shape', async (
   assert.equal(action.type, 'assemble')
   assert.equal(action.spliceData.sectionSummaries.o1, '本章总结')
   assert.equal(calls[0].role, 'splicer')
-  assert.ok(!calls[0].prompt.user.includes('绝不能被接缝模型看到'), '接缝模型的输入里不应出现节点正文')
   assert.match(calls[0].prompt.user, /已批准节点：共犯 · 1\/1/)
+  // 依据：要点句必须在，索引、总结与自测答案才有依据
+  assert.match(calls[0].prompt.user, /依据摘录（来自已批准正文的要点句，只作依据）/)
+  assert.match(calls[0].prompt.user, /第1点：共犯成立需要共同故意与共同行为/)
+  assert.ok(!calls[0].prompt.user.includes('不构成要点句'), '摘录是节选，铺垫与举例不进接缝模型')
+  assert.match(calls[0].prompt.user, /不得整句照搬摘录/, '摘录是依据，不是接缝层的正文')
 })
 
 test('final-review hands the assembled note and node index to the reviewer', async () => {
