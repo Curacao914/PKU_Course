@@ -9,7 +9,9 @@
  * 这几件事都不是"看一眼就知道"的，所以做成可重复跑的体检，而不是靠人肉抽查。
  *
  * 用法：
- *   node tools/verify-library.mjs [library.json 路径]
+ *   node tools/verify-library.mjs [library.json 路径] [--site <站点根目录>]
+ * 给了 --site 就同时核对站点产物：每篇正文是否落在规范路径 md/<课程>/<课次>.md 下、
+ * 有没有孤儿 md、一页纸路径是否成对、笔记页是否存在。
  * 退出码：0 = 全部通过；1 = 有硬错误。软提示（历史数据未绑定）只打印，不影响退出码。
  */
 import crypto from 'node:crypto'
@@ -17,7 +19,11 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 const DEFAULT_LIBRARY = path.join(process.env.HOME || '', '.course-worker', 'site', 'library.json')
-const file = path.resolve(process.argv[2] || process.env.COURSE_LIBRARY || DEFAULT_LIBRARY)
+const argv = process.argv.slice(2)
+const siteIndex = argv.indexOf('--site')
+const siteRoot = siteIndex >= 0 ? path.resolve(argv[siteIndex + 1] || '') : ''
+const positional = argv.filter((item, index) => !item.startsWith('--') && !(siteIndex >= 0 && index === siteIndex + 1))
+const file = path.resolve(positional[0] || process.env.COURSE_LIBRARY || DEFAULT_LIBRARY)
 
 const checksumOf = markdown => crypto.createHash('sha256').update(String(markdown || ''), 'utf8').digest('hex')
 const short = value => String(value || '').slice(0, 36)
@@ -85,6 +91,23 @@ for (const record of records) {
   // 5) 首页那一列
   if (!record.theme) errors.push(`${label}：首页缺主题句`)
   if (!Array.isArray(record.keywords) || record.keywords.length === 0) errors.push(`${label}：缺关键词`)
+
+  // 6) 三个时间各管一件事：课次日期（排序/上下讲）、首发时间（RSS）、最近更新（日报）
+  const lessonDate = String(record.lessonDate || '')
+  if (lessonDate) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(lessonDate)) errors.push(`${label}：lessonDate 不是 YYYY-MM-DD（${lessonDate}）`)
+    else if (lessonDate > new Date().toISOString().slice(0, 10)) errors.push(`${label}：lessonDate 在未来（${lessonDate}）`)
+    const titleDate = String(record.lessonTitle || '').match(/(\d{4})[-/.年]\s*(\d{1,2})[-/.月]\s*(\d{1,2})/)
+    if (titleDate) {
+      const fromTitle = `${titleDate[1]}-${String(titleDate[2]).padStart(2, '0')}-${String(titleDate[3]).padStart(2, '0')}`
+      if (fromTitle !== lessonDate) errors.push(`${label}：课次标题里的日期（${fromTitle}）与 lessonDate（${lessonDate}）不一致`)
+    }
+  } else {
+    notes.push(`${label}：没有 lessonDate（排序会用发布的时刻，重新发布旧课会让它窜到最前面）`)
+  }
+  if (record.firstPublishedAt && record.updatedAt && record.firstPublishedAt > record.updatedAt) {
+    errors.push(`${label}：firstPublishedAt 晚于 updatedAt`)
+  }
 }
 
 // 6) 发布日期：整批刷成同一个时刻，说明是重发布把首发时间冲掉了（真实发生过）
@@ -126,6 +149,48 @@ for (const [course, list] of byCourse) {
     if (lessons.length > 1) notes.push(`${course}：${lessons.join('、')} 的关键词完全相同（${short(text)}）`)
   }
   console.log(`  ${course}：${list.length} 节，简报 ${briefings.size} 种、主题 ${themes.size} 种${briefings.size === list.length ? ' ✓' : ' ← 有重复'}`)
+}
+
+// 8) 站点产物：规范路径、孤儿文件、页面存在性
+if (siteRoot) {
+  console.log('')
+  console.log(`站点根：${siteRoot}`)
+  const canonical = record => {
+    const parts = String(record.slug || '').split('/').map(part => part.trim()).filter(Boolean)
+    const rest = parts[0] === 'notes' ? parts.slice(1) : parts
+    return { md: path.join(siteRoot, 'md', ...rest) + '.md', page: path.join(siteRoot, ...parts) + '.html' }
+  }
+  const expected = new Set()
+  for (const record of records) {
+    const paths = canonical(record)
+    expected.add(paths.md)
+    if (!fs.existsSync(paths.md)) errors.push(`${record.courseName} · ${record.lessonTitle}：规范路径下没有正文（${path.relative(siteRoot, paths.md)}）`)
+    if (!fs.existsSync(paths.page)) errors.push(`${record.courseName} · ${record.lessonTitle}：笔记页不存在（${path.relative(siteRoot, paths.page)}）`)
+    if (record.onepage?.markdown) {
+      const onePage = paths.md.replace(/\.md$/, '-一页纸.md')
+      expected.add(onePage)
+      if (!fs.existsSync(onePage)) errors.push(`${record.courseName} · ${record.lessonTitle}：一页纸正文缺失`)
+    }
+  }
+  const mdRoot = path.join(siteRoot, 'md')
+  if (fs.existsSync(mdRoot)) {
+    const orphans = []
+    const walk = dir => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name)
+        if (entry.isDirectory()) walk(full)
+        else if (entry.name.endsWith('.md') && !expected.has(full)) orphans.push(path.relative(siteRoot, full))
+      }
+    }
+    walk(mdRoot)
+    for (const orphan of orphans) notes.push(`孤儿 Markdown（发布库里没有对应记录）：${orphan}`)
+    console.log(`规范路径：${records.length} 篇正文全部就位${orphans.length ? `，孤儿 ${orphans.length} 个` : '，无孤儿'}`)
+  }
+  if (record0Missing(siteRoot)) notes.push('站点根找不到 index.html：站点可能还没重建')
+}
+
+function record0Missing(root) {
+  return !fs.existsSync(path.join(root, 'index.html'))
 }
 
 console.log('')
