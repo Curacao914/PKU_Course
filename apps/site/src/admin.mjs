@@ -352,6 +352,7 @@ export function createAdminHandler({
   workerPath,
   workerEnv = {},
   runCommand = defaultRunCommand,
+  spawnOcr = defaultSpawnOcr,
   now = () => Date.now()
 } = {}) {
   const failures = new Map()
@@ -359,6 +360,71 @@ export function createAdminHandler({
   // 主令牌由 handle() 每次请求传进来，但 handleApi 也需要它（鉴权 + 找回路径提示），
   // 因此在这里留一个当前请求的闭包副本。
   let activeToken = ''
+
+
+  /**
+   * 后台补识别图片文字。
+   *
+   * 上传请求等不起：一张图几秒到几十秒，一份 80 页课件要几分钟，这条请求会被
+   * 代理的 100 秒上限掐断（而且用户要盯着转圈）。所以归档完就返回，识别另起一个
+   * 脱离父进程的 node 进程去跑，结果写回归档的 json——管理台轮询就能看到数字变化。
+   *
+   * 同一课次只跑一个：状态记在 <scratch>/ocr-state.json，判断依据是那个进程还活着没有。
+   */
+  function ocrStateFile() {
+    return path.join(scratchRoot, 'ocr-state.json')
+  }
+
+  function readOcrState() {
+    try {
+      const list = JSON.parse(fs.readFileSync(ocrStateFile(), 'utf8'))
+      return Array.isArray(list) ? list : []
+    } catch { return [] }
+  }
+
+  function alive(pid) {
+    try { process.kill(Number(pid), 0); return true } catch { return false }
+  }
+
+  function writeOcrState(list) {
+    fs.mkdirSync(scratchRoot, { recursive: true })
+    fs.writeFileSync(ocrStateFile(), `${JSON.stringify(list.slice(-20), null, 2)}\n`)
+  }
+
+  /** 还在跑的识别任务（同一课次去重），顺带清掉已经结束的。 */
+  function runningOcr() {
+    const list = readOcrState()
+    const live = list.filter(item => alive(item.pid))
+    if (live.length !== list.length) writeOcrState(live)
+    return live
+  }
+
+  function queueOcr({ course, lesson }) {
+    if (!workerPath || !course) return { queued: 0, reason: 'no_worker' }
+    const pendingTask = runningOcr().find(item => item.course === course && item.lesson === (lesson || ''))
+    if (pendingTask) return { queued: 0, reason: 'already_running' }
+
+    const logDir = path.join(scratchRoot, 'ocr')
+    fs.mkdirSync(logDir, { recursive: true })
+    const stamp = new Date(now()).toISOString().replace(/[:.]/g, '-')
+    const logPath = path.join(logDir, `${stamp}-${safeMaterialName(course)}-${safeMaterialName(lesson || 'course')}.log`)
+    const args = [
+      workerPath, 'materials', '--ocr',
+      '--course', course,
+      ...(lesson ? ['--lesson', lesson] : [])
+    ]
+    let started
+    try {
+      started = spawnOcr({ args, env: { ...process.env, ...workerEnv }, logPath })
+    } catch (error) {
+      return { queued: 0, reason: error instanceof Error ? error.message : String(error) }
+    }
+    writeOcrState([...readOcrState(), {
+      course, lesson: lesson || '', pid: started.pid,
+      startedAt: new Date(now()).toISOString(), logPath
+    }])
+    return { queued: 1, pid: started.pid, logPath }
+  }
 
   function clientKey(req) {
     return String(req.headers['cf-connecting-ip'] || req.socket?.remoteAddress || 'unknown')
@@ -564,6 +630,8 @@ export function createAdminHandler({
               mediaPath: artifacts.mediaPath || ''
             },
             hasTranscript: Boolean(artifacts.transcriptPath && fs.existsSync(artifacts.transcriptPath)),
+            // 后台正在识别图片文字：界面据此显示进度，而不是让人以为要点按钮
+            ocrRunning: runningOcr().some(item => item.course === task.course_name && item.lesson === task.title),
             materials: materials.map(item => ({
               name: item.name,
               scope: item.scope,
@@ -815,7 +883,13 @@ export function createAdminHandler({
           slideCount: result.deck.slideCount,
           bytes: result.entry.bytes,
           chunks: parts.length,
-          checksum: result.entry.checksum.slice(0, 12)
+          checksum: result.entry.checksum.slice(0, 12),
+          // 课件里有图就自动排队识别：不用点按钮，也不用把上传请求拖成几分钟
+          ocr: result.entry.ocrPending > 0
+            ? queueOcr({ course, lesson: scope === 'course' ? '' : lesson })
+            : { queued: 0, reason: 'no_images' },
+          ocrPending: result.entry.ocrPending || 0,
+          imageCount: result.entry.imageCount || 0
         })
       } catch (error) {
         sendJson(res, 500, { ok: false, error: 'material_failed', message: error instanceof Error ? error.message : String(error) })
@@ -875,7 +949,13 @@ export function createAdminHandler({
           name: result.entry.name,
           slideCount: result.deck.slideCount,
           bytes: result.entry.bytes,
-          checksum: result.entry.checksum.slice(0, 12)
+          checksum: result.entry.checksum.slice(0, 12),
+          // 课件里有图就自动排队识别：不用点按钮，也不用把上传请求拖成几分钟
+          ocr: result.entry.ocrPending > 0
+            ? queueOcr({ course, lesson: scope === 'course' ? '' : lesson })
+            : { queued: 0, reason: 'no_images' },
+          ocrPending: result.entry.ocrPending || 0,
+          imageCount: result.entry.imageCount || 0
         })
       } catch (error) {
         sendJson(res, 500, { ok: false, error: 'material_failed', message: error instanceof Error ? error.message : String(error) })
@@ -1109,8 +1189,23 @@ export function createAdminHandler({
   }
 }
 
+/**
+ * 默认的"后台起一个 worker 进程"：脱离父进程，日志落到文件。
+ * 抽成参数是为了让测试与点击审计能替换掉它——它们不该真的拉起一个 worker。
+ */
+export function defaultSpawnOcr({ args, env = {}, logPath }) {
+  const out = fs.openSync(logPath, 'a')
+  try {
+    const child = spawn(process.execPath, args, { detached: true, stdio: ['ignore', out, out], env })
+    child.unref()
+    return { pid: child.pid }
+  } finally {
+    fs.closeSync(out)
+  }
+}
+
 /** 默认运行方式：以子进程调用 course CLI，复用与定时任务完全相同的入口。 */
-export function defaultRunCommand(args, { env = {}, timeoutMs = DEFAULT_RUN_TIMEOUT_MS } = {}) {
+function defaultRunCommand(args, { env = {}, timeoutMs = DEFAULT_RUN_TIMEOUT_MS } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, args, {
       env: { ...process.env, ...env },

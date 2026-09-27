@@ -1389,10 +1389,32 @@ export function createCommands(context) {
             python: config.python
           })
           fs.renameSync(path.join(inbox, name), path.join(done, name))
+          // 课件里有图就当场识别（这里是 CLI/定时任务上下文，等得起）：
+          // "识别到有图片就自动识别"这条规则不该只在管理台上传时成立
+          let ocr = null
+          if (entry.ocrPending > 0) {
+            stderr(`  ${name}：有 ${entry.ocrPending} 张图，正在识别图片文字`)
+            try {
+              const outcome = await ocrMaterial({
+                root,
+                course: identity.course,
+                lesson: entry.lesson || '',
+                name: entry.name,
+                python: config.python,
+                ocrMaxPages: Number(options.options['ocr-max-pages'] || 60),
+                ocrConcurrency: Number(options.options['ocr-concurrency'] || 3)
+              })
+              ocr = { attempted: outcome.entry?.ocr?.attempted || 0, pending: outcome.entry?.ocrPending || 0, skipped: Boolean(outcome.skipped) }
+            } catch (error) {
+              ocr = { error: error instanceof Error ? error.message : String(error) }
+              stderr(`  ${name}：图片识别失败（${ocr.error}），先用现有文字继续`)
+            }
+          }
           results.push({
             name, archived: true, course: identity.course,
             scope: entry.scope, lesson: entry.lesson || '（全课程通用）',
-            slideCount: deck.slideCount, checksum: entry.checksum.slice(0, 12)
+            slideCount: deck.slideCount, checksum: entry.checksum.slice(0, 12),
+            imageCount: entry.imageCount || 0, ocr
           })
         } catch (error) {
           results.push({ name, archived: false, reason: error instanceof Error ? error.message : String(error) })

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { execFileSync, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -10,7 +11,11 @@ import { ADMIN_HTML, ALLOWED_ACTIONS, buildActionArgs, createAdminHandler, redac
 
 const TOKEN = 'test-admin-token'
 
-function fixture({ runCommand } = {}) {
+function pythonAvailable() {
+  return spawnSync('python3', ['-c', 'import sys;print(sys.version)'], { encoding: 'utf8' }).status === 0
+}
+
+function fixture({ runCommand, spawnOcr } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-admin-'))
   const scratchRoot = path.join(dir, 'scratch')
   fs.mkdirSync(scratchRoot, { recursive: true })
@@ -31,6 +36,7 @@ function fixture({ runCommand } = {}) {
     scratchRoot,
     workerPath: '/repo/apps/worker/bin/course.mjs',
     workerEnv: { COURSE_WORKER_SCRATCH_DIR: scratchRoot },
+    spawnOcr,
     runCommand: runCommand || (async (args, options) => {
       calls.push({ args, options })
       return { code: 0, stdout: JSON.stringify({ ok: true, args: args.slice(1) }), stderr: '' }
@@ -75,6 +81,72 @@ const call = async (handler, options, { token = TOKEN } = {}) => {
   const handled = await handler.handle(req, res, new URL(req.url, 'http://x').pathname, new URL(req.url, 'http://x'), { adminToken: TOKEN })
   return { handled, res, body: res.state.body ? JSON.parse(res.state.body) : null }
 }
+
+/** 造一份"整页是图"的 pptx：文字抽不出来，但有一张够大的图。 */
+function writeImageDeck(target) {
+  const script = `
+import os, struct, sys, zipfile, zlib
+target = sys.argv[1]
+def chunk(kind, data):
+    body = kind + data
+    return struct.pack('>I', len(data)) + body + struct.pack('>I', zlib.crc32(body) & 0xffffffff)
+width, height = 500, 300
+raw = b''.join(b'\\x00' + os.urandom(width * 3) for _ in range(height))
+png = (b'\\x89PNG\\r\\n\\x1a\\n'
+       + chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0))
+       + chunk(b'IDAT', zlib.compress(raw, 1)) + chunk(b'IEND', b''))
+ns = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
+slide = f'<?xml version="1.0"?><p:sld {ns}><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>封面</a:t></a:r></a:p></p:txBody></p:sp><p:pic><p:blipFill><a:blip r:embed="rId1"/></p:blipFill></p:pic></p:spTree></p:cSld></p:sld>'
+rels = '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/></Relationships>'
+with zipfile.ZipFile(target, 'w') as zf:
+    zf.writestr('ppt/slides/slide1.xml', slide)
+    zf.writestr('ppt/slides/_rels/slide1.xml.rels', rels)
+    zf.writestr('ppt/media/image1.png', png)
+`
+  execFileSync('python3', ['-c', script, target], { stdio: 'pipe' })
+}
+
+test('a deck with images queues OCR by itself — nothing to click', { skip: pythonAvailable() ? false : '未安装 python3' }, async () => {
+  const spawned = []
+  const { handler, scratchRoot } = fixture({
+    // 用当前进程的 pid 冒充"识别进程还活着"，这样同一课次的第二次上传不会重复排队
+    spawnOcr: ({ args }) => { spawned.push(args); return { pid: process.pid } }
+  })
+  const deckPath = path.join(scratchRoot, '封面课件.pptx')
+  writeImageDeck(deckPath)
+  const bytes = fs.readFileSync(deckPath)
+  const params = new URLSearchParams({ course: '刑法分论', lesson: '第10-12节', scope: 'lesson', name: '封面课件.pptx' })
+
+  const uploaded = await call(handler, { method: 'PUT', url: `/api/admin/materials?${params.toString()}`, body: bytes })
+  assert.equal(uploaded.res.state.status, 200)
+  assert.equal(uploaded.body.imageCount, 1, '要数出课件里有一张够大的图')
+  assert.equal(uploaded.body.ocrPending, 1)
+  assert.equal(uploaded.body.ocr.queued, 1, '上传后应当自动排队识别，不用点按钮')
+  assert.deepEqual(spawned[0].slice(1), ['materials', '--ocr', '--course', '刑法分论', '--lesson', '第10-12节'])
+
+  // 同一课次正在识别时不要重复起进程
+  const again = await call(handler, { method: 'PUT', url: `/api/admin/materials?${params.toString()}`, body: bytes })
+  assert.equal(again.body.ocr.queued, 0)
+  assert.equal(again.body.ocr.reason, 'already_running')
+  assert.equal(spawned.length, 1, '同一课次只跑一个识别进程')
+
+  // 界面能从快照里看到"正在后台识别"
+  const state = await call(handler, { url: '/api/admin/status' })
+  const task = state.body.ledger.tasks.find(item => item.replayKey === 'replay-1')
+  assert.equal(task.ocrRunning, true)
+  assert.equal(task.materials[0].ocrPending, 1)
+
+  // 纯文字课件不该排队：没有图就没有识别这件事
+  const plain = Buffer.from(JSON.stringify({ slides: [{ slideNumber: 1, text: '只有文字' }] }))
+  const plainUpload = await call(handler, {
+    method: 'PUT',
+    url: `/api/admin/materials?${new URLSearchParams({ course: '刑法分论', lesson: '第10-12节', scope: 'lesson', name: '纯文字.json' }).toString()}`,
+    body: plain
+  })
+  assert.equal(plainUpload.body.ocr.queued, 0)
+  assert.equal(plainUpload.body.ocr.reason, 'no_images')
+  assert.equal(spawned.length, 1)
+})
 
 test('a deck can be uploaded from the browser without any filename convention', async () => {
   // 归属由前端选择器给出（课程 + 课次 + 作用域），所以文件名随便叫什么都行。

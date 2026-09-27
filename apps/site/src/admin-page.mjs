@@ -622,10 +622,13 @@ function detailHtml () {
     '<div class="row" style="margin-top:8px">' +
     '<input class="hidden-file" type="file" multiple data-file="' + esc(task.replayKey) + '" accept=".pptx,.pdf,.docx,.xlsx,.md,.txt">' +
     '<button class="act" data-act="pick-file" data-key="' + esc(task.replayKey) + '">' + icon('plus') + '上传课件</button>' +
-    // 只有确实还有图没识别时才出现：图片版课件的字在图上，不识别笔记就少一块
-    ((task.materials || []).some(function (material) { return material.ocrPending > 0 })
-      ? '<button class="act" data-act="ocr-material" data-key="' + esc(task.replayKey) + '">' + icon('image') + '识别图片文字</button>'
-      : '') +
+    // 图片文字是上传后自动识别的（后台跑，不用点）；这里只在"还有没识别完的图"时
+    // 提供一个补识别的入口——识别失败、或一次超过上限时的补救手段
+    (task.ocrRunning
+      ? '<span class="small muted">正在后台识别图片文字…</span>'
+      : ((task.materials || []).some(function (material) { return material.ocrPending > 0 })
+        ? '<button class="act" data-act="ocr-material" data-key="' + esc(task.replayKey) + '">' + icon('image') + '重新识别图片文字</button>'
+        : '')) +
     '<span class="status" data-status="' + esc(task.replayKey) + '">' + esc(state.uploads[task.replayKey] || '') + '</span>' +
     '</div>' + previewHtml(task) + '</div>'
 
@@ -820,7 +823,11 @@ async function uploadFiles (key, fileList, btn) {
         var single = await fetch('/api/admin/materials?' + params.toString(), { method: 'PUT', headers: headers(false), body: file })
         data = await single.json().catch(function () { return {} })
       }
-      if (data.ok) toast('已归档：' + data.name + '（' + data.slideCount + ' 页）', 'ok')
+      if (data.ok) {
+    // 图上的字是上传后自动识别的：说清楚"已经在后台跑了"，别让人以为要再点一下
+    toast('已归档：' + data.name + '（' + data.slideCount + ' 页' +
+      (data.ocr && data.ocr.queued ? '，' + (data.imageCount || 0) + ' 张图正在后台识别' : '') + '）', 'ok')
+  }
       else { toast('上传失败：' + (data.message || data.error), 'error'); break }
     } catch (error) {
       toast('上传失败：' + error, 'error')

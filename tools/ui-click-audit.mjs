@@ -219,7 +219,7 @@ function buildFixture() {
     slideCount: 2,
     slides: [{ slideNumber: 1, text: '第一页' }, { slideNumber: 2, text: '第二页：整页是图' }],
     images: [{ path: 'ppt/media/image1.png', bytes: 194436, width: 2360, height: 1800, slides: [2], needsOcr: true }],
-    ocr: { pending: 2, attempted: 0, engine: '', errors: [] }
+    ocr: { pending: 2, attempted: 0, engine: '', errors: [{ path: '', error: '连不上 PaddleOCR' }] }
   }, null, 2))
   fs.writeFileSync(path.join(materialHome, 'meta.json'), JSON.stringify({
     materials: [{
@@ -235,7 +235,7 @@ function buildFixture() {
       slideCount: 2,
       imageCount: 1,
       ocrPending: 2,
-      ocr: { pending: 2, attempted: 0, engine: '', errors: [] },
+      ocr: { pending: 2, attempted: 0, engine: '', errors: [{ path: '', error: '连不上 PaddleOCR' }] },
       parsedPath: path.join(materialHome, 'slides', '图片版课件.pptx.json'),
       addedAt: '2026-09-25T10:00:00.000Z'
     }]
