@@ -902,18 +902,32 @@ async function auditNotePage(page, site, noteUrl, failures) {
   })
   await record('色板浮层挂在按钮下方', popPlacement.visible && popPlacement.below && popPlacement.dx <= 24,
     '水平偏差 ' + popPlacement.dx + 'px，在按钮' + (popPlacement.below ? '下方' : '其它位置'))
-  await page.click('[data-paper="green"]')
+  // 色板按钮要限定成 button.paper：<html> 自己也带 data-paper（底色挂在根元素上）
+  await page.click('button.paper[data-paper="green"]')
   await page.waitForTimeout(150)
   const paperState = await page.evaluate(() => ({
     paper: document.documentElement.getAttribute('data-paper'),
     body: getComputedStyle(document.body).backgroundColor,
-    pressed: document.querySelector('[data-paper="green"]').getAttribute('aria-pressed')
+    pressed: document.querySelector('button.paper[data-paper="green"]').getAttribute('aria-pressed')
   }))
   await record('豆沙绿是 199/237/204', paperState.paper === 'green' && paperState.body === 'rgb(199, 237, 204)',
     '页面底色 ' + paperState.body)
   await record('选中的颜色有标记', paperState.pressed === 'true', 'aria-pressed=' + paperState.pressed)
-  await page.click('[data-paper=""]')
+  // 选完颜色浮层会自动收起（免得盖住别的按钮），所以再选一次要重新点开调色盘
+  const closedAfterPick = await page.evaluate(() =>
+    getComputedStyle(document.getElementById('paperPop')).display === 'none')
+  await record('选完颜色自动收起', closedAfterPick, closedAfterPick ? '浮层已收起' : '浮层还开着')
+  const paperPopOpen = async () => page.evaluate(() =>
+    getComputedStyle(document.getElementById('paperPop')).display !== 'none')
+  if (!(await paperPopOpen())) await page.click('[data-tool="paper"]')
+  await page.click('button.paper[data-paper=""]')
   await page.keyboard.press('Escape')
+  // 换过底色之后其它按钮必须照旧可用——这是用户报过的真实故障
+  // （<html> 带 data-paper，宽松的 closest 判定把每次点击都当成选颜色）
+  await page.click('#toolTheme')
+  const themeAfterPaper = await page.getAttribute('html', 'data-theme')
+  await record('换底色后其它按钮仍可用', themeAfterPaper === 'dark', '切到了 ' + themeAfterPaper)
+  await page.click('#toolTheme')
 
   // 进度条与回到顶部
   await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight))

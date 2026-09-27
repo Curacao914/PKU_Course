@@ -21,8 +21,10 @@ import {
 import {
   callCourseModel,
   createInitialLesson,
+  ONEPAGE_TARGET_CHARS,
   generateBrief,
   generateBriefFromMarkdown,
+  generateOnepage,
   getCourseLlmWindowDecision,
   normalizeCourseLlmSchedule,
   pptForRange,
@@ -114,6 +116,8 @@ export function createCommands(context) {
     config, acquire, runPython, which, openStore,
     callModel: injectedCallModel, sender: injectedSender, sleep = defaultSleep,
     env = process.env, now,
+    // MCP 服务器可以被注入：测试不该真的挂起等 stdin；生产走 @course/notes-mcp 的实现
+    mcpServer: injectedMcpServer,
     stdout, stderr
   } = context
   const clockNow = () => (typeof now === 'function' ? now() : new Date())
@@ -689,21 +693,20 @@ export function createCommands(context) {
   }
 
   /**
-   * 简报（含关键词）单独重跑。
+   * 一页纸摘要：把一节笔记压进一张 A4（复习时只看这一页）。
    *
-   * 为什么需要它：简报这一步的产物后来多了一列"关键词"，而笔记跑完后的中间状态通常
-   * 已经被清理掉了。为了补一列关键词把笔记流水线整个重跑一遍是几十次模型调用；
-   * 这里只重跑简报这一步——读成品笔记的小节标题与开头，输出几百字，一节课一次调用。
+   * 与 course brief 一样是「只重跑一步」的入口：笔记已经跑完、只想补一页纸时用它，
+   * 不必把整条流水线再走一遍。输出 onepage.json，发布时会被带进站点。
    */
-  async function briefRun(options) {
-    const from = path.resolve(requireOption(options.options, 'from', 'brief'))
-    const course = requireOption(options.options, 'course', 'brief')
-    const lesson = requireOption(options.options, 'lesson', 'brief')
+  async function onepageRun(options) {
+    const from = path.resolve(requireOption(options.options, 'from', 'onepage'))
+    const course = requireOption(options.options, 'course', 'onepage')
+    const lesson = requireOption(options.options, 'lesson', 'onepage')
     const lessonFile = path.join(from, `${safeFileName(lesson)}.md`)
     const notePath = fs.existsSync(from) && fs.statSync(from).isFile()
       ? from
       : (fs.existsSync(lessonFile) ? lessonFile : path.join(from, 'final-note.md'))
-    if (!fs.existsSync(notePath)) throw new Error(`找不到笔记正文：${notePath}（--from 传笔记文件或它所在的目录）`)
+    if (!fs.existsSync(notePath)) throw new Error(`找不到笔记正文：${notePath}`)
     const markdown = fs.readFileSync(notePath, 'utf8')
 
     const modelConfig = {
@@ -716,41 +719,37 @@ export function createCommands(context) {
     const callModel = injectedCallModel ||
       (payload => callCourseModel({ ...payload, config: { ...modelConfig, ...(payload.config || {}) } }))
 
-    const result = await generateBriefFromMarkdown({
+    const result = await generateOnepage({
       markdown,
       courseName: course,
       lessonTitle: lesson,
-      courseSpec: { courseName: course, teacher: options.options.teacher || '' },
+      courseSpec: { courseName: course },
       callModel,
       modelConfig
     })
     const outDir = path.resolve(options.options.out || path.dirname(notePath))
     fs.mkdirSync(outDir, { recursive: true })
-    const briefPath = path.join(outDir, 'brief.json')
-    const previous = fs.existsSync(briefPath) ? JSON.parse(fs.readFileSync(briefPath, 'utf8')) : {}
-    fs.writeFileSync(briefPath, `${JSON.stringify({
-      ...previous,
+    const onepagePath = path.join(outDir, 'onepage.json')
+    fs.writeFileSync(onepagePath, `${JSON.stringify({
       schemaVersion: 1,
       generatedAt: new Date().toISOString(),
       course,
       lesson,
-      briefing: result.briefing,
-      keyPoints: result.keyPoints,
-      // theme 曾经只写进了 stdout 摘要、没落盘：首页那一列于是永远空着
-      theme: result.theme,
-      keywords: result.keywords,
-      detail: result.detail,
+      title: result.title,
+      outline: result.outline,
+      markdown: result.markdown,
+      chars: result.chars,
       trace: result.trace
     }, null, 2)}\n`)
     emit({
       course,
       lesson,
-      note: notePath,
-      briefPath,
-      words: result.words,
-      keyPoints: result.keyPoints.length,
-      theme: result.theme,
-      keywords: result.keywords,
+      onepagePath,
+      title: result.title,
+      chars: result.chars,
+      lists: result.lists,
+      tables: result.tables,
+      overBudget: result.chars > ONEPAGE_TARGET_CHARS,
       usage: result.trace?.usage || null
     }, options)
     return 0
@@ -871,6 +870,9 @@ export function createCommands(context) {
     // 简报（notes 阶段的产物）：放消息正文与笔记页顶部。
     const briefPath = path.join(from, 'brief.json')
     const brief = fs.existsSync(briefPath) ? JSON.parse(fs.readFileSync(briefPath, 'utf8')) : null
+    // 一页纸摘要（course onepage 的产物）：有就一起发布，没有就先不出现入口
+    const onepagePath = path.join(from, 'onepage.json')
+    const onepage = fs.existsSync(onepagePath) ? JSON.parse(fs.readFileSync(onepagePath, 'utf8')) : null
 
     const library = fs.existsSync(libraryForRebuild) ? JSON.parse(fs.readFileSync(libraryForRebuild, 'utf8')) : []
     const record = buildNoteRecord({
@@ -880,7 +882,8 @@ export function createCommands(context) {
       markdown,
       replayKey: runSummary.replayKey || options.options['replay-key'] || '',
       publishedAt: options.options['published-at'] || new Date().toISOString(),
-      brief
+      brief,
+      onepage
     })
     const checksum = createHash('sha256').update(record.markdown).digest('hex')
     const previous = library.find(item => item.slug === record.slug)
@@ -2127,11 +2130,39 @@ export function createCommands(context) {
     return 0
   }
 
+  /**
+   * 以 stdio 启动课程笔记 MCP 服务器（给 Claude Code / DSH 等 AI 客户端挂载，见 docs/12）。
+   *
+   * 为什么挂在 CLI 上而不是单独再发一个可执行文件：客户端配置里只写
+   * `course mcp --library ~/.course-worker/site/library.json` 一行就够了，
+   * systemd / 进程管理器也是托管同一条命令；协议与数据分层都在 @course/notes-mcp，
+   * 这里只做两件事——把配置解析出来、把 stdio 接上。
+   *
+   * 这个命令会一直运行，直到客户端关闭 stdin（正常退出码 0）。
+   */
+  async function mcp(options) {
+    const { createNotesService, createSource, resolveSettings, runStdioServer } = await import('@course/notes-mcp')
+    const settings = resolveSettings({
+      env,
+      overrides: {
+        library: options.options.library,
+        origin: options.options.origin,
+        ttl: options.options.ttl
+      }
+    })
+    const runServer = injectedMcpServer || runStdioServer
+    const exitCode = await runServer({
+      settings,
+      service: createNotesService({ source: createSource(settings) })
+    })
+    return Number.isInteger(exitCode) ? exitCode : 0
+  }
+
   // 键名必须与 CLI 命令名一致：'admin-passwd' 带连字符，不能用标识符简写
   return {
     doctor, discover, download, transcribe, notes, materials, balance, publish,
-    notify, cycle, verify, status, retry, prune, backup, digest, brief: briefRun,
-    'admin-passwd': adminPassword
+    notify, cycle, verify, status, retry, prune, backup, digest, brief: briefRun, onepage: onepageRun,
+    'admin-passwd': adminPassword, mcp
   }
 }
 
@@ -2180,6 +2211,8 @@ export const USAGE = `用法：course <命令> [选项]
                                            忘记密码时在服务器上跑这个（见 docs/10）
   balance    [--threshold <元>]                   查两个付费 API 的余额（DeepSeek 官方接口；
                                            阿里云余额需账号 AK/SK，见 docs/07）
+  onepage    --from <笔记.md 或所在目录> --course <名称> --lesson <课次> [--out <目录>]
+                                           只重跑一页纸摘要：把一节笔记压进一张 A4（复习只看这一页）
   brief      --from <笔记.md 或所在目录> --course <名称> --lesson <课次> [--out <目录>]
                                            只重跑简报这一步：产出简报与首页用的关键词
                                            （笔记跑完后再补关键词时用，不必重跑整条流水线）
@@ -2208,6 +2241,14 @@ export const USAGE = `用法：course <命令> [选项]
                                            --max-steps / --auto-approve-outline 会透传给 notes 阶段
   verify     [--course <名称>] [--replay-key <键>] [--out <站点目录>]
                                            验收：跑一轮真实链路并按验收条件逐项断言
+  mcp        [--library <发布库.json>] [--origin <站点域名>] [--ttl <秒>]
+                                           以 stdio 启动课程笔记 MCP 服务器，供 Claude Code /
+                                           DSH 等客户端挂载：课程 → 课次 → 检索 → 正文
+                                           分层取用，避免把全部笔记灌进上下文。
+                                           默认读本地发布库（COURSE_LIBRARY 指向
+                                           site/library.json，优先）；没配时走远程站点
+                                           （COURSE_SITE_ORIGIN，默认 course.law-tech.dev）。
+                                           命令会一直运行到客户端关闭 stdin；见 docs/12
 
 账本：download / transcribe 若带 --replay-key 且账本中已有该回放，会先领取任务，
 成功后推进阶段；失败则记录原因并退避 5 分钟。账本没有该回放时按独立运行处理。

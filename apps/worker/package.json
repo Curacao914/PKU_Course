@@ -15,6 +15,7 @@
     "@course/asr": "*",
     "@course/core": "*",
     "@course/notes": "*",
+    "@course/notes-mcp": "*",
     "@course/publish": "*",
     "@course/store": "*"
   }

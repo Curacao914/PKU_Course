@@ -119,7 +119,7 @@ export const READER_SCRIPT = '<script>' + String.raw`
     store.set('course.paper', paper || '')
     if (!paper || root.getAttribute('data-theme') === 'dark') root.removeAttribute('data-paper')
     else root.setAttribute('data-paper', paper)
-    document.querySelectorAll('[data-paper]').forEach(function (dot) {
+    document.querySelectorAll('button.paper[data-paper]').forEach(function (dot) {
       dot.setAttribute('aria-pressed', dot.getAttribute('data-paper') === (paper || '') ? 'true' : 'false')
     })
   }
@@ -150,7 +150,10 @@ export const READER_SCRIPT = '<script>' + String.raw`
       if (!event.target || !event.target.closest) return
       if (!event.target.closest('#tools')) return
       var button = event.target.closest('[data-tool]')
-      var dot = event.target.closest('[data-paper]')
+      // 必须限定成"色板按钮"：<html> 自己也带 data-paper（底色就是挂在根元素上的），
+      // 用 closest('[data-paper]') 会把每一次点击都当成"选了某个颜色"——
+      // 于是换成米黄色之后，整排工具栏全部失灵（只有原生行为的链接和折叠面板还活着）。
+      var dot = event.target.closest('button.paper[data-paper]')
       // 选完颜色就把小浮层收起来：留着它会在某些窗口尺寸下盖住别的按钮
       if (dot) { applyPaper(dot.getAttribute('data-paper') || ''); closePops(); return }
       if (!button) return

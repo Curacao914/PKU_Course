@@ -1,0 +1,14 @@
+{
+  "name": "@course/notes-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "课程笔记 MCP 服务器：课程 → 课次 → 检索 → 全文的分层披露（stdio JSON-RPC，零依赖）",
+  "exports": {
+    ".": "./src/index.mjs"
+  },
+  "bin": {
+    "notes-mcp": "./bin/notes-mcp.mjs"
+  },
+  "dependencies": {}
+}

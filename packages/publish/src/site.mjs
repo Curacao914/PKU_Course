@@ -3,6 +3,7 @@ import path from 'node:path'
 
 import { escapeHtml, extractHeadings, renderMarkdown, slugify, summarizeMarkdown } from './markdown.mjs'
 import { READER_SCRIPT, courseNav, svgIcon, toolBar } from './reader.mjs'
+import { ONEPAGE_CSS, renderOnepagePage } from './onepage.mjs'
 
 /**
  * 站点生成：把已完成的笔记变成可以对外阅读的页面。
@@ -230,6 +231,9 @@ article .brief li { margin: 5px 0; }
   color: var(--ink-soft); font-size: 12.5px; line-height: 1.7; }
 /* 主题句：一行说清这节课在讲什么，关键词跟在它后面 */
 .lesson-theme { display: block; color: var(--ink); font-size: 13.5px; margin-bottom: 5px; }
+.onepage-link { margin-left: 8px; font-size: 12.5px; color: var(--accent); border-bottom: 1px solid var(--accent-soft); }
+.onepage-row .lesson-title a { font-weight: 600; }
+.onepage-row td { background: var(--bg-soft); }
 .lesson-meta, .lesson-date { color: var(--muted); font-size: 12.5px; text-align: right; white-space: nowrap; }
 @media (max-width: 720px) {
   /* 窄屏先保课次与关键词：时长与日期可以点进去看 */
@@ -398,6 +402,7 @@ details.note-meta pre { background: var(--bg-soft); border-radius: var(--radius)
 .selbar button:hover { background: var(--bg-soft); color: var(--ink); }
 .selbar svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; }
 
+${ONEPAGE_CSS}
 @media print {
   .rail, .progress, .totop, .topbar { display: none; }
   .shell { display: block; max-width: none; padding: 0; }
@@ -574,7 +579,7 @@ export function termAnchors(markdown = '') {
 
 export function buildNoteRecord({
   courseName, teacher = '', lessonTitle, markdown, replayKey = '', publishedAt = new Date().toISOString(), source = 'course-worker',
-  brief = null
+  brief = null, onepage = null
 }) {
   const body = String(markdown ?? '')
   if (!body.trim()) throw new Error('笔记正文为空，不能发布')
@@ -603,6 +608,14 @@ export function buildNoteRecord({
     // 首页表格里那列：主题句 + 关键词。首选写笔记时模型自己产出的（简报那一步顺手），
     // 老笔记没有这份判断时，退回到"从概念清单里按出现频次与标题命中排序"。
     theme: String(brief?.theme || '').trim(),
+    // 一页纸摘要（course onepage 的产物）：有就带着，页面与首页入口都靠它
+    onepage: onepage && String(onepage.markdown || '').trim()
+      ? {
+        title: String(onepage.title || '').trim(),
+        markdown: String(onepage.markdown).trim(),
+        chars: Number(onepage.chars || String(onepage.markdown).replace(/\s/g, '').length)
+      }
+      : null,
     ...keywordFields({
       brief,
       markdown: body,
@@ -710,7 +723,9 @@ ${PREF_SCRIPT}
   ${topRight}
   ${navHtml}
 </div></header>
-${layout === 'shell' ? '<div class="shell">' : layout === 'reading' ? '<div class="reading" id="reading">' : layout === 'wide' ? '<div class="wrap wide">' : '<div class="wrap">'}
+${layout === 'shell' ? '<div class="shell">' : layout === 'reading' ? '<div class="reading" id="reading">'
+    : layout === 'wide' ? '<div class="wrap wide">'
+    : layout === 'onepage' ? '<div class="onepage">' : '<div class="wrap">'}
 ${body}
 </div>
 ${scripts}
@@ -1204,6 +1219,29 @@ rail.addEventListener('click', event => {
 draw(rail.querySelector('button[data-course]')?.getAttribute('data-course'))
 </script>`
 
+/**
+ * 一页纸摘要页：/onepage/<课程>/<课次>.html
+ *
+ * 与笔记页共用顶栏工具（底色/打印/复制/字号），但正文换成一张 A4：
+ * 左侧列同一课程的课次，点一下换一节的一页纸。
+ */
+export function renderOnepagePageHtml(record, { siteOrigin = '', courseLessons = [] } = {}) {
+  const { body } = renderOnepagePage(record, { siteOrigin, courseLessons })
+  return pageShell({
+    title: `${record.onepage?.title || record.lessonTitle} · 一页纸 · ${SITE_NAME}`,
+    description: record.summary || '',
+    canonical: siteOrigin ? `${siteOrigin}/${onepageSlug(record.slug)}` : '',
+    layout: 'onepage',
+    topRight: toolBar({ ...record, onepage: true }),
+    body
+  })
+}
+
+/** notes/<课程>/<课次> → onepage/<课程>/<课次>：同一套目录结构，两套页面。 */
+export function onepageSlug(slug = '') {
+  return String(slug).replace(/^notes\//, 'onepage/')
+}
+
 export function renderTermIndexPage({ title, description, kind, notes = [], siteOrigin = '' } = {}) {
   const kindOf = { concepts: 'concepts', statutes: 'statutes', cases: 'cases' }
   const bucket = kindOf[kind] || 'concepts'
@@ -1462,9 +1500,25 @@ export function renderIndexPage(records, { siteOrigin = '' } = {}) {
     '</aside>'
   ].join('\n')
 
+  /** 每门课表格的第一行：这门课的一页纸摘要（从最新一节的开始看）。 */
+  const onepageRowOf = (course, items) => {
+    const withOnepage = items.filter(item => item.onepage?.markdown)
+    if (!withOnepage.length) return ''
+    const newest = withOnepage[0]
+    const words = withOnepage.reduce((total, item) => total + (item.onepage?.chars || 0), 0)
+    return [
+      '<tr class="onepage-row">',
+      `<td class="lesson-title"><a href="/${escapeHtml(onepageSlug(newest.slug))}.html">一页纸摘要</a></td>`,
+      `<td class="lesson-keywords" colspan="3"><span class="lesson-theme">${withOnepage.length} 节 · 每节一张 A4，左侧可切换课次</span>` +
+        `<span class="kw">共 ${words} 字</span></td>`,
+      '</tr>'
+    ].join('')
+  }
+
   const rowOf = record => [
     '<tr>',
-    `<td class="lesson-title"><a href="${escapeHtml(record.slug)}.html">${escapeHtml(record.lessonTitle)}</a></td>`,
+    `<td class="lesson-title"><a href="${escapeHtml(record.slug)}.html">${escapeHtml(record.lessonTitle)}</a>` +
+      `${record.onepage ? ` <a class="onepage-link" href="/${escapeHtml(onepageSlug(record.slug))}.html">一页纸</a>` : ''}</td>`,
     `<td class="lesson-keywords">${record.theme ? `<span class="lesson-theme">${escapeHtml(record.theme)}</span>` : ''}${(record.keywords || []).map(term => `<span class="kw">${escapeHtml(term)}</span>`).join('')}</td>`,
     record.readMinutes ? `<td class="lesson-meta">约 ${record.readMinutes} 分钟</td>` : '<td class="lesson-meta"></td>',
     record.publishedAt ? `<td class="lesson-date">${escapeHtml(String(record.publishedAt).slice(0, 10))}</td>` : '<td class="lesson-date"></td>',
@@ -1480,6 +1534,8 @@ export function renderIndexPage(records, { siteOrigin = '' } = {}) {
         `<section class="band" data-course="${escapeHtml(course)}">`,
         `<h2>${escapeHtml(course)}</h2>`,
         '<table class="lesson-table"><thead><tr><th>课次</th><th>关键词</th><th class="num">时长</th><th class="num">日期</th></tr></thead><tbody>',
+        // 第一行就是这门课的一页纸入口：复习时先看这一页，再决定翻不翻原文
+        onepageRowOf(course, items),
         items.map(rowOf).join('\n'),
         '</tbody></table>',
         '</section>'
@@ -1562,6 +1618,7 @@ export function refreshRecord(record = {}) {
   return {
     ...record,
     headings: extractHeadings(markdown),
+    onepage: record.onepage || null,
     readMinutes: record.readMinutes || estimateReadMinutes(markdown),
     metadata: extractNoteMetadata(markdown),
     anchors: termAnchors(markdown),
@@ -1601,11 +1658,16 @@ export function writeSite({ records = [], outputDir, siteOrigin = '' } = {}) {
     return { previous: at > 0 ? sameCourse[at - 1] : null, next: at >= 0 && at < sameCourse.length - 1 ? sameCourse[at + 1] : null }
   }
 
-  // 同一门课的全部课次：阅读页左栏要列出来（点着就能换课）
+  // 同一门课的全部课次：阅读页左栏要列出来（点着就能换课）。
+  // 带上一页纸有没有、多少字——一页纸页面的左栏会顺带标出来。
   const lessonsOfCourse = record => sorted
     .filter(item => item.courseName === record.courseName)
     .sort((a, b) => String(a.publishedAt).localeCompare(String(b.publishedAt)))
-    .map(item => ({ slug: item.slug, lessonTitle: item.lessonTitle }))
+    .map(item => ({
+      slug: item.slug,
+      lessonTitle: item.lessonTitle,
+      chars: item.onepage?.chars || 0
+    }))
 
   write('index.html', renderIndexPage(sorted, { siteOrigin }))
   for (const record of sorted) {
@@ -1618,6 +1680,14 @@ export function writeSite({ records = [], outputDir, siteOrigin = '' } = {}) {
     // 正文全文就不必再内嵌进 HTML（那会让每页翻一倍）
     const fileName = String(record.slug).split('/').pop()
     write(`md/${fileName}.md`, `${record.markdown || ''}\n`)
+    // 一页纸：有就写出来（没有的课次不占位，页面上的入口只在有时出现）
+    if (record.onepage?.markdown) {
+      write(`${onepageSlug(record.slug)}.html`, renderOnepagePageHtml(record, {
+        siteOrigin,
+        courseLessons: lessonsOfCourse(record)
+      }))
+      write(`md/${fileName}-一页纸.md`, `${record.onepage.markdown || ''}\n`)
+    }
   }
 
   // 索引页与搜索页：数据全部来自各篇笔记的元数据块，不重新跑模型

@@ -13,6 +13,7 @@ import {
   readSiteIndex,
   renderIndexPage,
   renderKnowledgeMapPage,
+  renderOnepagePageHtml,
   refreshRecord,
   renderFeed,
   renderNotePage,
@@ -180,6 +181,11 @@ test('the reading page carries a course rail, a toolbar and the reader script', 
   assert.match(html, /hit\('u'\)/)
   assert.match(html, /hit\('h'\)/)
   assert.match(html, /code === 'Key' \+ letter\.toUpperCase\(\)/)
+  // 复核过的真实 bug：<html> 自己也带 data-paper，用 closest('[data-paper]') 会把
+  // 每一次点击都当成选颜色 —— 换成米黄之后整排工具栏失灵
+  assert.match(html, /closest\('button\.paper\[data-paper\]'\)/, '色板选择必须只认色板按钮')
+  assert.ok(!/var dot = event\.target\.closest\('\[data-paper\]'\)/.test(html),
+    '色板判定不能写成对根元素也生效的形式（<html> 自己也带 data-paper）')
   assert.match(html, /function annotsInRange/, '再按一次同一个按钮要能取消')
   assert.match(html, /range\.intersectsNode\(element\)/, '选区把批注整个包住时也要认出来')
   assert.match(html, /parent\.removeChild\(element\)/, '取消就是把包着的 span 拆掉')
@@ -448,6 +454,61 @@ test('keywords chosen while writing the brief win over the ranked fallback', () 
   assert.equal(chosen.keywordsSource, 'brief')
   assert.deepEqual(chosen.keywords, ['法人人格否认', '资本维持', '风险外部化'])
   assert.deepEqual(refreshRecord(chosen).keywords, ['法人人格否认', '资本维持', '风险外部化'], '模型挑的关键词是判断，重建时不能退回排序结果')
+})
+
+test('the one-page view is an A4 sheet that cannot overflow', () => {
+  const built = record({
+    markdown: NOTE,
+    onepage: {
+      title: '共犯成立的条件与判断顺序',
+      markdown: ['## 一、成立条件', '', '- 共同故意', '- 共同行为', '', '## 二、辨析', '', '| 情形 | 结论 |', '| --- | --- |', '| 片面共犯 | 不成立 |'].join('\n'),
+      chars: 60
+    }
+  })
+  const html = renderOnepagePageHtml(built, {
+    siteOrigin: 'https://course.law-tech.dev',
+    courseLessons: [
+      { slug: built.slug, lessonTitle: built.lessonTitle, chars: 60 },
+      { slug: 'notes/刑法分论/第9节', lessonTitle: '第9节 罪数', chars: 0 }
+    ]
+  })
+  assert.match(html, /<div class="onepage">/)
+  assert.match(html, /<article class="sheet" id="sheet">/)
+  assert.match(html, /id="sheetBody"/)
+  assert.match(html, /column-count: 3/, '一页纸按三栏排')
+  assert.match(html, /@page \{ size: A4/, '打印就是一张 A4')
+  assert.match(html, /aspect-ratio: 210 \/ 297/, '屏幕上也是 A4 比例')
+  // 放不下时自动缩小，缩到底还放不下就如实标记（绝不允许悄悄截断）
+  assert.match(html, /--sheet-scale/)
+  assert.match(html, /while \(overflows\(\) && scale > 0\.72/)
+  assert.match(html, /data-overflow/)
+  assert.match(html, /内容超出 A4，请精简/)
+  // 左栏点的是"一页纸"，不是笔记
+  assert.match(html, /href="\/onepage\/刑法分论\/第10-12节-共犯与罪数\.html"/)
+  assert.match(html, /aria-current="page"/)
+  // 顶栏工具仍在（打印/底色/复制）
+  assert.match(html, /<header class="topbar">[\s\S]{0,600}id="tools"/)
+  assert.match(html, /data-tool="print"/)
+})
+
+test('writeSite writes a one-page file only for lessons that have one', () => {
+  const dir3 = fs.mkdtempSync(path.join(os.tmpdir(), 'course-site-'))
+  const withOne = record({
+    markdown: NOTE,
+    onepage: { title: '一页', markdown: '## 甲\n\n- 一', chars: 10 }
+  })
+  const without = record({ lessonTitle: '第9节 罪数', markdown: NOTE })
+  const site = writeSite({ records: [withOne, without], outputDir: dir3 })
+  const written = site.written.sort()
+  assert.ok(written.includes('onepage/刑法分论/第10-12节-共犯与罪数.html'), '有的一页纸要写出来')
+  assert.ok(!written.some(file => file.startsWith('onepage/') && file.includes('第9节')), '没有一页纸的课次不占位')
+  const page = fs.readFileSync(path.join(dir3, 'onepage/刑法分论/第10-12节-共犯与罪数.html'), 'utf8')
+  assert.match(page, /class="sheet"/)
+  // 首页那门课的第一行是这门课的一页纸入口
+  const home = fs.readFileSync(path.join(dir3, 'index.html'), 'utf8')
+  assert.match(home, /class="onepage-row"/)
+  assert.match(home, /一页纸摘要/)
+  assert.match(home, /class="onepage-link"/)
 })
 
 test('a corrupt index is reported rather than silently treated as empty', () => {
