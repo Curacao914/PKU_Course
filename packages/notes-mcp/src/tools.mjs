@@ -66,13 +66,16 @@ export const TOOL_DEFINITIONS = [
     description:
       '跨课程、跨课次检索：命中课程名、标题、小节标题、theme、keywords、概念、法条、案例、摘要；' +
       'includeBody=true 时再扫正文。返回命中的片段与定位（哪一节），不返回全文——' +
-      '只有确定要看细节时才用 get_note 读那一节。默认只查索引（快、省 token）；' +
-      '问"正文里讲过但没进关键词的东西"时再打开 includeBody。',
+      '只有确定要看细节时才用 get_note 读那一节。' +
+      '查询可以是术语，也可以是**一整句话**或几个词（"交易成本 资产专用性""为什么企业会存在"）——' +
+      '会先去掉疑问词与虚词再切词，命中按"词有多稀有"加权，专名比泛词更管用；' +
+      '一个词写错（主义↔主意）时会在语料里找近似词并在结果里说明。' +
+      '默认只查索引（快、省 token）；索引一条都没命中时会自动再扫一遍正文，并在结果里标出 bodyScanned。',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
       properties: {
-        query: { type: 'string', minLength: 1, description: '检索词，中文关键词即可（子串匹配，不分大小写）' },
+        query: { type: 'string', minLength: 1, description: '检索词或一句话（可分多次给词，如"交易成本 资产专用性"；疑问词与"的/和"这类虚词会被自动去掉）' },
         course: { type: 'string', description: '可选：只在这一门课里检索' },
         includeBody: { type: 'boolean', default: false, description: '是否连正文一起检索；远程数据源会逐篇下载 Markdown，本地发布库免费' },
         limit: { type: 'integer', minimum: 1, maximum: 50, default: 8, description: '最多返回多少条命中，默认 8' }
@@ -126,15 +129,15 @@ export const TOOL_DEFINITIONS = [
     title: '知识检索（OpenAI 标准）',
     description:
       'OpenAI 标准知识检索接口：输入一个 query，返回 { results: [{ id, title, url }] }。' +
-      '与 course 专用的 search_notes 是同一套检索，只是输出格式不同——' +
+      '与 course 专用的 search_notes 是同一套检索（多词、自然语言问句、错别字都能用），只是输出格式不同——' +
       '需要按课程/课次分层浏览时用 list_courses / get_course，标准接口给不支持自定义工具的客户端用。' +
-      '返回的 id 可直接传给 fetch。',
+      '命中定位到小节时，id 形如 slug#小节，可直接传给 fetch 只取那一节；否则 id 是整篇 slug。',
     annotations: READ_ONLY,
     inputSchema: {
       type: 'object',
       additionalProperties: false,
       properties: {
-        query: { type: 'string', minLength: 1, description: '检索词，中文关键词即可' }
+        query: { type: 'string', minLength: 1, description: '检索词或一句话；多词用空格分开即可' }
       },
       required: ['query']
     },
@@ -148,7 +151,7 @@ export const TOOL_DEFINITIONS = [
             type: 'object',
             required: ['id', 'title', 'url'],
             properties: {
-              id: { type: 'string', description: '稳定标识，可直接传给 fetch' },
+              id: { type: 'string', description: '稳定标识，可直接传给 fetch；形如 slug 或 slug#小节' },
               title: { type: 'string' },
               url: { type: 'string', description: '用户可直接打开的 canonical URL' }
             }

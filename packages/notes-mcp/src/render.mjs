@@ -59,8 +59,14 @@ export function renderCourse(data) {
 }
 
 export function renderSearch(data) {
-  const scope = data.includeBody ? '索引 + 正文' : '索引'
+  // 说清"这次是怎么找到的"：只查了索引、还是连正文一起扫了、有没有走错别字回退。
+  // 模型据此判断结果有多可信——把猜着匹配的结果说成精确命中，比不命中更糟。
+  const scope = data.includeBody ? '索引 + 正文' : data.bodyScanned ? '索引 + 自动扫正文' : '索引'
   const lines = [`查询「${data.query}」命中 ${data.total} 处（scope：${scope}；扫描 ${data.scanned} 篇）`]
+  if (data.fuzzy?.length) {
+    lines.push(`（查询里有语料中不存在的词，已按近似词检索：${data.fuzzy.map(item => `${item.from}→${item.to}`).join('、')}）`)
+  }
+  if (data.terms?.length) lines.push(`（实际检索词：${data.terms.slice(0, 8).join('、')}）`)
   data.hits.forEach((hit, index) => {
     lines.push(`${index + 1}. [${hit.kinds.join('+')}] ${hit.courseName} · ${hit.lessonTitle}`)
     lines.push(`   slug: ${line(hit.slug, lessonDateOf(hit))}`)
@@ -70,7 +76,7 @@ export function renderSearch(data) {
     for (const snippet of hit.snippets) lines.push(`   片段：${snippet}`)
   })
   if (!data.hits.length) {
-    lines.push('没有命中。可以换关键词、用 course="课程名" 限定范围，或 includeBody=true 连正文一起找。')
+    lines.push('没有命中。可以换更具体的术语/法条/人名（疑问句与虚词会被去掉），用 course="课程名" 限定范围，或 includeBody=true 连正文一起找。')
   }
   if (data.bodySkipped) lines.push(`（${data.bodySkipped} 篇正文没取到，已跳过；本地发布库不受影响）`)
   lines.push('', '下一步：get_note(slug="…") 读命中的那一节全文。')

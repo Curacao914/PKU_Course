@@ -193,15 +193,27 @@ test('search / fetch：按 OpenAI 标准返回（单个 text content + JSON 字�
   // structuredContent 与文本里那份必须一致，否则不同客户端会看到两套结果
   assert.deepEqual(result.structuredContent, payload)
 
+  // 命中定位到小节时，id 直接带小节（slug#小节）：调用方不必先读整篇再自己找，
+  // fetch 本来就支持这种 id —— 这是这条链路最省上下文的一步。
+  const located = payload.results.find(item => item.id.includes('#'))
+  assert.ok(located, '命中到小节时应当给出 section 级 id')
+  assert.match(located.title, / · /)
+
   const first = payload.results[0]
   const fetched = await request(10, 'tools/call', { name: 'fetch', arguments: { id: first.id } })
   const document = JSON.parse(fetched.result.content[0].text)
   assert.equal(document.id, first.id)
   assert.equal(document.url, first.url)
-  assert.ok(document.text.length > 100)
+  assert.ok(document.text.length > 20)
   assert.equal(document.metadata.course.length > 0, true)
   assert.ok(document.metadata.lesson.length > 0)
   assert.deepEqual(fetched.result.structuredContent, document)
+
+  // 整篇 slug 仍然可取到全文（不在小节级 id 上做假设）
+  const whole = await request(12, 'tools/call', { name: 'fetch', arguments: { id: 'notes/国际法学/第一课-国家责任的构成' } })
+  const wholeDoc = JSON.parse(whole.result.content[0].text)
+  assert.ok(wholeDoc.text.length > 100, '整篇应当明显长于单节')
+  assert.equal(wholeDoc.metadata.section, '')
 
   // id 支持 slug#小节：只取那一节，比整篇省上下文
   const section = await request(11, 'tools/call', { name: 'fetch', arguments: { id: first.id + '#课程概览' } })

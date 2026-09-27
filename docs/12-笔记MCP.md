@@ -14,7 +14,7 @@
 |---|---|---|---|
 | 1 | `list_courses` | 课程名、课次数、最新课次时间、该课 theme/keywords 汇总 | 一门课 3—5 行 |
 | 2 | `get_course` | 某门课的课次清单：lessonTitle、lessonDate、readMinutes、theme、keywords、摘要 | 一节 4—6 行 |
-| 2.5 | `search_notes` | 跨课程/跨课次命中的**片段 + 定位**（哪一节），可选扫正文 | 每条 2—3 行 |
+| 2.5 | `search_notes` | 跨课程/跨课次命中的**片段 + 定位**（哪一节）；多词、整句问句、错别字都能用；索引没有命中时自动扫正文 | 每条 2—3 行 |
 | 3 | `get_note` | 整篇 Markdown；`section` 只取一节，`maxChars` 限长 | 一节 1—3k 字 |
 | 3.5 | `list_terms` | 某门课的概念/法条/案例清单（带次数与落点） | 复习型问题一次看全 |
 
@@ -123,7 +123,7 @@ keywords：国家责任、归因、反措施、国际法院
 |---|---|---|---|
 | `list_courses` | — | `query`、`limit`(≤200) | 第一层；课程名/教师名子串过滤 |
 | `get_course` | `course` | `limit`(≤500)、`order`(asc/desc)、`includeOutline` | 第二层；课程名支持部分匹配，歧义时返回候选 |
-| `search_notes` | `query` | `course`、`includeBody`、`limit`(≤50) | 跨课次检索；默认只查索引（课程名/标题/小节标题/theme/keywords/概念/法条/案例/摘要），`includeBody=true` 才扫正文 |
+| `search_notes` | `query` | `course`、`includeBody`、`limit`(≤50) | 跨课次检索；默认先查索引（课程名/标题/小节标题/theme/keywords/概念/法条/案例/摘要），**一条都没命中时自动再扫正文**并在结果里标 `bodyScanned`；`includeBody=true` 表示一开始就连正文一起查 |
 | `get_note` | —（`slug` 或 `course`+`lesson` 二选一） | `section`、`maxChars`(200—60000，默认 12000) | 第三层；`section` 按小节标题或标题 id 匹配 |
 | `list_terms` | `course` | `kind`(all/concepts/statutes/cases/keywords)、`limit` | 概念/法条/案例清单，带次数与落点锚点 |
 
@@ -343,8 +343,11 @@ JSON-RPC（`initialize` 版本协商、`tools/list`、`tools/call` 未知工具/
   没有可靠的变化通知源；短 TTL 与 mtime 已经够用。
 - **不做结构化输出（`outputSchema`/`structuredContent`）**：工具回给模型的是紧凑文本，
   结构化数据走 resources；两套并存会让同一份数据在上下文里出现两次。
-- **检索是子串匹配，不是向量检索**：中文法学术语短、同义词少，子串 + 权重排序在
-  百来篇笔记的规模上足够；真要做语义检索，应该加在站点侧（一次算好，MCP 只读结果），
+- **检索是词面匹配，不是向量检索**：查询会先去疑问词与虚词、再按虚词切开，
+  长片段补 2—4 字 n-gram，命中用「字段权重 × 词权重 × IDF」排序（只在一两节出现的专名
+  权重最高），一个词都没命中时用语料里出现过的词做编辑距离 1 的回退。
+  这套在百来篇笔记的规模上够用，而且完全可解释（能说清"为什么它排第一"）；
+  真要做语义检索，应该加在站点侧（一次算好，MCP 只读结果），
   而不是让每个客户端各算一遍。
 - **不内置 HTTP 传输**：见 §7.3；在只服务本机与 ssh 桥接的场景里，stdio 更简单也更安全。
 - **老笔记没有 theme/keywords 时**：列表里那两行会空着（不影响其他层）；

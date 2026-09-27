@@ -1,5 +1,6 @@
 import { ResourceNotFoundError, ToolError } from './errors.mjs'
 import { clip, extractHeadings, findSection, lessonDateOf, splitSections } from './records.mjs'
+import { searchRecords } from './search.mjs'
 import { COURSES_URI, courseUri, noteUri, parseResourceUri, termsUri } from './uris.mjs'
 
 /**
@@ -40,43 +41,6 @@ function topTerms(values, limit) {
     .map(item => item.text)
 }
 
-/** 大小写无关的全部命中位置（最多 8 处，避免超长正文里同一个词刷屏）。 */
-function findMatches(text, needle) {
-  const haystack = String(text ?? '')
-  const wanted = String(needle ?? '')
-  if (!wanted) return []
-  const lowered = haystack.toLowerCase()
-  const target = wanted.toLowerCase()
-  const out = []
-  let from = 0
-  while (out.length < 8) {
-    const at = lowered.indexOf(target, from)
-    if (at < 0) break
-    out.push(at)
-    from = at + Math.max(1, target.length)
-  }
-  return out
-}
-
-/** 命中点前后各取一段，保证片段本身自足（模型不该为了看懂片段再去读全文）。 */
-function snippetAround(text, at, length, radius = 56) {
-  const source = String(text ?? '')
-  const start = Math.max(0, Math.min(at, source.length))
-  const end = Math.min(source.length, start + Math.max(1, length))
-  const before = source.slice(Math.max(0, start - radius), start)
-  const hit = source.slice(start, end)
-  const after = source.slice(end, Math.min(source.length, end + radius))
-  return `${start > radius ? '…' : ''}${before}「${hit}」${after}${end + radius < source.length ? '…' : ''}`
-}
-
-/** 术语锚点 → 小节标题（发布时算好的 anchors 就是为「点进正文某一节」准备的）。 */
-function anchorLocation(record, bucket, term) {
-  const id = record?.anchors?.[bucket]?.[term]
-  if (!id) return null
-  const heading = record.headings.find(item => item.id === id)
-  return { title: heading?.text || '', id }
-}
-
 function isoOrUndefined(value) {
   const date = new Date(String(value ?? ''))
   return Number.isNaN(date.getTime()) ? undefined : date.toISOString()
@@ -94,18 +58,6 @@ function resolveCourse(records, course) {
   if (partial.length > 1) throw new ToolError(`课程「${course}」不唯一，可能是：${partial.join(' / ')}。请给完整课程名。`)
   throw new ToolError(`找不到课程「${course}」。现有课程：${names.join(' / ') || '（发布库是空的）'}`)
 }
-
-/** 检索字段与权重：标题/主题/关键词最重，正文最轻——同一个词出现在标题里更可能是"这节在讲它"。 */
-const FIELD_SPECS = [
-  { kind: '标题', weight: 12, values: record => [record.lessonTitle, ...record.headings.map(head => head.text)] },
-  { kind: '主题', weight: 10, values: record => [record.theme] },
-  { kind: '关键词', weight: 9, values: record => [...record.keywords, ...record.metadata.keywords] },
-  { kind: '概念', weight: 8, bucket: 'concepts', values: record => record.metadata.concepts },
-  { kind: '法条', weight: 8, bucket: 'statutes', values: record => record.metadata.statutes },
-  { kind: '案例', weight: 8, bucket: 'cases', values: record => record.metadata.cases },
-  { kind: '摘要', weight: 4, values: record => [record.summary, record.brief?.briefing, ...(record.brief?.keyPoints || [])] },
-  { kind: '课程', weight: 3, values: record => [record.courseName, record.teacher] }
-]
 
 export function createNotesService({ source, siteOrigin = '' } = {}) {
   if (!source) throw new Error('createNotesService 需要 source（createSource 的产物）')
@@ -181,79 +133,35 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
   }
 
   /** 跨课次/跨课程检索：返回片段 + 定位，不返回全文。 */
+  /**
+   * 跨课次/跨课程检索。
+   *
+   * 查询解析（多词、自然语言、错别字）与打分（字段权重 × IDF）都在 search.mjs，
+   * 这里只负责：取数据、限定范围、把结果按 limit 收口。
+   */
   async function searchNotes({ query = '', course = '', includeBody = false, limit = 8 } = {}) {
     const text = String(query || '').trim()
     if (!text) throw new ToolError('search_notes 需要非空的 query。')
     const records = await source.listNotes()
     const scoped = course ? records.filter(record => record.courseName === resolveCourse(records, course)) : records
-    const needle = norm(text)
-    const hits = []
-    let bodySkipped = 0
-
-    for (const record of scoped) {
-      const matched = []
-      for (const spec of FIELD_SPECS) {
-        for (const value of spec.values(record)) {
-          const fieldText = collapse(value)
-          const occurrences = findMatches(fieldText, needle)
-          if (!occurrences.length) continue
-          matched.push({
-            kind: spec.kind,
-            weight: spec.weight,
-            count: occurrences.length,
-            location: spec.bucket ? anchorLocation(record, spec.bucket, String(value).trim()) : null,
-            snippets: occurrences.slice(0, 2).map(at => snippetAround(fieldText, at, needle.length))
-          })
-        }
-      }
-      if (includeBody) {
-        let markdown = record.markdown
-        if (markdown === undefined) {
-          try {
-            markdown = await source.readMarkdown(record.slug)
-          } catch {
-            bodySkipped += 1
-            markdown = ''
-          }
-        }
-        for (const section of splitSections(markdown)) {
-          const bodyText = collapse(section.ownBody)
-          const occurrences = findMatches(bodyText, needle)
-          if (!occurrences.length) continue
-          matched.push({
-            kind: '正文',
-            weight: 2,
-            count: occurrences.length,
-            location: { title: section.title, id: section.id },
-            snippets: occurrences.slice(0, 2).map(at => snippetAround(bodyText, at, needle.length))
-          })
-        }
-      }
-      if (!matched.length) continue
-      const best = [...matched].sort((left, right) => right.weight - left.weight || right.count - left.count)[0]
-      hits.push({
-        slug: record.slug,
-        courseName: record.courseName,
-        lessonTitle: record.lessonTitle,
-        lessonDate: lessonDateOf(record),
-        kind: best.kind,
-        kinds: [...new Set(matched.map(item => item.kind))],
-        location: matched.map(item => item.location).find(Boolean) || null,
-        snippets: [...new Set(matched.flatMap(item => item.snippets))].slice(0, 3),
-        score: matched.reduce((sum, item) => sum + item.weight * Math.min(item.count, 3), 0)
-      })
+    const found = await searchRecords({
+      records: scoped,
+      query: text,
+      includeBody: Boolean(includeBody),
+      readMarkdown: slug => source.readMarkdown(slug)
+    })
+    // 全是疑问词与虚词的查询（"为什么是这样的呢"）解析后一个词都不剩：
+    // 与其把整库都当命中，不如让调用方知道这条查询本身没带信息
+    if (!found.terms.length) {
+      throw new ToolError(`查询「${text}」里没有可检索的词：去掉疑问词与虚词之后为空，请给出具体的术语、法条或人名。`)
     }
-
-    hits.sort((left, right) => right.score - left.score || String(right.lessonDate).localeCompare(String(left.lessonDate)))
     return {
       query: text,
       course: course ? scoped[0]?.courseName || String(course) : '',
       includeBody: Boolean(includeBody),
-      scanned: scoped.length,
-      bodySkipped,
-      total: hits.length,
+      ...found,
       limit,
-      hits: hits.slice(0, limit)
+      hits: found.hits.slice(0, limit)
     }
   }
 
@@ -345,9 +253,12 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
       const record = bySlug.get(hit.slug)
       const course = hit.courseName || record?.courseName || ''
       const lesson = hit.lessonTitle || record?.lessonTitle || ''
+      // 命中落在某一节时，id 直接给到那一节（slug#小节）：调用方不必先读整篇再自己找，
+      // fetch 本来就支持这种 id；没定位到小节时退回整篇 slug。
+      const section = hit.location?.title || ''
       return {
-        id: hit.slug,
-        title: course ? `${course} · ${lesson}` : lesson,
+        id: section ? `${hit.slug}#${encodeURIComponent(section)}` : hit.slug,
+        title: [course, lesson, section].filter(Boolean).join(' · '),
         url: noteUrl(hit.slug)
       }
     })

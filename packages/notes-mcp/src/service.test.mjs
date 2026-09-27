@@ -108,25 +108,34 @@ test('search_notes：索引命中给出片段与定位（哪一节）', async ()
   assert.equal(scoped.hits.length, 0)
 })
 
-test('search_notes：includeBody 才扫正文，并且正文命中能定位到小节', async () => {
-  const metadataOnly = await service.searchNotes({ query: '有效控制' })
-  assert.equal(metadataOnly.total, 0)
+test('search_notes：元数据没命中时自动扫正文（并说明扫过），命中能定位到小节', async () => {
+  // 内容类问题在标题/关键词里根本没有对应的词：只查元数据必然空手，所以默认也会再扫一遍正文，
+  // 并把 bodyScanned 标出来——调用方应当知道这次结果是从正文里找到的。
+  const auto = await service.searchNotes({ query: '有效控制' })
+  assert.equal(auto.total, 1)
+  assert.equal(auto.bodyScanned, true, '自动扫过正文要说出来')
+  assert.equal(auto.hits[0].slug, NOTE_ONE)
+  assert.equal(auto.hits[0].kind, '正文')
+  assert.equal(auto.hits[0].location.title, '二、归因')
+  assert.ok(auto.hits[0].snippets.some(snippet => snippet.includes('有效控制')))
+  assert.equal(auto.bodySkipped, 0)
 
   const withBody = await service.searchNotes({ query: '有效控制', includeBody: true })
   assert.equal(withBody.total, 1)
-  const hit = withBody.hits[0]
-  assert.equal(hit.slug, NOTE_ONE)
-  assert.equal(hit.kind, '正文')
-  assert.equal(hit.location.title, '二、归因')
-  assert.ok(hit.snippets.some(snippet => snippet.includes('有效控制')))
-  assert.equal(withBody.bodySkipped, 0)
+  assert.equal(withBody.hits[0].slug, NOTE_ONE)
+
+  // 元数据命中时不必扫正文：省一次正文读取
+  const metadata = await service.searchNotes({ query: '归因' })
+  assert.equal(metadata.bodyScanned, false)
 })
 
 test('search_notes：空查询报错，limit 截断但保留 total', async () => {
   await assert.rejects(() => service.searchNotes({ query: '   ' }), ToolError)
-  const data = await service.searchNotes({ query: '一', includeBody: true, limit: 2 })
-  assert.ok(data.total >= 2)
-  assert.equal(data.hits.length, 2)
+  // 全是疑问词与虚词的查询：解析之后一个词都不剩，直接报错，而不是把整库都当命中
+  await assert.rejects(() => service.searchNotes({ query: '为什么是这样的呢' }), ToolError)
+  const data = await service.searchNotes({ query: '归因', includeBody: true, limit: 2 })
+  assert.ok(data.total >= 1)
+  assert.equal(data.hits.length, Math.min(2, data.total))
 })
 
 test('get_note：按 slug、按课程+课次两种取法都能拿到全文', async () => {
