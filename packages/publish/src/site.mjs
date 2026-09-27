@@ -332,7 +332,8 @@ details.note-meta pre { background: var(--bg-soft); border-radius: var(--radius)
 .tools { display: flex; gap: 2px; align-items: center; }
 @media (max-width: 720px) { .tools { gap: 0; } .tools button, .tools a { width: 30px; height: 30px; } }
 .tools button, .tools a { width: 32px; height: 32px; border-radius: 50%; border: 0; background: none; color: var(--ink-soft);
-  display: inline-flex; align-items: center; justify-content: center; cursor: pointer; position: relative; }
+  display: inline-flex; align-items: center; justify-content: center; cursor: pointer; position: relative;
+  touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
 /* 小浮层的定位基准：少了这一条，浮层会以整条顶栏为基准，跑到屏幕另一头去 */
 .tools .tool-wrap { position: relative; display: inline-flex; }
 .tools button:hover, .tools a:hover { background: var(--bg-soft); color: var(--ink); }
@@ -340,7 +341,7 @@ details.note-meta pre { background: var(--bg-soft); border-radius: var(--radius)
 .tools svg { width: 17px; height: 17px; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 /* 小浮层挂在按钮正下方：贴 right:0 会跑到屏幕最右边，和按钮对不上 */
 .tools .pop { position: absolute; top: 38px; left: 50%; transform: translateX(-50%); min-width: 150px; padding: 10px 12px; border-radius: 12px;
-  border: 1px solid var(--line); background: var(--card-bg); box-shadow: var(--shadow-md); display: none; }
+  border: 1px solid var(--line); background: var(--card-bg); box-shadow: var(--shadow-md); display: none; z-index: 70; }
 .tools .open .pop { display: block; }
 .tools .dot-row { display: flex; gap: 8px; }
 .tools .paper { width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--line-strong); cursor: pointer; padding: 0; }

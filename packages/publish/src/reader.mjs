@@ -145,10 +145,14 @@ export const READER_SCRIPT = '<script>' + String.raw`
   if (navMenu) navMenu.addEventListener('toggle', function () { if (navMenu.open) closePops() })
 
   if (tools) {
-    tools.addEventListener('click', function (event) {
+    // 挂在 document 上而不是 #tools 上：即使某次重绘换掉了按钮节点，点击也仍然能被接住
+    document.addEventListener('click', function (event) {
+      if (!event.target || !event.target.closest) return
+      if (!event.target.closest('#tools')) return
       var button = event.target.closest('[data-tool]')
       var dot = event.target.closest('[data-paper]')
-      if (dot) { applyPaper(dot.getAttribute('data-paper') || ''); return }
+      // 选完颜色就把小浮层收起来：留着它会在某些窗口尺寸下盖住别的按钮
+      if (dot) { applyPaper(dot.getAttribute('data-paper') || ''); closePops(); return }
       if (!button) return
       var tool = button.getAttribute('data-tool')
       var wrap = button.parentElement
@@ -184,7 +188,7 @@ export const READER_SCRIPT = '<script>' + String.raw`
         closeNav()
         if (!open) wrap.classList.add('open')
       }
-    })
+    }, true)
   }
   var range = document.getElementById('fontRange')
   if (range) {
