@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { checkFreeSpace, createValidatedAcquisitionRuntime, formatBytes } from '@course/acquisition'
 import {
@@ -111,6 +112,34 @@ import { describeConfig, pythonEnvironment } from './config.mjs'
  * 每个命令都接收同一个上下文，所有外部世界（浏览器、子进程、文件系统）都从
  * 上下文进入，因此命令本身可以在没有 Chrome、没有网络、没有凭据的情况下测试。
  */
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
+
+/**
+ * 站点产品文档：docs/public/*.md。
+ *
+ * 仓库里的 docs/ 是设计过程，docs/public/ 是**对外契约**——发布时渲染成 /<name>/ 页面，
+ * 同时原样写出 /<name>.md，并汇总进 /llms.txt。以后新增的 API 与 MCP 能力都放这里。
+ */
+function readPublicDocs() {
+  const dir = path.join(REPO_ROOT, 'docs', 'public')
+  if (!fs.existsSync(dir)) return []
+  return fs.readdirSync(dir)
+    .filter(name => name.endsWith('.md') && !name.startsWith('_'))
+    .sort()
+    .map(name => {
+      const markdown = fs.readFileSync(path.join(dir, name), 'utf8')
+      const title = (markdown.match(/^#\s+(.+)$/m) || [, name.replace(/\.md$/, '')])[1].trim()
+      const firstLine = markdown.split('\n').map(line => line.trim())
+        .find(line => line && !line.startsWith('#') && !line.startsWith('`')) || ''
+      return {
+        pathName: name.replace(/\.md$/, ''),
+        title,
+        description: firstLine.replace(/\*\*/g, '').slice(0, 120),
+        markdown
+      }
+    })
+}
+
 export function createCommands(context) {
   const {
     config, acquire, runPython, which, openStore,
@@ -840,7 +869,8 @@ export function createCommands(context) {
       const site = writeSite({
         records: library,
         outputDir: siteRoot,
-        siteOrigin: options.options.origin || 'https://course.law-tech.dev'
+        siteOrigin: options.options.origin || 'https://course.law-tech.dev',
+        docs: readPublicDocs()
       })
       const index = readSiteIndex(siteRoot)
       const purge = await purgeCache(options, { reason: '重建站点' })
@@ -896,7 +926,8 @@ export function createCommands(context) {
     const site = writeSite({
       records: nextLibrary,
       outputDir: siteRoot,
-      siteOrigin: options.options.origin || 'https://course.law-tech.dev'
+      siteOrigin: options.options.origin || 'https://course.law-tech.dev',
+      docs: readPublicDocs()
     })
     const index = readSiteIndex(siteRoot)
     const purge = purgeCache(options, { reason: `发布 ${record.slug}` })

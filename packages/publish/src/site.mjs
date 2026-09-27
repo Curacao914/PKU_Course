@@ -4,6 +4,7 @@ import path from 'node:path'
 import { escapeHtml, extractHeadings, renderMarkdown, slugify, summarizeMarkdown } from './markdown.mjs'
 import { READER_SCRIPT, courseNav, svgIcon, toolBar } from './reader.mjs'
 import { ONEPAGE_CSS, renderOnepagePage } from './onepage.mjs'
+import { renderDocPage, renderLlmsTxt, usePageShell } from './docs.mjs'
 
 /**
  * 站点生成：把已完成的笔记变成可以对外阅读的页面。
@@ -410,6 +411,10 @@ ${ONEPAGE_CSS}
   article { font-size: 11pt; }
 }
 `
+// 文档模块要复用站点外壳，但不想反向依赖整站；这里把外壳交给它。
+// 函数声明有提升，模块顶层就能拿到。
+usePageShell(pageShell)
+
 export function noteSlug({ courseName, lessonTitle }) {
   return `notes/${slugify(courseName, 'course')}/${slugify(lessonTitle, 'lesson')}`
 }
@@ -1635,7 +1640,26 @@ export function refreshRecord(record = {}) {
   }
 }
 
-export function writeSite({ records = [], outputDir, siteOrigin = '' } = {}) {
+/** 文档页：markdown 由仓库里的 docs/public/*.md 提供，发布时渲染成页面与 .md 两份。 */
+export function writeDocs({ outputDir, siteOrigin = '', pages = [] } = {}) {
+  const root = path.resolve(outputDir)
+  const written = []
+  for (const page of pages) {
+    const pathName = String(page.pathName || '').replace(/^\/+|\/+$/g, '')
+    if (!pathName) continue
+    const html = renderDocPage({ ...page, siteOrigin, pathName })
+    const htmlPath = path.join(root, pathName, 'index.html')
+    fs.mkdirSync(path.dirname(htmlPath), { recursive: true })
+    fs.writeFileSync(htmlPath, html)
+    written.push(`${pathName}/index.html`)
+    // 原文同时落盘：AI 取 /<path>.md 比解析 HTML 省事得多
+    fs.writeFileSync(path.join(root, `${pathName}.md`), `${String(page.markdown || '').trim()}\n`)
+    written.push(`${pathName}.md`)
+  }
+  return written
+}
+
+export function writeSite({ records = [], outputDir, siteOrigin = '', docs = [] } = {}) {
   if (!outputDir) throw new Error('写站点需要 outputDir')
   const root = path.resolve(outputDir)
   fs.mkdirSync(root, { recursive: true })
@@ -1706,6 +1730,9 @@ export function writeSite({ records = [], outputDir, siteOrigin = '' } = {}) {
     description: '课堂上讲过的案例，以及它出现在哪些课次。'
   }))
   write('map/index.html', renderKnowledgeMapPage({ notes: sorted, siteOrigin }))
+  // 文档页与 llms.txt：AI 的第一站。文档内容来自仓库里的 docs/public/*.md
+  for (const relative of writeDocs({ outputDir: root, siteOrigin, pages: docs })) written.push(relative)
+  write('llms.txt', renderLlmsTxt({ records: sorted, siteOrigin, pages: docs }))
   write('search/index.html', renderSearchPage({ siteOrigin }))
   write('feed.xml', renderFeed(sorted, { siteOrigin }))
   write('notes.json', `${JSON.stringify({

@@ -266,6 +266,7 @@ test('writeSite lays out the whole site and can be regenerated from scratch', ()
     'cases/index.html',
     'map/index.html',
     'search/index.html',
+    'llms.txt',
     'feed.xml'
   ].sort())
   assert.ok(fs.existsSync(path.join(dir, 'index.html')))
@@ -516,6 +517,42 @@ test('writeSite writes a one-page file only for lessons that have one', () => {
   assert.match(home, /class="onepage-row"/)
   assert.match(home, /一页纸摘要/)
   assert.match(home, /class="onepage-link"/)
+})
+
+test('the site carries AI-readable docs: /llms.txt and one page per docs/public/*.md', () => {
+  const dir4 = fs.mkdtempSync(path.join(os.tmpdir(), 'course-site-'))
+  const docs = [{
+    pathName: 'mcp',
+    title: '笔记 MCP：让 AI 直接读这个站点的笔记',
+    description: '本站是北大法学课程笔记',
+    markdown: '# 笔记 MCP\n\n本站是北大法学课程笔记。\n\n## 工具\n\n| 工具 | 用途 |\n| --- | --- |\n| list_courses | 有哪些课 |'
+  }]
+  const site = writeSite({
+    records: [record({ markdown: NOTE, brief: { briefing: 'x'.repeat(80), keyPoints: ['a'], theme: '共犯成立的条件', keywords: ['共同故意', '共犯'] } })],
+    outputDir: dir4,
+    siteOrigin: 'https://course.law-tech.dev',
+    docs
+  })
+  assert.ok(site.written.includes('mcp/index.html'), '文档页要写出来')
+  assert.ok(site.written.includes('mcp.md'), '原文也要有一份，AI 直接取更省事')
+
+  const page = fs.readFileSync(path.join(dir4, 'mcp/index.html'), 'utf8')
+  assert.match(page, /笔记 MCP/)
+  assert.match(page, /本页目录/, '文档页带目录')
+  assert.match(page, /<table>/, '工具表要渲染成表格')
+
+  const raw = fs.readFileSync(path.join(dir4, 'mcp.md'), 'utf8')
+  assert.match(raw, /^# 笔记 MCP/m)
+
+  const llms = fs.readFileSync(path.join(dir4, 'llms.txt'), 'utf8')
+  assert.match(llms, /^# 课程笔记 · course\.law-tech\.dev/m)
+  assert.match(llms, /## 机器可读入口/)
+  assert.match(llms, /\[笔记 MCP：让 AI 直接读这个站点的笔记\]\(https:\/\/course\.law-tech\.dev\/mcp\.md\)/)
+  assert.match(llms, /\[笔记索引（JSON）\]\(https:\/\/course\.law-tech\.dev\/api\/notes\)/)
+  // 课程与课次清单要带主题与关键词，AI 只看这份就能判断要不要深入
+  assert.match(llms, /- 刑法分论（1 讲）/)
+  assert.match(llms, /主题 — 共犯成立的条件/)
+  assert.match(llms, /关键词 — 共同故意、共犯/)
 })
 
 test('a corrupt index is reported rather than silently treated as empty', () => {
