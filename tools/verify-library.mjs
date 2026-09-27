@@ -25,7 +25,16 @@ const siteRoot = siteIndex >= 0 ? path.resolve(argv[siteIndex + 1] || '') : ''
 const positional = argv.filter((item, index) => !item.startsWith('--') && !(siteIndex >= 0 && index === siteIndex + 1))
 const file = path.resolve(positional[0] || process.env.COURSE_LIBRARY || DEFAULT_LIBRARY)
 
-const checksumOf = markdown => crypto.createHash('sha256').update(String(markdown || ''), 'utf8').digest('hex')
+/**
+ * 两种指纹，各有各的用途，不能混：
+ *   bytesChecksum   原始字节：发布库的 checksum（内容比对的幂等键。改成规范化会让整库
+ *                   在下次发布时集体判定为"变了"，每节重推一条通知——所以它保持原样）；
+ *   sourceChecksum  规范化后（CRLF→LF、去尾部空白）：派生物（简报/一页纸）与正文的绑定。
+ *                   生成侧读的是笔记文件、校验侧读的是发布库字段，两者差一个换行不该算改动。
+ * 这两个口径分别与 @course/publish 的 markdownBytesChecksum / markdownChecksum 一致。
+ */
+const bytesChecksum = markdown => crypto.createHash('sha256').update(String(markdown || ''), 'utf8').digest('hex')
+const sourceChecksum = markdown => bytesChecksum(String(markdown || '').replace(/\r\n?/g, '\n').trimEnd())
 const short = value => String(value || '').slice(0, 36)
 
 function load() {
@@ -61,7 +70,7 @@ for (const record of records) {
     errors.push(`${label}：正文前言里的课程名是空的`)
   }
   // 2) 校验和与正文一致
-  if (record.markdown && record.checksum && record.checksum !== checksumOf(record.markdown)) {
+  if (record.markdown && record.checksum && record.checksum !== bytesChecksum(record.markdown)) {
     errors.push(`${label}：checksum 与正文不符（派生物与站点可能已经不同源）`)
   }
   // 3) 简报与这一篇绑定
@@ -73,7 +82,7 @@ for (const record of records) {
     if (!bound) notes.push(`${label}：简报未绑定来源（历史数据）`)
     if (brief.course && brief.course !== record.courseName) errors.push(`${label}：简报来自别的课程（${brief.course}）`)
     if (brief.lesson && brief.lesson !== record.lessonTitle) errors.push(`${label}：简报来自别的课次（${brief.lesson}）`)
-    if (brief.sourceChecksum && record.markdown && brief.sourceChecksum !== checksumOf(record.markdown)) {
+    if (brief.sourceChecksum && record.markdown && brief.sourceChecksum !== sourceChecksum(record.markdown)) {
       errors.push(`${label}：简报的来源指纹与正文不符`)
     }
   }
@@ -84,7 +93,7 @@ for (const record of records) {
     const chars = String(record.onepage.markdown || '').length
     if (chars > 3200) errors.push(`${label}：一页纸 ${chars} 字，明显超出一页的容量`)
     else if (chars > 2600) notes.push(`${label}：一页纸 ${chars} 字，偏长（建议复核排版）`)
-    if (record.onepage.sourceChecksum && record.markdown && record.onepage.sourceChecksum !== checksumOf(record.markdown)) {
+    if (record.onepage.sourceChecksum && record.markdown && record.onepage.sourceChecksum !== sourceChecksum(record.markdown)) {
       errors.push(`${label}：一页纸的来源指纹与正文不符`)
     }
   }
