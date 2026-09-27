@@ -60,15 +60,26 @@ function defaultRunPython({ python = 'python3', args, env = process.env }) {
   })
 }
 
-/** 解析一个 pptx（或已解析好的 json）。返回 {slideCount, slides:[{slideNumber,text}]}。 */
-export async function extractSlides({ filePath, runPython = defaultRunPython, python = 'python3', env = process.env } = {}) {
+/**
+ * 解析一份课件。返回 {slideCount, slides:[{slideNumber,text}], images, ocr}。
+ *
+ * ocr=false（默认）只解析文字、顺手数出"哪些图可能需要识别"——上传要秒回；
+ * 图片文字由 ocrMaterial() 单独走一步（一张图几秒，几十张图不能挂在上传请求里）。
+ */
+export async function extractSlides({
+  filePath, runPython = defaultRunPython, python = 'python3', env = process.env,
+  ocr = false, ocrMaxPages = 60, ocrConcurrency = 3
+} = {}) {
   if (!filePath || !fs.existsSync(filePath)) throw new Error(`找不到课件文件：${filePath}`)
   if (path.extname(filePath).toLowerCase() === '.json') {
     return normalizeDeck(JSON.parse(fs.readFileSync(filePath, 'utf8')))
   }
   const result = await runPython({
     python,
-    args: [PYTHON_SCRIPT, path.resolve(filePath)],
+    args: [
+      PYTHON_SCRIPT, path.resolve(filePath),
+      ...(ocr ? ['--ocr', '--ocr-max-pages', String(ocrMaxPages), '--ocr-concurrency', String(ocrConcurrency)] : [])
+    ],
     env: { ...env, PYTHONIOENCODING: 'utf-8' }
   })
   if (result.code !== 0) {
@@ -85,7 +96,17 @@ export function normalizeDeck(value = {}) {
     }))
     .filter(slide => slide.text)
     .sort((left, right) => left.slideNumber - right.slideNumber)
-  return { slideCount: slides.length, slides }
+  const images = Array.isArray(value.images) ? value.images : []
+  const ocr = value.ocr && typeof value.ocr === 'object' ? value.ocr : null
+  return {
+    slideCount: slides.length,
+    slides,
+    images,
+    ocr,
+    // 还有几张图没识别：笔记阶段据此判断要不要先把图片文字补上
+    ocrPending: Number(ocr?.pending || 0),
+    textLength: slides.reduce((total, slide) => total + slide.text.length, 0)
+  }
 }
 
 function readMeta(dir) {
@@ -108,7 +129,9 @@ function readMeta(dir) {
 export async function addMaterial({
   root, course, courseKey = '', lesson = '', replayKey = '', scope = 'lesson', appliesTo = [],
   filePath, name,
-  runPython = defaultRunPython, python = 'python3', env = process.env, at = new Date()
+  runPython = defaultRunPython, python = 'python3', env = process.env, at = new Date(),
+  // 上传路径默认不识别图片（要秒回）；--ocr 或在后台补识别时再开
+  ocr = false, ocrMaxPages = 60, ocrConcurrency = 3
 } = {}) {
   const effectiveScope = scope === 'course' ? 'course' : 'lesson'
   const dir = materialDir({ root, course, lesson: effectiveScope === 'course' ? '' : lesson })
@@ -119,7 +142,7 @@ export async function addMaterial({
   fs.writeFileSync(target, bytes)
   const checksum = crypto.createHash('sha256').update(bytes).digest('hex')
 
-  const deck = await extractSlides({ filePath: target, runPython, python, env })
+  const deck = await extractSlides({ filePath: target, runPython, python, env, ocr, ocrMaxPages, ocrConcurrency })
   const parsedPath = path.join(dir, 'slides', `${fileName}.json`)
   fs.writeFileSync(parsedPath, `${JSON.stringify({ ...deck, source: fileName, checksum }, null, 2)}\n`)
 
@@ -135,6 +158,10 @@ export async function addMaterial({
     bytes: bytes.length,
     checksum,
     slideCount: deck.slideCount,
+    // 图片与 OCR 状态进元数据：管理台据此显示"图 N 张、待识别 M 张"并决定要不要补
+    imageCount: (deck.images || []).length,
+    ocrPending: deck.ocrPending || 0,
+    ocr: deck.ocr || null,
     parsedPath,
     addedAt: at.toISOString()
   }
@@ -142,6 +169,58 @@ export async function addMaterial({
   meta.updatedAt = at.toISOString()
   fs.writeFileSync(path.join(dir, 'meta.json'), `${JSON.stringify(meta, null, 2)}\n`)
   return { dir, entry, deck }
+}
+
+/**
+ * 补识别一份课件的图片文字：重新解析（这次带 --ocr），把结果写回归档的 json 与元数据。
+ *
+ * 单独一步的原因：识别一张图几秒到几十秒，一份 80 页的课件要几分钟——
+ * 上传请求不能等它，笔记阶段却必须等它（图上的字没补上，笔记就少一块）。
+ *
+ * 原件不在了就明确说"跳过"：早期课件可能已经被清理，假装识别成功是最坏的结果。
+ */
+export async function ocrMaterial({
+  root, course, lesson = '', name,
+  runPython = defaultRunPython, python = 'python3', env = process.env,
+  ocrMaxPages = 60, ocrConcurrency = 3, at = new Date()
+} = {}) {
+  if (!root || !course || !name) throw new Error('补识别需要 root / course / name')
+  const dir = materialDir({ root, course, lesson })
+  const metaPath = path.join(dir, 'meta.json')
+  const meta = readMeta(dir)
+  const index = (meta.materials || []).findIndex(item => item.name === name)
+  if (index < 0) throw new Error(`找不到已归档的课件：${name}`)
+  const entry = meta.materials[index]
+  const target = path.join(dir, name)
+  if (!fs.existsSync(target)) {
+    const skipped = { at: at.toISOString(), engine: '', attempted: 0, pending: entry.ocrPending || 0, skipped: '原件已删除，无法补识别' }
+    meta.materials[index] = { ...entry, ocr: skipped }
+    meta.updatedAt = at.toISOString()
+    fs.writeFileSync(metaPath, `${JSON.stringify(meta, null, 2)}\n`)
+    return { entry: meta.materials[index], skipped: true, reason: skipped.skipped }
+  }
+
+  const deck = await extractSlides({ filePath: target, runPython, python, env, ocr: true, ocrMaxPages, ocrConcurrency })
+  const parsedPath = entry.parsedPath || path.join(dir, 'slides', `${name}.json`)
+  const previous = fs.existsSync(parsedPath) ? JSON.parse(fs.readFileSync(parsedPath, 'utf8')) : {}
+  fs.writeFileSync(parsedPath, `${JSON.stringify({ ...previous, ...deck, source: name, checksum: entry.checksum || '' }, null, 2)}\n`)
+  meta.materials[index] = {
+    ...entry,
+    parsedPath,
+    slideCount: deck.slideCount,
+    imageCount: (deck.images || []).length,
+    ocrPending: deck.ocrPending || 0,
+    ocr: deck.ocr || null,
+    ocrAt: at.toISOString()
+  }
+  meta.updatedAt = at.toISOString()
+  fs.writeFileSync(metaPath, `${JSON.stringify(meta, null, 2)}\n`)
+  return { entry: meta.materials[index], deck, skipped: false }
+}
+
+/** 还有图片没识别的课件：笔记与后台补识别都用它挑活。 */
+export function pendingOcrMaterials({ root, course, lesson = '', replayKey = '' } = {}) {
+  return listMaterials({ root, course, lesson, replayKey }).filter(item => item.ocrPending > 0)
 }
 
 /** 扫这门课下所有课次目录里的课件元数据（跨课次共用要能引用别的课次的文件）。 */
@@ -193,7 +272,15 @@ export function readDecks({ root, course, lesson = '', replayKey = '' } = {}) {
     .map(item => {
       if (!item.parsedPath || !fs.existsSync(item.parsedPath)) return null
       const parsed = JSON.parse(fs.readFileSync(item.parsedPath, 'utf8'))
-      return { name: item.name, scope: item.scope || 'lesson', slides: parsed.slides || [] }
+      return {
+        name: item.name,
+        scope: item.scope || 'lesson',
+        slides: parsed.slides || [],
+        // 笔记阶段据此决定"要不要先把图片文字补上"：整份课件抽不出字时尤其明显
+        ocrPending: Number(parsed.ocr?.pending || 0),
+        imageCount: (parsed.images || []).length,
+        textLength: (parsed.slides || []).reduce((total, slide) => total + String(slide.text || '').length, 0)
+      }
     })
     .filter(deck => deck && deck.slides.length)
 }

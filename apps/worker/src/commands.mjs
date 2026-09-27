@@ -4,7 +4,9 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { checkFreeSpace, createValidatedAcquisitionRuntime, formatBytes } from '@course/acquisition'
-import { addMaterial, guessMaterialIdentity, listMaterials, parseInboxName, readDecks, unassignedDir } from '@course/materials'
+import {
+  addMaterial, guessMaterialIdentity, listMaterials, ocrMaterial, parseInboxName, pendingOcrMaterials, readDecks, unassignedDir
+} from '@course/materials'
 
 import { hashPassword, validatePassword } from '@course/core'
 
@@ -348,7 +350,38 @@ export function createCommands(context) {
     // 课件：教学网上没有课件，只能来自用户上传（materials 命令或管理台）。
     // 有课件时它同时承担三件事：术语/ASR 对照、结构对照、笔记里"依据第几页"的可核对性。
     // 注意：续跑时不覆盖已有课件的引用——重跑中途补传课件后，用 --revise 重写受影响模块。
-    const decks = readDecks({ root: config.materialsRoot, course, lesson: lessonTitle, replayKey })
+    let decks = readDecks({ root: config.materialsRoot, course, lesson: lessonTitle, replayKey })
+    // 图片版课件（整页是图、扫描件）用 XML 与 pdftotext 都抽不出字：不补识别，笔记就会
+    // 凭空少一块内容。这种课件在写笔记之前先补一次，识别结果落回归档的 json。
+    // 只有"确实抽不出字"才自动跑——正常课件不该为几分钟的识别买单；--ocr 可以强制补齐。
+    const needOcr = decks.filter(deck => deck.ocrPending > 0 &&
+      (options.flags?.has('ocr') || deck.textLength < 200))
+    if (needOcr.length) {
+      stderr(`有 ${needOcr.length} 份课件几乎抽不出文字（图片版），先识别图片文字`)
+      for (const deck of needOcr) {
+        const entry = listMaterials({ root: config.materialsRoot, course, lesson: lessonTitle, replayKey })
+          .find(item => item.name === deck.name)
+        try {
+          const outcome = await ocrMaterial({
+            root: config.materialsRoot,
+            course: entry?.course || course,
+            lesson: entry?.lesson || '',
+            name: deck.name,
+            python: config.python,
+            ocrConcurrency: Number(options.options['ocr-concurrency'] || 3),
+            ocrMaxPages: Number(options.options['ocr-max-pages'] || 60)
+          })
+          const report = outcome.entry?.ocr || {}
+          stderr(outcome.skipped
+            ? `  ${deck.name}：${outcome.reason}`
+            : `  ${deck.name}：识别 ${report.attempted || 0} 张图，剩 ${outcome.entry?.ocrPending || 0} 张` +
+              ((report.errors || []).length ? `（${report.errors[0].error}）` : ''))
+        } catch (error) {
+          stderr(`  ${deck.name}：识别失败（${error instanceof Error ? error.message : String(error)}），先用现有文字继续`)
+        }
+      }
+      decks = readDecks({ root: config.materialsRoot, course, lesson: lessonTitle, replayKey })
+    }
     if (decks.length) {
       stderr(`已载入 ${decks.length} 份课件（共 ${decks.reduce((total, deck) => total + deck.slides.length, 0)} 页）`)
     } else if (!resume) {
@@ -1382,10 +1415,57 @@ export function createCommands(context) {
         replayKey: options.options['replay-key'] || '',
         filePath: path.resolve(file),
         name: options.options.name || path.basename(file),
-        python: config.python
+        python: config.python,
+        // --ocr：入库时就把图片文字识别出来（慢，但一条命令到位）
+        ocr: options.flags?.has('ocr'),
+        ocrMaxPages: Number(options.options['ocr-max-pages'] || 60),
+        ocrConcurrency: Number(options.options['ocr-concurrency'] || 3)
       })
       emit({ ...entry, slides: deck.slides.length }, options)
       return 0
+    }
+
+    // --ocr 不带 --file：把这一课次（或整门课）里"还有图没识别"的课件补齐。
+    // 单独一步的原因见 ocrMaterial：识别一张图几秒，上传请求等不起，笔记却必须等它。
+    if (options.flags?.has('ocr')) {
+      const course = requireOption(options.options, 'course', 'materials --ocr')
+      const lesson = options.options.lesson || ''
+      const pending = course && lesson
+        ? pendingOcrMaterials({ root, course, lesson, replayKey: options.options['replay-key'] || '' })
+        : listMaterials({ root, course })
+      const targets = pending.filter(item => item.ocrPending > 0)
+      const results = []
+      for (const item of targets) {
+        try {
+          const outcome = await ocrMaterial({
+            root,
+            course: item.course || course,
+            lesson: item.lesson || '',
+            name: item.name,
+            python: config.python,
+            ocrMaxPages: Number(options.options['ocr-max-pages'] || 60),
+            ocrConcurrency: Number(options.options['ocr-concurrency'] || 3)
+          })
+          results.push({
+            name: item.name,
+            skipped: Boolean(outcome.skipped),
+            reason: outcome.reason || '',
+            images: outcome.entry?.imageCount || 0,
+            pending: outcome.entry?.ocrPending || 0,
+            ocr: outcome.entry?.ocr || null
+          })
+        } catch (error) {
+          results.push({ name: item.name, error: error instanceof Error ? error.message : String(error) })
+        }
+      }
+      emit({
+        course,
+        lesson,
+        scanned: targets.length,
+        recognized: results.filter(item => !item.error && !item.skipped).length,
+        results
+      }, options)
+      return results.some(item => item.error) ? 1 : 0
     }
 
     const course = options.options.course || ''
@@ -1882,15 +1962,20 @@ export const USAGE = `用法：course <命令> [选项]
              [--concurrency <条数>] [--review-concurrency <条数>]
              [--node-split-chars <字数>] [--node-split-lines <行数>] [--outline-nodes <个数>]
              [--write-units <次数>（默认 1：一次写完）] [--target-chars <字数>]
-             [--revise <模块 id 或标题>] [--request <修改要求>] [--ignore-cost-window 1]
+             [--revise <模块 id 或标题>] [--request <修改要求>] [--ignore-cost-window 1] [--ocr]
                                            从转录稿生成单课笔记（大纲 → 节点 → 写作 → 审查 → 拼装 → 终审）
                                            每步把课次状态写入 <输出目录>/lesson-state.json；--resume 从该状态续跑
                                            默认不设步数上限；并发默认写 1 + 审 2（合计 3 条）
                                            模块结构由大纲决定（两小时课 5—8 个模块）；
                                            --write-units 只决定分几次模型调用写完（1 = 一次写完）；
                                            --revise 只重写指定模块（其余模块草稿保留），需配合 --request
+                                           --ocr 强制先补课件的图片文字（图片版课件会自动补，不必加）
   materials  --file <课件> --course <名称> --lesson <课次> [--name <文件名>]
              [--course-scope] [--applies-to <课次,课次>] [--replay-key <键>]
+             [--ocr] [--ocr-max-pages <张数>] [--ocr-concurrency <条数>]
+                                           归档并解析课件；--ocr 同时识别图片里的文字
+             --ocr --course <名称> [--lesson <课次>]  把还有图没识别的课件补齐
+                                           （图片版课件：整页是图或扫描件，xml 里没有文字）
              [--course <名称> --lesson <课次>] [--replay-key <键>]   列出该课次会用到的课件
              --ingest                                 归档收件箱里的文件（认得出课程与课次就归档，
                                            认不出停到 _unassigned；不必记命名规则）

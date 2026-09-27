@@ -34,7 +34,8 @@ const DEFAULT_RUN_TIMEOUT_MS = 15 * 60 * 1000
  */
 export const ALLOWED_ACTIONS = new Set([
   'doctor', 'discover', 'cycle', 'notify', 'notify-retry', 'download', 'transcribe', 'notes', 'publish', 'status',
-  'retry', 'revise', 'republish', 'prune', 'backup', 'balance'
+  'retry', 'revise', 'republish', 'prune', 'backup', 'balance',
+  'ocr-material'
 ])
 
 /** 可写配置的键与类型：表单能改的东西就是这些，别的只能改环境变量。 */
@@ -208,6 +209,15 @@ export function buildActionArgs(action, payload = {}, workerPath = '') {
     }
     case 'notify-retry':
       return [...base, 'notify', '--retry-failed']
+    // 图片版课件（整页是图、扫描件）抽不出文字时，用这条把图上的字识别出来补进课件。
+    // 走的是与定时任务同一条 CLI：界面上能点，命令行里也一定能跑。
+    case 'ocr-material':
+      return [
+        ...base, 'materials', '--ocr',
+        '--course', need('course'),
+        ...(payload.lesson ? ['--lesson', String(payload.lesson)] : []),
+        ...(payload.replayKey ? ['--replay-key', String(payload.replayKey)] : [])
+      ]
     case 'prune':
       return [...base, 'prune', ...(payload.apply ? ['--apply'] : [])]
     case 'cycle':
@@ -558,6 +568,10 @@ export function createAdminHandler({
               name: item.name,
               scope: item.scope,
               slideCount: item.slideCount,
+              // 图片与待识别数量要露出来：详情面板据此说明"图片版课件还有几张图没识别"
+              imageCount: item.imageCount || 0,
+              ocrPending: item.ocrPending || 0,
+              ocrEngine: item.ocr?.engine || '',
               addedAt: item.addedAt,
               bytes: item.bytes || 0,
               kind: String(item.name || '').slice(String(item.name || '').lastIndexOf('.') + 1).toLowerCase()

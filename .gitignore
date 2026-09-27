@@ -9,3 +9,5 @@ media/
 *.sqlite
 *.sqlite-journal
 .DS_Store
+__pycache__/
+*.pyc

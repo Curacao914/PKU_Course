@@ -7,7 +7,9 @@ export {
   listMaterials,
   materialDir,
   normalizeDeck,
+  ocrMaterial,
   parseInboxName,
+  pendingOcrMaterials,
   readDecks,
   safeSegment,
   unassignedDir

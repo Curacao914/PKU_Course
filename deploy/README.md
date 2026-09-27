@@ -60,6 +60,23 @@ sudo apt-get clean                    # 释放约 152M
 npm cache clean --force               # 释放约 380M
 ```
 
+## 图片文字识别（OCR）
+
+有些课件整页就是一张图（或干脆是扫描件）：XML 里没有文字、pdftotext 也抽不出来，
+笔记会凭空少一块。这类页用 PaddleOCR-VL 识别后并回课件文本。
+
+| 项 | 值 |
+|---|---|
+| 令牌 | `PADDLEOCR_ACCESS_TOKEN`（写在 `~/.course-worker/env`，与其它凭据同一个文件） |
+| 接口 | `https://paddleocr.aistudio-app.com/api/v2/ocr/jobs`（异步：提交 → 轮询 → 下载 JSONL），可用 `PADDLEOCR_DOC_PARSING_API_URL` 覆盖 |
+| 模型 | `PaddleOCR-VL-1.6`（**名字必须与官方当前版本一致**：写错时提交会成功、任务却一直 pending，不报错，最难查；可用 `PADDLEOCR_MODEL` 覆盖） |
+| 实测 | 一页幻灯片约 4 秒；免费额度 10000 页/天 |
+| 依赖 | 只用 Python 标准库（multipart 自己拼）；PDF 渲染图片另需 `poppler-utils`（已装） |
+
+流程上刻意分成两步：**归档入库只解析文字、顺手数出"哪些图要识别"**（秒回，上传请求等不起），
+识别单独走 `course materials --ocr`——一张图几秒，一份 80 页课件要几分钟。
+写笔记时若发现某份课件几乎抽不出文字（图片版），会自动先补识别再动笔。
+
 ## 手动运行各环节
 
 ```bash
@@ -70,6 +87,8 @@ node $COURSE discover --out ~/.course-worker/catalog.json # 落盘完整目录
 node $COURSE download --course-key <键> --replay-key <键>  # 下载一节课
 node $COURSE transcribe --media <media.mp4> --course 刑法分论 --lesson 第10-12节
 node $COURSE status                                       # 各阶段任务数与明细
+node $COURSE materials --file 第3讲.pptx --course 商法概论 --lesson 第1-2节 --ocr   # 归档课件并识别图片文字
+node $COURSE materials --ocr --course 商法概论 --lesson 第1-2节                     # 只补还没识别的图
 ```
 
 **账本语义**：`discover` 把发现的回放幂等登记进账本（重复扫描只更新展示字段，不动进度）。

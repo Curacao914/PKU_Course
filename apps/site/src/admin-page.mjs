@@ -299,6 +299,8 @@ function icon (name) {
     rail: '<path d="M3 5h18v14H3z"/><path d="M9 5v14"/>',
     up: '<path d="M12 19V5M6 11l6-6 6 6"/>',
     file: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>',
+    // 图片版课件用得上：一张"图里带字"的图标
+    image: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="M21 16l-5-5-6 6"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
     refresh: '<path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/>',
     trash: '<path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/>'
@@ -612,12 +614,18 @@ function detailHtml () {
     var selected = state.preview && state.preview.course === task.courseName && state.preview.name === material.name
     return '<div class="file" data-act="open-material" data-value="' + esc(material.name) + '"' + (selected ? ' aria-selected="true"' : '') + '>' +
       icon('file') + '<span class="name">' + esc(material.name) + (material.scope === 'course' ? ' · 全课程' : '') + '</span>' +
-      '<span class="meta">' + material.slideCount + ' 页</span></div>'
+      '<span class="meta">' + material.slideCount + ' 页' +
+        (material.imageCount ? ' · 图 ' + material.imageCount : '') +
+        (material.ocrPending ? ' · 待识别 ' + material.ocrPending : '') + '</span></div>'
   }).join('')
   var deck = '<div class="block"><h3>课件</h3>' + (files || '<p class="small muted">无课件</p>') +
     '<div class="row" style="margin-top:8px">' +
     '<input class="hidden-file" type="file" multiple data-file="' + esc(task.replayKey) + '" accept=".pptx,.pdf,.docx,.xlsx,.md,.txt">' +
     '<button class="act" data-act="pick-file" data-key="' + esc(task.replayKey) + '">' + icon('plus') + '上传课件</button>' +
+    // 只有确实还有图没识别时才出现：图片版课件的字在图上，不识别笔记就少一块
+    ((task.materials || []).some(function (material) { return material.ocrPending > 0 })
+      ? '<button class="act" data-act="ocr-material" data-key="' + esc(task.replayKey) + '">' + icon('image') + '识别图片文字</button>'
+      : '') +
     '<span class="status" data-status="' + esc(task.replayKey) + '">' + esc(state.uploads[task.replayKey] || '') + '</span>' +
     '</div>' + previewHtml(task) + '</div>'
 
@@ -1017,6 +1025,15 @@ function handleAct (act, btn) {
     return doAction('republish', { transcriptPath: task.artifacts.transcriptPath, course: task.courseName, lesson: task.title, replayKey: key }, btn)
   }
   if (act === 'cycle') return doAction('cycle', { replayKey: key, maxTasks: 1 }, btn)
+  if (act === 'ocr-material') {
+    var ocrTask = taskByKey(key)
+    if (!ocrTask) { toast('找不到这条课次', 'error'); return }
+    var pending = (ocrTask.materials || []).reduce(function (total, material) { return total + (material.ocrPending || 0) }, 0)
+    if (!pending) { toast('这份课件的图片都已经识别过了'); return }
+    // 识别一张图几秒到几十秒：先在按钮上说明要等，别让人以为卡住了
+    if (btn) { btn.disabled = true; btn.textContent = '正在识别 ' + pending + ' 张图…' }
+    return doAction('ocr-material', { course: ocrTask.courseName, lesson: ocrTask.title, replayKey: key }, btn)
+  }
   if (act === 'cycle-all') return doAction('cycle', { maxTasks: 5 }, btn)
   if (act === 'revise') return reviseWith(key, btn.dataset.module, btn)
   if (act === 'revise-first') return reviseWith(key, '', btn)

@@ -27,7 +27,7 @@ import { fileURLToPath } from 'node:url'
 
 import { chromium } from 'playwright-core'
 
-import { buildNoteRecord, renderNotePage, renderSearchPage } from '@course/publish'
+import { buildNoteRecord, renderIndexPage, renderNotePage, renderSearchPage, renderTermIndexPage } from '@course/publish'
 import { openLedger } from '@course/store'
 import { startSiteServer } from '../apps/site/src/server.mjs'
 
@@ -144,6 +144,105 @@ function buildFixture() {
     }]
   }))
 
+  // 首页 / 索引页：横向课次条、课程过滤、条目落到正文位置，都要真的点一遍
+  const execSecond = buildNoteRecord({
+    courseName: '刑事执行法',
+    lessonTitle: '第7-8节 减刑与假释',
+    publishedAt: '2026-09-23T10:00:00.000Z',
+    markdown: ['# 第7-8节 减刑与假释', '', '## 一、减刑的条件', '', '减刑要经过报请与裁定两个环节。'].join('\n')
+  })
+  const companyRecord = buildNoteRecord({
+    courseName: '商法概论',
+    teacher: '李四',
+    lessonTitle: '第1-2节 公司法总论',
+    publishedAt: '2026-09-26T10:00:00.000Z',
+    markdown: [
+      '# 第1-2节 公司法总论',
+      '',
+      '## 一、公司的设立',
+      '',
+      '设立中的公司不具有权利能力。',
+      '',
+      '## 二、法人人格否认',
+      '',
+      '法人人格否认针对的是股东滥用有限责任的情形。',
+      '',
+      '## 三、法条依据',
+      '',
+      '《公司法》第二十条是这一节的支点。',
+      '',
+      '<details><summary>元数据</summary>',
+      '<pre><code>',
+      'META: CONCEPT: 法人人格否认',
+      'META: PROVISION: 公司法第20条',
+      '</code></pre>',
+      '</details>'
+    ].join('\n')
+  })
+  const empiricalRecord = buildNoteRecord({
+    courseName: '法律实证分析',
+    lessonTitle: '第3节 抽样与变量',
+    publishedAt: '2026-09-24T10:00:00.000Z',
+    markdown: [
+      '# 第3节 抽样与变量',
+      '',
+      '## 一、抽样',
+      '',
+      '法人人格否认在实证研究里对应变量构造。',
+      '',
+      '<details><summary>元数据</summary>',
+      '<pre><code>',
+      'META: CONCEPT: 法人人格否认',
+      'META: CONCEPT: 抽样框',
+      '</code></pre>',
+      '</details>'
+    ].join('\n')
+  })
+  const courseRecords = [record, execSecond, companyRecord, empiricalRecord]
+  for (const item of courseRecords) {
+    const pageFile = path.join(siteRoot, item.slug + '.html')
+    fs.mkdirSync(path.dirname(pageFile), { recursive: true })
+    fs.writeFileSync(pageFile, renderNotePage(item, { siteOrigin: '' }))
+  }
+  fs.writeFileSync(path.join(siteRoot, 'index.html'), renderIndexPage(courseRecords))
+  fs.mkdirSync(path.join(siteRoot, 'concepts'), { recursive: true })
+  fs.mkdirSync(path.join(siteRoot, 'statutes'), { recursive: true })
+  fs.writeFileSync(path.join(siteRoot, 'concepts/index.html'),
+    renderTermIndexPage({ title: '概念索引', kind: 'concepts', notes: [companyRecord, empiricalRecord] }))
+
+  // 一份"图片版课件"：抽不出文字、还有 2 张图没识别——详情面板据此出现「识别图片文字」按钮
+  const materialsRoot = path.join(scratchRoot, 'materials')
+  const materialHome = path.join(materialsRoot, '刑事执行法', '第5-6节')
+  fs.mkdirSync(path.join(materialHome, 'slides'), { recursive: true })
+  fs.writeFileSync(path.join(materialHome, '图片版课件.pptx'), 'fake-pptx')
+  fs.writeFileSync(path.join(materialHome, 'slides', '图片版课件.pptx.json'), JSON.stringify({
+    slideCount: 2,
+    slides: [{ slideNumber: 1, text: '第一页' }, { slideNumber: 2, text: '第二页：整页是图' }],
+    images: [{ path: 'ppt/media/image1.png', bytes: 194436, width: 2360, height: 1800, slides: [2], needsOcr: true }],
+    ocr: { pending: 2, attempted: 0, engine: '', errors: [] }
+  }, null, 2))
+  fs.writeFileSync(path.join(materialHome, 'meta.json'), JSON.stringify({
+    materials: [{
+      name: '图片版课件.pptx',
+      scope: 'lesson',
+      course: '刑事执行法',
+      courseKey: '',
+      lesson: '第5-6节',
+      replayKey: 'replay-audit-1',
+      appliesTo: [],
+      bytes: 8,
+      checksum: 'audit',
+      slideCount: 2,
+      imageCount: 1,
+      ocrPending: 2,
+      ocr: { pending: 2, attempted: 0, engine: '', errors: [] },
+      parsedPath: path.join(materialHome, 'slides', '图片版课件.pptx.json'),
+      addedAt: '2026-09-25T10:00:00.000Z'
+    }]
+  }, null, 2))
+  fs.writeFileSync(path.join(siteRoot, 'statutes/index.html'),
+    renderTermIndexPage({ title: '法条索引', kind: 'statutes', notes: [companyRecord] }))
+
   return { dir, scratchRoot, siteRoot, outputDir, transcriptPath, noteUrl: '/' + record.slug + '.html' }
 }
 
@@ -171,6 +270,7 @@ const EXPECTED = {
   'clear-password': '已清除密码',  // 「已清除密码；当前浏览器用的是主令牌，仍然有效」也匹配
   // 整合材料生成还没实现：按钮点了要如实说自己没做，这不算缺陷（下一步实现）
   'pick-file': '已归档',
+  'ocr-material': '完成',
   integrate: '还没做',
   'add-tag': '先写标签名'   // 审计不填标签输入框：这条分支本来就要说"先写标签名"
 }
@@ -483,6 +583,77 @@ async function auditSearch(page, site, failures) {
   return results
 }
 
+/** 首页与索引页：横向课次条、课程过滤、条目落到正文的哪一节。 */
+async function auditIndexPages(page, site, failures) {
+  const results = []
+  const record = async (name, ok, detail) => {
+    results.push({ name, ok, detail })
+    console.log('  ' + (ok ? '✔' : '✖') + ' ' + name.padEnd(20) + detail)
+    if (!ok) failures.push('索引页 ' + name + '：' + detail)
+  }
+  console.log('首页与索引页')
+
+  // 首页：一门课一行，课次在行内横向排开（同一 y、x 递增），不是一列到底
+  await page.goto(site.url + '/index.html', { waitUntil: 'domcontentloaded' })
+  await page.waitForSelector('.band', { timeout: 8000 })
+  const bands = await page.$$eval('.band', nodes => nodes.map(node => {
+    const cards = [...node.querySelectorAll('.strip .card')].map(card => card.getBoundingClientRect())
+    return {
+      title: (node.querySelector('h2') || {}).textContent || '',
+      tops: cards.map(rect => Math.round(rect.top)),
+      lefts: cards.map(rect => Math.round(rect.left))
+    }
+  }))
+  const execBand = bands.find(band => band.title.indexOf('刑事执行法') >= 0) || { tops: [], lefts: [] }
+  const sameRow = execBand.tops.length > 1 && execBand.tops.every(top => Math.abs(top - execBand.tops[0]) <= 2)
+  const runningRight = execBand.lefts.length > 1 && execBand.lefts[1] > execBand.lefts[0]
+  await record('一门课一行', bands.length === 3, '共 ' + bands.length + ' 行：' + bands.map(band => band.title).join(' / '))
+  await record('课次横向排开', sameRow && runningRight, '同一行 y=' + execBand.tops.join(',') + '，x=' + execBand.lefts.join(','))
+
+  // 索引页：左侧挑课程，条目一次列到底，不做折叠
+  await page.goto(site.url + '/concepts/index.html', { waitUntil: 'domcontentloaded' })
+  await page.waitForSelector('.index-row', { timeout: 8000 })
+  const visibleRows = () => page.$$eval('.index-row', nodes => nodes.filter(node => !node.hidden).length)
+  const visibleLinks = () => page.$$eval('.index-notes a', nodes => nodes.filter(node => !node.hidden).map(node => node.getAttribute('href')))
+  const folds = await page.$$eval('details', nodes => nodes.length)
+  await record('索引不折叠', folds === 0, '没有折叠块，' + (await visibleRows()) + ' 条一次列出')
+
+  await page.click('#filter-rail button[data-course="商法概论"]')
+  await page.waitForTimeout(150)
+  const oneCourse = await visibleRows()
+  const oneLinks = await visibleLinks()
+  await record('按课程过滤', oneCourse === 1 && oneLinks.length === 1 && oneLinks[0].indexOf('商法概论') >= 0,
+    '选中商法概论后可见 ' + oneCourse + ' 条 / ' + oneLinks.length + ' 个出处')
+
+  await page.reload({ waitUntil: 'domcontentloaded' })
+  await page.waitForTimeout(200)
+  const persisted = await page.$eval('#filter-rail button[data-course="商法概论"]', node => node.getAttribute('aria-pressed'))
+  await record('过滤选择记在本地', persisted === 'true' && (await visibleRows()) === 1, '刷新后仍选中商法概论')
+
+  await page.click('#filter-rail button[data-course=""]')
+  await page.waitForTimeout(150)
+  await record('切回全部', (await visibleRows()) === 2 && (await visibleLinks()).length === 3,
+    '可见 ' + (await visibleRows()) + ' 条 / ' + (await visibleLinks()).length + ' 个出处')
+
+  // 条目要落到正文里那一节，不是笔记开头
+  await page.goto(site.url + '/statutes/index.html', { waitUntil: 'domcontentloaded' })
+  await page.waitForSelector('.index-notes a', { timeout: 8000 })
+  const href = await page.$eval('.index-notes a', node => node.getAttribute('href'))
+  const lawGroup = await page.$$eval('.index-group h2', nodes => nodes.map(node => node.textContent))
+  await record('法条按法律名分段', lawGroup.length === 1 && lawGroup[0].indexOf('公司法') >= 0, lawGroup.join(' / '))
+  await record('条目落到具体一节', /#三-法条依据$/.test(href || ''), '链接 ' + href)
+
+  await page.click('.index-notes a')
+  await page.waitForSelector('article h2', { timeout: 8000 })
+  const headingId = await page.evaluate(() => decodeURIComponent(location.hash.replace(/^#/, '')))
+  const headingExists = await page.evaluate(id => !!document.getElementById(id), headingId)
+  await record('点击后落到正文位置', headingExists, '落在 ' + headingId + '，页面 ' + decodeURIComponent(page.url().split('/').pop()))
+  const flashed = await page.waitForSelector('.anchor-flash', { timeout: 2500 }).then(() => true).catch(() => false)
+  await record('落点高亮', flashed, flashed ? '目标小节带 anchor-flash' : '没有看到高亮')
+
+  return results
+}
+
 async function main() {
   const fixture = buildFixture()
   const calls = []
@@ -529,6 +700,8 @@ async function main() {
     await auditNotePage(page, site, fixture.noteUrl, failures)
     console.log('')
     await auditSearch(page, site, failures)
+    console.log('')
+    await auditIndexPages(page, site, failures)
   } finally {
     await browser.close()
     // 浏览器关掉后可能还有 keep-alive 连接挂在服务器上，close() 会一直等它们；

@@ -12,7 +12,9 @@ import {
   listMaterials,
   materialDir,
   normalizeDeck,
+  ocrMaterial,
   parseInboxName,
+  pendingOcrMaterials,
   readDecks,
   safeSegment
 } from './store.mjs'
@@ -184,4 +186,91 @@ test('a broken pptx fails loudly instead of yielding an empty deck', { skip: pyt
 
 test('extraction refuses a missing file', async () => {
   await assert.rejects(() => extractSlides({ filePath: '/nonexistent/slides.pptx' }), /找不到课件文件/)
+})
+
+/** 假的 python 调用：记下参数，按脚本返回一份"带图片与 OCR 状态"的解析结果。 */
+function fakePython(deck) {
+  const calls = []
+  const runPython = async ({ args }) => {
+    calls.push(args)
+    const ocr = args.includes('--ocr')
+    return {
+      code: 0,
+      stdout: JSON.stringify(ocr
+        ? { ...deck, slides: deck.slides.map(slide => ({ ...slide, text: slide.text + '\n【图片文字】\n公司人格否认' })), ocr: { pending: 0, attempted: 2, engine: 'PaddleOCR-VL-1.6', errors: [] } }
+        : deck),
+      stderr: ''
+    }
+  }
+  return { runPython, calls }
+}
+
+const DECK_WITH_IMAGES = {
+  slideCount: 2,
+  slides: [
+    { slideNumber: 1, text: '第一页：正文' },
+    { slideNumber: 2, text: '第二页：整页是图' }
+  ],
+  images: [
+    { path: 'ppt/media/image1.png', bytes: 194436, width: 2360, height: 1800, slides: [2], needsOcr: true },
+    { path: 'ppt/media/image2.png', bytes: 126, width: 48, height: 48, slides: [1], needsOcr: false }
+  ],
+  ocr: { pending: 1, attempted: 0, engine: '', errors: [] }
+}
+
+test('parsing counts the images that need OCR without calling the API', async () => {
+  const root = tmp('course-ocr-')
+  const { runPython, calls } = fakePython(DECK_WITH_IMAGES)
+  fs.writeFileSync(path.join(root, 'deck.pptx'), 'x')
+  const deck = await extractSlides({ filePath: path.join(root, 'deck.pptx'), runPython })
+  assert.ok(!calls[0].includes('--ocr'), '默认不识别：上传要秒回')
+  assert.equal(deck.ocrPending, 1)
+  assert.equal(deck.images.length, 2)
+  assert.equal(deck.textLength > 0, true)
+
+  // --ocr 时把开关与上限透传给 python
+  await extractSlides({ filePath: path.join(root, 'deck.pptx'), runPython, ocr: true, ocrMaxPages: 12, ocrConcurrency: 5 })
+  assert.ok(calls[1].includes('--ocr'))
+  assert.ok(calls[1].includes('--ocr-max-pages'))
+  assert.equal(calls[1][calls[1].indexOf('--ocr-max-pages') + 1], '12')
+  assert.equal(calls[1][calls[1].indexOf('--ocr-concurrency') + 1], '5')
+})
+
+test('image text is written back into the archived deck and its metadata', async () => {
+  const root = tmp('course-ocr-')
+  const archive = path.join(root, 'archive')
+  const { runPython } = fakePython(DECK_WITH_IMAGES)
+  const file = path.join(root, '第5讲.pptx')
+  fs.writeFileSync(file, 'pptx-bytes')
+
+  await addMaterial({ root: archive, course: '商法概论', lesson: '第1-2节', filePath: file, name: '第5讲.pptx', runPython })
+  const before = listMaterials({ root: archive, course: '商法概论', lesson: '第1-2节' })[0]
+  assert.equal(before.ocrPending, 1, '入库时不识别，只记下"有 1 张待识别"')
+  assert.equal(pendingOcrMaterials({ root: archive, course: '商法概论', lesson: '第1-2节' }).length, 1)
+
+  const outcome = await ocrMaterial({ root: archive, course: '商法概论', lesson: '第1-2节', name: '第5讲.pptx', runPython })
+  assert.equal(outcome.skipped, false)
+  assert.equal(outcome.entry.ocrPending, 0)
+  assert.equal(outcome.entry.ocr.engine, 'PaddleOCR-VL-1.6')
+
+  // 归档的 json 里要有识别出来的文字：笔记阶段读的就是它
+  const parsed = JSON.parse(fs.readFileSync(outcome.entry.parsedPath, 'utf8'))
+  assert.match(parsed.slides[1].text, /【图片文字】/)
+  assert.equal(readDecks({ root: archive, course: '商法概论', lesson: '第1-2节' })[0].ocrPending, 0)
+  assert.equal(pendingOcrMaterials({ root: archive, course: '商法概论', lesson: '第1-2节' }).length, 0)
+})
+
+test('a deck whose original file is gone says so instead of pretending it worked', async () => {
+  const root = tmp('course-ocr-')
+  const archive = path.join(root, 'archive')
+  const { runPython } = fakePython(DECK_WITH_IMAGES)
+  const file = path.join(root, '第6讲.pptx')
+  fs.writeFileSync(file, 'pptx-bytes')
+  await addMaterial({ root: archive, course: '商法概论', lesson: '第1-2节', filePath: file, name: '第6讲.pptx', runPython })
+  fs.rmSync(path.join(materialDir({ root: archive, course: '商法概论', lesson: '第1-2节' }), '第6讲.pptx'))
+
+  const outcome = await ocrMaterial({ root: archive, course: '商法概论', lesson: '第1-2节', name: '第6讲.pptx', runPython })
+  assert.equal(outcome.skipped, true)
+  assert.match(outcome.reason, /原件已删除/)
+  assert.match(outcome.entry.ocr.skipped, /原件已删除/)
 })
