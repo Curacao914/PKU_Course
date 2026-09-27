@@ -39,6 +39,14 @@ test('老发布库（没有 lessonDate）退回发布日期的日期部分，不
   assert.equal(note.lessonDate, '2026-02-20')
 })
 
+test('资源清单带 lastModified（客户端据此判断要不要重拉）', async () => {
+  const list = await service.listResources()
+  const courses = list.find(item => item.uri === COURSES_URI)
+  assert.ok(courses.annotations.lastModified, '顶层资源也要有时间戳')
+  const course = list.find(item => String(item.uri).startsWith('notes://course/'))
+  assert.equal(course.annotations.lastModified, '2026-03-20T09:00:00.000Z', '用最近一次改动时间')
+})
+
 test('list_courses：按课程名或教师名过滤，并给 limit 上限', async () => {
   assert.equal((await service.listCourses({ query: '刑' })).total, 1)
   assert.equal((await service.listCourses({ query: '张老师' })).courses[0].courseName, '国际法学')

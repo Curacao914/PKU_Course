@@ -435,13 +435,17 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
       if (!groups.has(record.courseName)) groups.set(record.courseName, [])
       groups.get(record.courseName).push(record)
     }
+    // 顶层资源也给时间戳：客户端据此判断"要不要重新拉"，缺了它这一条就永远是"不知道新旧"
+    const latestChange = isoOrUndefined(
+      records.map(record => record.updatedAt || record.firstPublishedAt).filter(Boolean).sort().at(-1)
+    )
     const resources = [{
       uri: COURSES_URI,
       name: 'courses',
       title: '课程列表（第一层）',
       description: '所有课程、课次数、最新课次时间、主题与关键词汇总',
       mimeType: 'application/json',
-      annotations: { audience: ['assistant', 'user'], priority: 0.9 }
+      annotations: { ...(latestChange ? { lastModified: latestChange } : {}), audience: ['assistant', 'user'], priority: 0.9 }
     }]
     for (const [courseName, list] of groups) {
       const sorted = [...list].sort(byLessonAsc)
