@@ -16,9 +16,10 @@ import { buildPrompt } from './ai-adapter.mjs'
 export const BRIEF_SCHEMA = {
   briefing: 'string（150—300 字的中文说明）',
   keyPoints: ['string（不超过 40 字，共 3 条）'],
-  // 首页课次表里那一列"关键词"用的就是它：让写简报的这一次调用顺手挑出来，
+  // 首页课次表里那一列用的就是这两个字段：让写简报的这一次调用顺手产出来，
   // 不额外多一次模型调用（简报本来就是读完成品后来总结这节课的）
-  keywords: ['string（5—6 个，每个 2—10 字，必须是这节课实际讲的核心概念）'],
+  theme: 'string（不超过 20 字，说清这节课在讲什么）',
+  keywords: ['string（5—6 个，每个 2—10 字，按这节课的讲授顺序排列）'],
   detail: 'string（站内简报页 Markdown）'
 }
 
@@ -75,6 +76,18 @@ function isNoisy(term) {
   return rest.length < 3
 }
 
+/** 主题句：一句话说清这节课在讲什么（首页表格里当整行的"抬头"）。 */
+export function cleanTheme(value = '') {
+  const text = cleanText(typeof value === 'string' ? value : value?.theme || '')
+    .replace(/^[「『"']|[」』"']$/g, '')
+    .replace(/[。！!；;，,、]+$/g, '')
+    .trim()
+  if (text.length < 4 || text.length > 26) return ''
+  // "本节内容""课程介绍"这种等于没说
+  if (/^(本节|本课|这节|该节)?(内容|介绍|概述|概览|总结|综述)(与|和)?(说明|介绍)?$/.test(text)) return ''
+  return text
+}
+
 /** 关键词：短、像术语、不是杂项、不是课程名。不合格的直接丢掉，宁可少给几个。 */
 export function cleanKeywords(value = [], { courseName = '', limit = 6 } = {}) {
   const course = cleanText(courseName)
@@ -106,6 +119,7 @@ export function validateBrief(value = {}, options = {}) {
   return {
     briefing,
     keyPoints,
+    theme: cleanTheme(value.theme),
     keywords: cleanKeywords(value.keywords, options),
     detail: cleanText(value.detail || value.markdown || ''),
     words: briefing.length

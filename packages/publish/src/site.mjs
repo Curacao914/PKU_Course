@@ -49,6 +49,7 @@ export const SITE_CSS = `
   --font-scale: 1;            /* 阅读字号倍率，由右上角工具栏控制 */
   --topbar-bg: rgba(255, 255, 255, .86);
   --card-bg: #ffffff;
+  --mark: rgba(255, 226, 108, .55);   /* 划词高亮的底色：以前这个变量没定义，高亮一直是透明的 */
 }
 /* 护眼背景：豆沙绿与牛皮纸。只换底色与纸面层次，不动正文颜色对比度——
    "护眼"要的是少一点蓝光，不是把字变灰。 */
@@ -66,6 +67,7 @@ export const SITE_CSS = `
   --warn: #d9a05b; --warn-soft: #2a2318; --danger: #d97b7b; --danger-soft: #2b1c1c; --ok: #6dbb8e;
   --topbar-bg: rgba(20, 23, 26, .88);
   --card-bg: #1b1f23;
+  --mark: rgba(255, 214, 92, .32);
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, .4);
   --shadow-md: 0 10px 30px -18px rgba(0, 0, 0, .8);
 }
@@ -93,6 +95,9 @@ a:hover { color: var(--accent-ink); }
 .topbar nav a:hover { color: var(--ink); }
 
 .wrap { max-width: 760px; margin: 0 auto; padding: 40px 24px 96px; }
+/* 表格页（首页/索引/地图）用宽版：一行里有课次、关键词、时长、日期，760px 会挤成一团 */
+.wrap.wide { max-width: 1180px; padding: 34px 28px 96px; }
+.wrap.wide .index-shell { grid-template-columns: 168px minmax(0, 1fr); gap: 24px; }
 /* 长文页：左栏目录 + 正文 */
 .shell { display: grid; grid-template-columns: var(--rail-w) minmax(0, 1fr); gap: 56px;
   max-width: 1140px; margin: 0 auto; padding: 36px 24px 112px; }
@@ -223,6 +228,8 @@ article .brief li { margin: 5px 0; }
 .lesson-table .lesson-keywords { border-bottom: 1px solid var(--line); }
 .kw { display: inline-block; padding: 1px 8px; border-radius: 999px; background: var(--bg-soft);
   color: var(--ink-soft); font-size: 12.5px; line-height: 1.7; }
+/* 主题句：一行说清这节课在讲什么，关键词跟在它后面 */
+.lesson-theme { display: block; color: var(--ink); font-size: 13.5px; margin-bottom: 5px; }
 .lesson-meta, .lesson-date { color: var(--muted); font-size: 12.5px; text-align: right; white-space: nowrap; }
 @media (max-width: 720px) {
   /* 窄屏先保课次与关键词：时长与日期可以点进去看 */
@@ -326,10 +333,13 @@ details.note-meta pre { background: var(--bg-soft); border-radius: var(--radius)
 @media (max-width: 720px) { .tools { gap: 0; } .tools button, .tools a { width: 30px; height: 30px; } }
 .tools button, .tools a { width: 32px; height: 32px; border-radius: 50%; border: 0; background: none; color: var(--ink-soft);
   display: inline-flex; align-items: center; justify-content: center; cursor: pointer; position: relative; }
+/* 小浮层的定位基准：少了这一条，浮层会以整条顶栏为基准，跑到屏幕另一头去 */
+.tools .tool-wrap { position: relative; display: inline-flex; }
 .tools button:hover, .tools a:hover { background: var(--bg-soft); color: var(--ink); }
 .tools button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-ink); }
 .tools svg { width: 17px; height: 17px; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
-.tools .pop { position: absolute; top: 38px; right: 0; min-width: 150px; padding: 10px 12px; border-radius: 12px;
+/* 小浮层挂在按钮正下方：贴 right:0 会跑到屏幕最右边，和按钮对不上 */
+.tools .pop { position: absolute; top: 38px; left: 50%; transform: translateX(-50%); min-width: 150px; padding: 10px 12px; border-radius: 12px;
   border: 1px solid var(--line); background: var(--card-bg); box-shadow: var(--shadow-md); display: none; }
 .tools .open .pop { display: block; }
 .tools .dot-row { display: flex; gap: 8px; }
@@ -589,8 +599,9 @@ export function buildNoteRecord({
     metadata: extractNoteMetadata(body),
     // 索引页点进来要落在正文里那一节，而不是笔记开头
     anchors: termAnchors(body),
-    // 首页表格里那列关键词。首选写笔记时模型自己挑的（简报那一步顺手产出的），
+    // 首页表格里那列：主题句 + 关键词。首选写笔记时模型自己产出的（简报那一步顺手），
     // 老笔记没有这份判断时，退回到"从概念清单里按出现频次与标题命中排序"。
+    theme: String(brief?.theme || '').trim(),
     ...keywordFields({
       brief,
       markdown: body,
@@ -698,7 +709,7 @@ ${PREF_SCRIPT}
   ${topRight}
   ${navHtml}
 </div></header>
-${layout === 'shell' ? '<div class="shell">' : layout === 'reading' ? '<div class="reading" id="reading">' : '<div class="wrap">'}
+${layout === 'shell' ? '<div class="shell">' : layout === 'reading' ? '<div class="reading" id="reading">' : layout === 'wide' ? '<div class="wrap wide">' : '<div class="wrap">'}
 ${body}
 </div>
 ${scripts}
@@ -1102,6 +1113,7 @@ export function renderKnowledgeMapPage({ notes = [], siteOrigin = '' } = {}) {
     title: `知识地图 · ${SITE_NAME}`,
     description: '课程概念之间的关系',
     canonical: siteOrigin ? `${siteOrigin}/map/` : '',
+    layout: 'wide',
     body
   })
 }
@@ -1261,6 +1273,7 @@ export function renderTermIndexPage({ title, description, kind, notes = [], site
     title: `${title} · ${SITE_NAME}`,
     description,
     canonical: siteOrigin ? `${siteOrigin}/${kind}/` : '',
+    layout: 'wide',
     body
   })
 }
@@ -1451,7 +1464,7 @@ export function renderIndexPage(records, { siteOrigin = '' } = {}) {
   const rowOf = record => [
     '<tr>',
     `<td class="lesson-title"><a href="${escapeHtml(record.slug)}.html">${escapeHtml(record.lessonTitle)}</a></td>`,
-    `<td class="lesson-keywords">${(record.keywords || []).map(term => `<span class="kw">${escapeHtml(term)}</span>`).join('')}</td>`,
+    `<td class="lesson-keywords">${record.theme ? `<span class="lesson-theme">${escapeHtml(record.theme)}</span>` : ''}${(record.keywords || []).map(term => `<span class="kw">${escapeHtml(term)}</span>`).join('')}</td>`,
     record.readMinutes ? `<td class="lesson-meta">约 ${record.readMinutes} 分钟</td>` : '<td class="lesson-meta"></td>',
     record.publishedAt ? `<td class="lesson-date">${escapeHtml(String(record.publishedAt).slice(0, 10))}</td>` : '<td class="lesson-date"></td>',
     '</tr>'
@@ -1479,6 +1492,7 @@ export function renderIndexPage(records, { siteOrigin = '' } = {}) {
     title: SITE_NAME,
     description: '北大法学课程笔记',
     canonical: siteOrigin || '',
+    layout: 'wide',
     body
   })
 }

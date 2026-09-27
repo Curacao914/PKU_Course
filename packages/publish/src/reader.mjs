@@ -60,9 +60,8 @@ export function toolBar(record = {}) {
     `<button type="button" data-tool="theme" id="toolTheme" title="深浅色" aria-label="深浅色">` +
       `<span class="icon-sun">${svgIcon('sun')}</span><span class="icon-moon">${svgIcon('moon')}</span></button>`,
     '<div class="tool-wrap">',
-    // 调色盘按钮里直接显示当前底色：不用点开就知道现在是什么颜色
-    `<button type="button" data-tool="paper" title="背景色" aria-label="背景色">` +
-      `<span class="swatch" id="paperSwatch"></span>${svgIcon('palette')}</button>`,
+    // 底色按钮就是一个调色盘图标：当前选中的颜色由弹出小框里的圆点标出来
+    `<button type="button" data-tool="paper" title="背景色" aria-label="背景色">${svgIcon('palette')}</button>`,
     '<div class="pop" id="paperPop"><div class="dot-row">',
     '<button class="paper" type="button" data-paper="" style="background:#ffffff" title="纸白" aria-label="纸白"></button>',
     '<button class="paper" type="button" data-paper="green" style="background:#c7edcc" title="豆沙绿" aria-label="豆沙绿"></button>',
@@ -123,16 +122,7 @@ export const READER_SCRIPT = '<script>' + String.raw`
     document.querySelectorAll('[data-paper]').forEach(function (dot) {
       dot.setAttribute('aria-pressed', dot.getAttribute('data-paper') === (paper || '') ? 'true' : 'false')
     })
-    paintSwatch()
   }
-  /** 调色盘按钮里的圆点 = 当前实际底色。取算出来的值，免得色板和页面各说各话。 */
-  function paintSwatch () {
-    var swatch = document.getElementById('paperSwatch')
-    if (!swatch) return
-    var value = getComputedStyle(root).getPropertyValue('--bg').trim()
-    swatch.style.background = value || '#ffffff'
-  }
-  window.addEventListener('resize', function () { setTimeout(paintSwatch, 0) })
   function applyFont (scale) {
     var value = Math.min(1.4, Math.max(0.85, Number(scale) || 1))
     root.style.setProperty('--font-scale', String(value))
@@ -144,7 +134,6 @@ export const READER_SCRIPT = '<script>' + String.raw`
   applyTheme(store.get('course.theme', 'light') === 'dark')
   applyPaper(store.get('course.paper', ''))
   applyFont(store.get('course.fontScale', '1'))
-  paintSwatch()
 
   function closePops () {
     document.querySelectorAll('.tool-wrap.open').forEach(function (node) { node.classList.remove('open') })
@@ -163,7 +152,7 @@ export const READER_SCRIPT = '<script>' + String.raw`
       if (!button) return
       var tool = button.getAttribute('data-tool')
       var wrap = button.parentElement
-      if (tool === 'theme') { applyTheme(root.getAttribute('data-theme') !== 'dark'); paintSwatch(); return }
+      if (tool === 'theme') { applyTheme(root.getAttribute('data-theme') !== 'dark'); return }
       if (tool === 'focus') {
         var on = reading.classList.toggle('focus')
         button.setAttribute('aria-pressed', on ? 'true' : 'false')
@@ -344,12 +333,45 @@ export const READER_SCRIPT = '<script>' + String.raw`
     return span
   }
 
+  /** 选区是否整个落在某个同类批注里——是的话，再按一次就是取消。 */
+  function enclosingAnnot (range, kind) {
+    var node = range.commonAncestorContainer
+    if (node && node.nodeType === 3) node = node.parentNode
+    while (node && node !== document.body) {
+      if (node.classList && node.classList.contains('annot-' + kind)) {
+        return node.contains(range.startContainer) && node.contains(range.endContainer) ? node : null
+      }
+      node = node.parentNode
+    }
+    return null
+  }
+
   function applyAnnotation (kind) {
     var selection = window.getSelection()
     if (!selection || selection.isCollapsed) return
     var text = selection.toString().trim()
     if (!text) return
     var range = selection.getRangeAt(0)
+
+    // 同一个按钮再按一次 = 取消：把包着的 span 拆掉，并从本地记录里删掉
+    var existing = enclosingAnnot(range, kind)
+    if (existing) {
+      var parent = existing.parentNode
+      while (existing.firstChild) parent.insertBefore(existing.firstChild, existing)
+      parent.removeChild(existing)
+      parent.normalize()
+      var index = marks.findIndex(function (mark) {
+        return mark.kind === kind && mark.anchor && mark.anchor.text &&
+          (existing.textContent || '').indexOf(mark.anchor.text) >= 0
+      })
+      if (index >= 0) marks.splice(index, 1)
+      else marks = marks.filter(function (mark) { return !(mark.kind === kind && text.indexOf(mark.anchor && mark.anchor.text) >= 0) })
+      saveMarks()
+      selection.removeAllRanges()
+      hideSelbar()
+      return
+    }
+
     var anchor = anchorOf(range)
     var span = wrapRange(range, kind, true)
     selection.removeAllRanges()

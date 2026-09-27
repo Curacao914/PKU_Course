@@ -581,7 +581,8 @@ export function createCommands(context) {
             lesson: lessonTitle,
             briefing: brief.briefing,
             keyPoints: brief.keyPoints,
-            // 首页课次表那一列用的就是它：写简报的这一次调用顺手挑的，不额外花钱
+            // 首页课次表那一列用的就是这两个：写简报的这一次调用顺手产出的，不额外花钱
+            theme: brief.theme || '',
             keywords: brief.keywords || [],
             detail: brief.detail,
             trace: brief.trace
@@ -746,6 +747,7 @@ export function createCommands(context) {
       briefPath,
       words: result.words,
       keyPoints: result.keyPoints.length,
+      theme: result.theme,
       keywords: result.keywords,
       usage: result.trace?.usage || null
     }, options)
@@ -811,6 +813,7 @@ export function createCommands(context) {
       briefPath,
       words: result.words,
       keyPoints: result.keyPoints.length,
+      theme: result.theme,
       keywords: result.keywords,
       usage: result.trace?.usage || null
     }, options)

@@ -151,7 +151,12 @@ function buildFixture() {
     courseName: '刑事执行法',
     lessonTitle: '第7-8节 减刑与假释',
     publishedAt: '2026-09-23T10:00:00.000Z',
-    brief: { briefing: '本节讲减刑与假释的适用条件：减刑的报请与裁定、假释的实质条件与考验期。', keyPoints: ['减刑要经过报请与裁定', '假释看没有再犯危险'], keywords: ['减刑', '假释', '报请与裁定', '考验期'] },
+    brief: {
+      briefing: '本节讲减刑与假释的适用条件：减刑的报请与裁定、假释的实质条件与考验期。',
+      keyPoints: ['减刑要经过报请与裁定', '假释看没有再犯危险'],
+      theme: '减刑与假释的适用条件',
+      keywords: ['减刑', '假释', '报请与裁定', '考验期']
+    },
     markdown: [
       '# 第7-8节 减刑与假释',
       '',
@@ -884,16 +889,29 @@ async function auditNotePage(page, site, noteUrl, failures) {
     '日间显示太阳、夜间显示月亮')
   await page.click('#toolTheme')
 
-  // 调色盘：按钮里的圆点要显示当前底色，选了豆沙绿就变 rgb(199, 237, 204)
+  // 调色盘：小浮层要挂在按钮正下方（以前贴在屏幕最右边），选中的颜色要有标记
   await page.click('[data-tool="paper"]')
-  const swatchBefore = await page.$eval('#paperSwatch', el => getComputedStyle(el).backgroundColor)
+  const popPlacement = await page.evaluate(() => {
+    const button = document.querySelector('[data-tool="paper"]').getBoundingClientRect()
+    const pop = document.getElementById('paperPop').getBoundingClientRect()
+    return {
+      visible: getComputedStyle(document.getElementById('paperPop')).display !== 'none',
+      dx: Math.round(Math.abs((pop.left + pop.width / 2) - (button.left + button.width / 2))),
+      below: pop.top >= button.bottom - 2
+    }
+  })
+  await record('色板浮层挂在按钮下方', popPlacement.visible && popPlacement.below && popPlacement.dx <= 24,
+    '水平偏差 ' + popPlacement.dx + 'px，在按钮' + (popPlacement.below ? '下方' : '其它位置'))
   await page.click('[data-paper="green"]')
   await page.waitForTimeout(150)
-  const swatchGreen = await page.$eval('#paperSwatch', el => getComputedStyle(el).backgroundColor)
-  const bodyGreen = await page.evaluate(() => getComputedStyle(document.body).backgroundColor)
-  await record('色板显示当前底色', swatchBefore !== swatchGreen && swatchGreen === bodyGreen,
-    '现在 ' + swatchGreen + '（页面底色一致）')
-  await record('豆沙绿是 199/237/204', swatchGreen === 'rgb(199, 237, 204)', '实际 ' + swatchGreen)
+  const paperState = await page.evaluate(() => ({
+    paper: document.documentElement.getAttribute('data-paper'),
+    body: getComputedStyle(document.body).backgroundColor,
+    pressed: document.querySelector('[data-paper="green"]').getAttribute('aria-pressed')
+  }))
+  await record('豆沙绿是 199/237/204', paperState.paper === 'green' && paperState.body === 'rgb(199, 237, 204)',
+    '页面底色 ' + paperState.body)
+  await record('选中的颜色有标记', paperState.pressed === 'true', 'aria-pressed=' + paperState.pressed)
   await page.click('[data-paper=""]')
   await page.keyboard.press('Escape')
 
@@ -1098,6 +1116,9 @@ async function auditIndexPages(page, site, failures) {
   const keywordSample = bands[0].keywords[0] || []
   await record('每节课都有关键词', keywordCounts.every(count => count >= 2 && count <= 6),
     '关键词条数 ' + keywordCounts.join('/') + '，例如：' + keywordSample.join('、'))
+  const themes = await page.$$eval('.lesson-theme', nodes => nodes.map(node => node.textContent.trim()))
+  await record('每节课有一句主题', themes.length >= 1 && themes.every(text => text.length >= 4),
+    themes[0] || '（没有主题句）')
   await page.click('#course-rail button[data-course="商法概论"]')
   await page.waitForTimeout(150)
   const visibleBands = await page.$$eval('.band', nodes => nodes.filter(node => !node.hidden).length)

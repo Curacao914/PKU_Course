@@ -180,6 +180,9 @@ test('the reading page carries a course rail, a toolbar and the reader script', 
   assert.match(html, /hit\('u'\)/)
   assert.match(html, /hit\('h'\)/)
   assert.match(html, /code === 'Key' \+ letter\.toUpperCase\(\)/)
+  assert.match(html, /function enclosingAnnot/, '再按一次同一个按钮要能取消')
+  assert.match(html, /parent\.removeChild\(existing\)/, '取消就是把包着的 span 拆掉')
+  assert.match(html, /marks\.splice\(index, 1\)/, '本地记录也要跟着删')
   assert.match(html, /course\.annots:/, '批注按页面路径存本地')
   assert.match(html, /drawLine/, '下划线要有从左到右画出来的动画')
   assert.match(html, /anchor-flash/, '锚点高亮')
@@ -203,13 +206,16 @@ test('the reading page extras match what the reader asked for', () => {
   const html = renderNotePage(record({ markdown: NOTE }), { siteOrigin: '' })
   // 打印图标看出来是打印机，不再是引号
   assert.match(html, /data-tool="print"[\s\S]{0,200}<rect x="3.5" y="9"/)
-  // 日/夜各一个图标，由主题决定显示哪个；调色盘里显示当前底色
+  // 日/夜各一个图标，由主题决定显示哪个
   assert.match(html, /class="icon-sun"/)
   assert.match(html, /class="icon-moon"/)
   assert.match(html, /:root\[data-theme="dark"\] \.tools \[data-tool="theme"\] \.icon-sun \{ display: none; \}/)
-  assert.match(html, /id="paperSwatch"/)
-  assert.match(html, /getPropertyValue\('--bg'\)/, '色块颜色取实际底色，不写死')
+  // 底色按钮就是一个调色盘图标；当前选中的颜色由小浮层里的圆点标出
+  assert.match(html, /data-tool="paper"[^>]*><svg/, '底色按钮就是一个图标')
   assert.match(html, /--bg: #c7edcc/, '豆沙绿就是 rgb(199, 237, 204)')
+  assert.match(html, /--mark: rgba\(255, 226, 108/, '高亮底色要有定义（以前没定义，等于透明）')
+  // 小浮层挂在按钮正下方，不贴屏幕右边缘
+  assert.match(html, /\.tools \.pop \{ position: absolute; top: 38px; left: 50%; transform: translateX\(-50%\)/)
   // 回到顶部是图标按钮，且让开右侧目录栏
   assert.match(html, /id="totop"[\s\S]{0,120}<svg/)
   assert.match(html, /\.totop \{ position: fixed; right: calc\(var\(--rail-w\) \+ 34px\)/)
