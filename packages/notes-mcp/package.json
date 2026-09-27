@@ -9,6 +9,5 @@
   },
   "bin": {
     "notes-mcp": "./bin/notes-mcp.mjs"
-  },
-  "dependencies": {}
+  }
 }

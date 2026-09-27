@@ -486,9 +486,16 @@ test('the one-page view is an A4 sheet that cannot overflow', () => {
   // 左栏点的是"一页纸"，不是笔记
   assert.match(html, /href="\/onepage\/刑法分论\/第10-12节-共犯与罪数\.html"/)
   assert.match(html, /aria-current="page"/)
-  // 顶栏工具仍在（打印/底色/复制）
+  // 顶栏工具仍在（打印/底色/复制），而且必须真的能用：脚本不带上，这排按钮就是死的
   assert.match(html, /<header class="topbar">[\s\S]{0,600}id="tools"/)
   assert.match(html, /data-tool="print"/)
+  assert.match(html, /function applyPaper/, '一页纸页面要带阅读页脚本')
+  assert.match(html, /function closePops/, '浮层交互也在那段脚本里')
+  // 下载的是这一页纸，而不是整篇笔记
+  // 文件名是百分号编码的，"一页纸"三个字编码后是 %E4%B8%80%E9%A1%B5%E7%BA%B8
+  assert.match(html, /href="\/md\/[^"]*-%E4%B8%80%E9%A1%B5%E7%BA%B8\.md"/, '下载的是一页纸本身')
+  // 一页纸页面没有 #reading（专注模式），点了不能抛错
+  assert.match(html, /if \(!reading\) return/)
 })
 
 test('writeSite writes a one-page file only for lessons that have one', () => {

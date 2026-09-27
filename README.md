@@ -35,6 +35,7 @@ node apps/worker/bin/course.mjs doctor
 |---|---|
 | [docs/00-现状核查.md](docs/00-现状核查.md) | 旧系统现状：远程/本地一致性、五段链路水平、复用清单、基线验证 |
 | [docs/01-模块化方案.md](docs/01-模块化方案.md) | 目标架构、模块契约、运行形态、六步迁移顺序与验收条件 |
+| [docs/12-笔记MCP.md](docs/12-笔记MCP.md) | 课程笔记 MCP 服务器：分层设计、数据源、工具清单与挂载配置 |
 | [deploy/README.md](deploy/README.md) | 服务器部署、手动运行各环节 |
 | [docs/decisions/](docs/decisions/) | 架构决策记录 |
 
@@ -49,6 +50,7 @@ packages/
   store/        账本：任务、租约、版本、投递（SQLite）
   publish/      站点内容生成
   notify/       微信推送
+  notes-mcp/    课程笔记 MCP 服务器（stdio：课程 → 课次 → 检索 → 正文分层披露）
 apps/
   worker/       CLI 与定时循环
   site/         course.law-tech.dev

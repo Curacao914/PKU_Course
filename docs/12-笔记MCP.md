@@ -317,12 +317,13 @@ printf '%s\n' \
 | 正文读不到（远程） | 站点缺 `/md/<文件名>.md`（老站点没生成 md）；本地发布库不受影响 |
 | 资源列表看不到新笔记 | 资源每次请求现算，客户端可能缓存了 `resources/list`；重连会话即可 |
 | ssh 桥接报「Invalid JSON」 | 少了 `-T`，协议流里混进了 `\r` 或 ssh 横幅 |
+| stderr 里有 `ExperimentalWarning: SQLite` | 经 `course mcp` 启动时会加载 worker 的账本模块；警告只在 stderr，不影响协议（直接跑 `packages/notes-mcp/bin/notes-mcp.mjs` 则不会出现） |
 
 ## 9. 测试
 
 ```bash
-node --test packages/notes-mcp/src/*.test.mjs     # 包本身
-node --test apps/worker/src/mcp.test.mjs          # course mcp 接线
+node --test packages/notes-mcp/src/*.test.mjs     # 包本身，46 个用例
+node --test apps/worker/src/mcp.test.mjs          # course mcp 接线，3 个用例
 npm test                                          # 全仓（含上面两处）
 ```
 

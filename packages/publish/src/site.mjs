@@ -1233,6 +1233,8 @@ export function renderOnepagePageHtml(record, { siteOrigin = '', courseLessons =
     canonical: siteOrigin ? `${siteOrigin}/${onepageSlug(record.slug)}` : '',
     layout: 'onepage',
     topRight: toolBar({ ...record, onepage: true }),
+    // 顶栏工具（底色/打印/复制/字号）的交互在阅读页脚本里：不带上它，这一排按钮就是死的
+    scripts: READER_SCRIPT,
     body
   })
 }

@@ -105,7 +105,7 @@ const FIELD_SPECS = [
   { kind: '课程', weight: 3, values: record => [record.courseName, record.teacher] }
 ]
 
-export function createNotesService({ source, now = () => new Date() } = {}) {
+export function createNotesService({ source } = {}) {
   if (!source) throw new Error('createNotesService 需要 source（createSource 的产物）')
 
   /** 第一层：课程总览。 */

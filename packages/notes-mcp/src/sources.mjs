@@ -30,7 +30,7 @@ export function normalizeOrigin(origin) {
  * 进程启动时读死的话，AI 问「昨天那节新课」会一直得到旧答案。
  * 用 mtimeMs + size 当缓存键，不设 TTL——本地文件的变化必须立刻可见。
  */
-export function createLocalLibrarySource({ file, now = () => Date.now() } = {}) {
+export function createLocalLibrarySource({ file } = {}) {
   const target = path.resolve(String(file || ''))
   if (!String(file || '').trim()) throw new ToolError('没有配置本地发布库：把 COURSE_LIBRARY 指向 site/library.json')
   let cache = null
@@ -135,7 +135,7 @@ export function createRemoteSiteSource({
 
 /** 按配置二选一。本地优先：它含正文，能力最全。 */
 export function createSource({ library = '', origin = DEFAULT_SITE_ORIGIN, ttlSeconds = DEFAULT_TTL_SECONDS, fetchImpl, now } = {}) {
-  if (String(library || '').trim()) return createLocalLibrarySource({ file: library, now })
+  if (String(library || '').trim()) return createLocalLibrarySource({ file: library })
   return createRemoteSiteSource({
     origin,
     ttlMs: Math.max(0, Number(ttlSeconds) || 0) * 1000,

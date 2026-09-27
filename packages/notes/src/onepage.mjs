@@ -23,17 +23,18 @@ export const ONEPAGE_SCHEMA = {
   outline: ['string（3—6 条，这一页分了哪几块，供目录/校验用）']
 }
 
-export function buildOnepageSource({ markdown = '', courseName = '', lessonTitle = '' } = {}) {
+export function buildOnepageSource({ markdown = '', courseName = '', lessonTitle = '', budgetNote = '' } = {}) {
   const text = String(markdown || '').trim()
   if (!text) throw new Error('没有笔记正文，无法生成一页纸')
   return [
     `课程：${courseName}`,
     `课次：${lessonTitle}`,
     `目标篇幅：${ONEPAGE_TARGET_CHARS} 字左右（含表格单元格），绝不能超过 ${ONEPAGE_MAX_CHARS} 字`,
+    budgetNote ? `上一版被退回的原因：${budgetNote}` : '',
     '',
     '## 笔记全文（这是唯一素材，不得新增其中没有的内容）',
     text
-  ].join('\n')
+  ].filter(Boolean).join('\n')
 }
 
 /** 校验：必须有内容、必须在字数上限内、不能整段堆文字。 */
@@ -63,18 +64,37 @@ export function validateOnepage(value = {}) {
   }
 }
 
-export async function generateOnepage({ markdown, courseName = '', lessonTitle = '', courseSpec = {}, callModel, modelConfig } = {}) {
-  const result = await callModel({
-    config: modelConfig,
-    role: 'onepage',
-    prompt: buildPrompt({
+/**
+ * 生成一页纸；超字数就带着"上一版多少字"再要一次。
+ *
+ * 实测模型第一次经常会写到 2800—3000 字（大概是"舍不得删"），退回一次基本就压下来了。
+ * 只重试一次：第二次还超，说明这节内容确实塞不进一张纸，那就该让人来决定删什么。
+ */
+export async function generateOnepage({
+  markdown, courseName = '', lessonTitle = '', courseSpec = {}, callModel, modelConfig, retries = 1
+} = {}) {
+  let budgetNote = ''
+  let lastError = null
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    const result = await callModel({
+      config: modelConfig,
       role: 'onepage',
-      promptVersion: courseSpec.promptVersion,
-      courseSpec,
-      lessonBlueprint: { title: lessonTitle },
-      sourceText: buildOnepageSource({ markdown, courseName, lessonTitle }),
-      schema: ONEPAGE_SCHEMA
+      prompt: buildPrompt({
+        role: 'onepage',
+        promptVersion: courseSpec.promptVersion,
+        courseSpec,
+        lessonBlueprint: { title: lessonTitle },
+        sourceText: buildOnepageSource({ markdown, courseName, lessonTitle, budgetNote }),
+        schema: ONEPAGE_SCHEMA
+      })
     })
-  })
-  return { ...validateOnepage(result.parsed), trace: result.trace }
+    try {
+      return { ...validateOnepage(result.parsed), trace: result.trace, attempts: attempt + 1 }
+    } catch (error) {
+      lastError = error
+      const chars = String(result.parsed?.markdown || '').replace(/\s/g, '').length
+      budgetNote = `写了 ${chars} 字，超过一张 A4 的上限 ${ONEPAGE_MAX_CHARS} 字。请删到 ${ONEPAGE_TARGET_CHARS} 字以内：只留体系与最核心的知识点，例子细节、重复解释、次要案例全部删掉。`
+    }
+  }
+  throw lastError
 }

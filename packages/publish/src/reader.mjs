@@ -49,7 +49,9 @@ const ICON_COPY = `<svg viewBox="0 0 24 24" aria-hidden="true">${READER_ICONS.co
  * 那要在这台 2 核机器上装一套排版引擎，而读者的浏览器本来就会排版。
  */
 export function toolBar(record = {}) {
-  const fileName = `${String(record.slug || '').split('/').pop()}.md`
+  // 在一页纸页面上，下载的应当是那一页纸本身，而不是整篇笔记
+  const base = String(record.slug || '').split('/').pop()
+  const fileName = `${base}${record.onepage ? '-一页纸' : ''}.md`
   return [
     '<div class="tools" id="tools">',
     `<a href="/md/${encodeURIComponent(fileName)}" download title="下载 Markdown" aria-label="下载 Markdown">${svgIcon('export')}</a>`,
@@ -161,6 +163,8 @@ export const READER_SCRIPT = '<script>' + String.raw`
       var wrap = button.parentElement
       if (tool === 'theme') { applyTheme(root.getAttribute('data-theme') !== 'dark'); return }
       if (tool === 'focus') {
+        // 一页纸页面没有 #reading：没有可收起的侧栏，直接忽略而不是抛错
+        if (!reading) return
         var on = reading.classList.toggle('focus')
         button.setAttribute('aria-pressed', on ? 'true' : 'false')
         store.set('course.focus', on ? '1' : '')
