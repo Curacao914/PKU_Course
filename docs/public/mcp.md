@@ -135,3 +135,23 @@
 ### 更新行为
 
 发布一篇新笔记（`course publish`）之后：`list_courses` / `get_course` / `search_notes` / `get_note` / `list_terms` / `search` / `fetch` / `/api/notes` / `/llms.txt` / `/concepts` 等索引都会自动跟上，**不需要改 MCP 配置，也不需要重新部署服务**。远程站点数据源默认 60 秒缓存，本地发布库按文件修改时间判断，发布后最长等一个缓存周期。
+
+## 八、验收记录（2026-09-27 实测）
+
+用官方 **MCP Inspector**（`npx @modelcontextprotocol/inspector --cli https://course.law-tech.dev/mcp --transport http`）对公开 HTTPS 端点逐项跑过：
+
+| 项 | 结果 |
+|---|---|
+| `initialize` | `course-notes`，协议 2025-11-25，返回 instructions 与 tools/resources 能力 |
+| `tools/list` | 7 个工具，全部 `readOnlyHint: true` |
+| `list_courses` | 课程 4 门 / 课次 9 个（含每门课 theme 与 keywords 汇总） |
+| `get_course` | 商法概论 2 课次（每节 theme/keywords/摘要） |
+| `search_notes` | 命中片段 + 落点 |
+| `get_note` | 按 `section=课程概览` 只取该节 |
+| `list_terms` | 概念/法条/案例清单 |
+| `search` | 单个 text content + JSON 字符串 + structuredContent（二者一致） |
+| `fetch` | 整篇 18848 字；`id=slug#课程概览` 时只 944 字，`metadata.section` 有值 |
+
+HTTP 语义：GET → 405、DELETE → 204、通知 → 202、坏 JSON → -32700、超大请求体 → 413、未知工具 → -32602、参数不合法/找不到课程 → `isError: true` + 中文提示。
+
+**动态更新**（不改配置、不重启、不重新部署）：发布一篇测试笔记后等 15 秒，`list_courses` 立刻从「4 门课 / 9 课次」变成「5 门课 / 10 课次」并列出新课程；`get_course` / `search` / `fetch` / `list_terms` 都能看到它；`/api/notes` 从 9 篇变 10 篇且含新笔记；`/llms.txt` 同步出现该课程；笔记页 HTTP 200。测试数据随后已清理（发布库与站点都恢复原状）。
