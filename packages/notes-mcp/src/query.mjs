@@ -23,19 +23,11 @@ const QUESTION_WORDS = [
   '多少', '请问', '介绍一下', '讲讲', '说说', '是什么意思'
 ]
 
-/** 虚词：在这些字的位置切开。留一个字的残片没有意义，切完再过滤。 */
-const PARTICLES = new Set([...'的了是在和与及或为对被把有会能要这那之其也就都又还更最着过吗呢啊嘛吧哦呀'])
-
 /** 片段里允许留下的最小长度（中文 2 字起：一个字的片段几乎全是噪声）。 */
 const MIN_RUN = 2
 
 export function normalizeText(value = '') {
   return String(value ?? '').normalize('NFKC').trim().toLowerCase()
-}
-
-/** 词面里是否出现虚词（n-gram 里带虚词的直接丢：它们匹配到的多是"顺带连着"的位置）。 */
-function hasParticle(text) {
-  return [...text].some(char => PARTICLES.has(char))
 }
 
 /**
@@ -53,39 +45,33 @@ export function queryTerms(rawQuery = '') {
   const add = (term, weight) => {
     const value = String(term || '').trim()
     if ([...value].length < MIN_RUN && !/^[a-z0-9]/.test(value)) return
-    if (hasParticle(value)) return
     if (!terms.has(value) || terms.get(value) < weight) terms.set(value, weight)
   }
 
-  // 先按标点/空格切段，再按虚词切段：两层都是"切开"而不是"删掉"
+  /**
+   * 只按标点/空格切段，**不按虚词切**。
+   *
+   * 试过"在虚词处切开"，很快就撞上反例：中文的单字虚词同时也是构词成分——
+   * 为（行为、认为、作为）、要（要件、必要）、在（存在）、和（和解）、及（涉及）、
+   * 与（参与）。切下去 "共同行为" 会变成 "共同行"，"构成要件" 会变成 "构成"+"件"，
+   * 全是把真词切坏的伤。现在不切：**整段加上 2—4 字 n-gram**，
+   * "资本维持与抽逃出资" 靠 4-gram 自然得到 "资本维持" 与 "抽逃出资" 两个词；
+   * 噪声 n-gram（如 "的构"）在语料里出现次数为 0，IDF 让它们一分也拿不到。
+   */
   for (const chunk of text.split(/[\s\p{P}\p{S}]+/u).filter(Boolean)) {
     if (/^[a-z0-9]/.test(chunk)) {
       add(chunk, 1.2) // 拉丁词/数字（z值、atr、2026）本身就很区分
       continue
     }
-    const runs = []
-    let current = ''
-    for (const char of chunk) {
-      if (PARTICLES.has(char)) {
-        if (current) runs.push(current)
-        current = ''
-        continue
-      }
-      current += char
-    }
-    if (current) runs.push(current)
-    for (const run of runs) {
-      const length = [...run].length
-      if (length < MIN_RUN) continue
-      add(run, length <= 6 ? 1.5 : 1.1) // 整段：短的更可能是术语，长的更像一句话
-      // 长片段补 n-gram：自然语言问句靠它们才能落到"威廉二世""构想""落空"这些真词上
-      if (length >= 4) {
-        for (const size of [2, 3, 4]) {
-          if (size > length) continue
-          for (let index = 0; index + size <= length; index += 1) {
-            add([...run].slice(index, index + size).join(''), 0.8)
-          }
-        }
+    const run = chunk
+    const length = [...run].length
+    if (length < MIN_RUN) continue
+    add(run, length <= 6 ? 1.5 : 1.1) // 整段：短的更可能是术语，长的更像一句话
+    // 长片段补 n-gram：自然语言问句靠它们才能落到"威廉二世""构想""落空"这些真词上
+    for (const size of [2, 3, 4]) {
+      if (size > length) continue
+      for (let index = 0; index + size <= length; index += 1) {
+        add([...run].slice(index, index + size).join(''), 0.9)
       }
     }
   }
@@ -130,6 +116,24 @@ export function fuzzyTerms(term = '', candidates = [], { maxDistance = 1, limit 
     if (out.length >= limit) break
   }
   return out
+}
+
+/**
+ * 查询里的"词一级单元"：这些必须**真的出现**（或经错别字回退对上），不能靠碎片拼。
+ *
+ * 为什么需要这层：中文 2-gram 到处都是——查"共同行为"（语料里一次都没有）会因为
+ * "共同"和"行为"各自命中而返回 6 篇，全是假阳性。而查询本身短（≤6 字）、又没有空格时，
+ * 人问的就是一个词组，值得按词组要求它：要么整串出现，要么就是没有。
+ * 一整句话（>6 字）不走这条：自然语言问句本来就该靠片段匹配。
+ */
+export function requiredUnits(rawQuery = '') {
+  let text = normalizeText(rawQuery)
+  if (!text) return []
+  for (const word of QUESTION_WORDS) text = text.split(word).join(' ')
+  return text
+    .split(/[\s\p{P}\p{S}]+/u)
+    .map(unit => unit.trim())
+    .filter(unit => unit && [...unit].length <= 6)
 }
 
 /** 从记录里收集"语料词表"：只取人来命名过的地方（标题、主题、关键词、概念/法条/案例）。 */

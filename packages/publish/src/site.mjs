@@ -1486,81 +1486,90 @@ export function renderSearchPage({ siteOrigin = '' } = {}) {
 }
 
 /**
- * 搜索脚本：中文用字符二元组（bigram）匹配，不引入分词库。
+/**
+ * 搜索脚本：只负责展示，检索在服务端做（/api/search）。
  *
- * 打分：小节标题 > 概念/法条/案例 > 摘要。命中片段高亮，
- * 结果里显示"课程 · 课次 · 命中在哪一节"，让人判断要不要点进去。
+ * 为什么不再在浏览器里算：以前这里自己算 bigram 覆盖度——没有 IDF，泛词会把专名压下去，
+ * 多词查询与整句问句也处理不了，而且浏览器里只有元数据、搜不了正文。
+ * 现在页面把查询交给服务端，服务端用的是**与 MCP 完全相同的那套检索**：
+ * 同一个服务实例、同一个打分。同一句话在页面上和在 AI 那边给出同一批结果，人才知道该信哪个。
  */
 const SEARCH_SCRIPT = `<script>
 (function () {
   var input = document.getElementById('q');
   var results = document.getElementById('results');
   var hint = document.getElementById('hint');
-  var index = null;
+  var timer = null;
+  var controller = null;
+  var seq = 0;
 
-  function bigrams (text) {
-    var s = String(text || '').toLowerCase().replace(/\s+/g, '');
-    var out = new Set();
-    if (s.length === 1) out.add(s);
-    for (var i = 0; i < s.length - 1; i += 1) out.add(s.slice(i, i + 2));
-    return out;
+  function esc (v) { return String(v == null ? '' : v).replace(/[&<>"]/g, function (c) { return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c] }) }
+
+  function card (hit) {
+    var meta = [hit.courseName, hit.lessonDate, hit.section].filter(Boolean)
+      .map(function (text) { return '<span>' + esc(text) + '</span>' }).join('');
+    var snippets = (hit.snippets || []).slice(0, 2)
+      .map(function (text) { return '<p>' + esc(text) + '</p>' }).join('');
+    var keywords = (hit.keywords || []).slice(0, 6).join('、');
+    return '<a class="card" href="' + esc(hit.anchor || hit.url) + '">' +
+      '<h3>' + esc(hit.lessonTitle) + '</h3>' +
+      (hit.theme ? '<p>' + esc(hit.theme) + '</p>' : '') +
+      '<div class="card-meta">' + meta + '</div>' +
+      snippets +
+      (keywords ? '<div class="card-meta"><span>' + esc(keywords) + '</span></div>' : '') +
+      '</a>';
   }
 
-  function score (note, query) {
-    var grams = bigrams(query);
-    if (!grams.size) return 0;
-    var fields = [
-      { text: note.lessonTitle, weight: 6 },
-      { text: (note.headings || []).map(function (h) { return h.text }).join(' '), weight: 4 },
-      { text: (note.metadata && note.metadata.concepts || []).join(' '), weight: 5 },
-      { text: (note.metadata && note.metadata.statutes || []).join(' '), weight: 5 },
-      { text: (note.metadata && note.metadata.cases || []).join(' '), weight: 4 },
-      { text: note.courseName, weight: 3 },
-      { text: note.summary, weight: 1 }
-    ];
-    var total = 0;
-    fields.forEach(function (field) {
-      var hay = bigrams(field.text);
-      var hit = 0;
-      grams.forEach(function (g) { if (hay.has(g)) hit += 1; });
-      total += (hit / grams.size) * field.weight;
-    });
-    return total;
+  function show (message) { hint.textContent = message || '' }
+
+  function sync (text) {
+    try { history.replaceState(null, '', text ? '/search/?q=' + encodeURIComponent(text) : '/search/') } catch (error) {}
   }
 
-  function render (query) {
-    if (!index) return;
-    if (String(query).trim().length < 2) { results.innerHTML = ''; return; }
-    var hits = index.notes
-      .map(function (note) { return { note: note, s: score(note, query) } })
-      .filter(function (hit) { return hit.s > 1.2 })
-      .sort(function (a, b) { return b.s - a.s })
-      .slice(0, 20);
-    hint.textContent = hits.length ? '' : '没有找到。换个词试试。';
-    results.innerHTML = hits.map(function (hit) {
-      var note = hit.note;
-      var heads = (note.headings || []).slice(0, 6).map(function (h) { return h.text }).join('、');
-      return '<a class="card" href="/' + note.slug + '.html">' +
-        '<h3>' + escapeHtml(note.lessonTitle) + '</h3>' +
-        '<p>' + escapeHtml(note.summary || '') + '</p>' +
-        '<div class="card-meta"><span>' + escapeHtml(note.courseName || '') + '</span><span>约 ' + (note.readMinutes || 0) + ' 分钟</span></div>' +
-        (heads ? '<div class="card-meta"><span>小节：' + escapeHtml(heads) + '</span></div>' : '') +
-        '</a>';
-    }).join('');
+  function run (value) {
+    var text = String(value || '').trim();
+    sync(text);
+    if (!text) { results.innerHTML = ''; show(''); return }
+    var mine = (seq += 1);
+    if (controller) controller.abort();
+    controller = new AbortController();
+    show('检索中…');
+    fetch('/api/search?q=' + encodeURIComponent(text) + '&limit=20', { signal: controller.signal })
+      .then(function (response) { return response.json() })
+      .then(function (data) {
+        if (mine !== seq) return;
+        if (!data.ok) { results.innerHTML = ''; show(data.message || '检索失败。'); return }
+        var hits = data.hits || [];
+        if (!hits.length) {
+          results.innerHTML = '';
+          show('没有找到。换个更具体的术语、法条或人名试试（问句里的疑问词会被自动去掉）。');
+          return;
+        }
+        var notes = [];
+        if (data.fuzzy && data.fuzzy.length) {
+          notes.push('按近似词检索：' + data.fuzzy.map(function (item) { return item.from + '→' + item.to }).join('、'));
+        }
+        if (data.bodyScanned) notes.push('本次连正文一起检索');
+        show(hits.length + ' 条命中' + (notes.length ? '（' + notes.join('；') + '）' : ''));
+        results.innerHTML = hits.map(card).join('');
+      })
+      .catch(function (error) {
+        if (error && error.name === 'AbortError') return;
+        if (mine !== seq) return;
+        results.innerHTML = '';
+        show('检索服务暂时不可用，稍后再试。');
+      });
   }
 
-  function escapeHtml (v) { return String(v == null ? '' : v).replace(/[&<>"]/g, function (c) { return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c] }) }
+  function schedule (value) { clearTimeout(timer); timer = setTimeout(function () { run(value) }, 160) }
 
-  fetch('/api/notes').then(function (r) { return r.json() }).then(function (data) {
-    index = data;
-    var initial = new URLSearchParams(location.search).get('q');
-    if (initial) { input.value = initial; render(initial) }
-  }).catch(function () { hint.textContent = '索引加载失败。' });
+  var initial = new URLSearchParams(location.search).get('q');
+  if (initial) { input.value = initial; run(initial) }
 
-  input.addEventListener('input', function () { render(input.value) });
+  input.addEventListener('input', function () { schedule(input.value) });
   document.addEventListener('keydown', function (event) {
     if (event.key === '/' && document.activeElement !== input) { event.preventDefault(); input.focus() }
-    if (event.key === 'Escape' && document.activeElement === input) { input.value = ''; render('') }
+    if (event.key === 'Escape' && document.activeElement === input) { input.value = ''; run('') }
   });
 })();
 </script>`

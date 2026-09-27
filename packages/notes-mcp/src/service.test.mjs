@@ -131,8 +131,8 @@ test('search_notes：元数据没命中时自动扫正文（并说明扫过）�
 
 test('search_notes：空查询报错，limit 截断但保留 total', async () => {
   await assert.rejects(() => service.searchNotes({ query: '   ' }), ToolError)
-  // 全是疑问词与虚词的查询：解析之后一个词都不剩，直接报错，而不是把整库都当命中
-  await assert.rejects(() => service.searchNotes({ query: '为什么是这样的呢' }), ToolError)
+  // 只有疑问词的查询：解析之后一个词都不剩，直接报错，而不是把整库都当命中
+  await assert.rejects(() => service.searchNotes({ query: '为什么' }), ToolError)
   const data = await service.searchNotes({ query: '归因', includeBody: true, limit: 2 })
   assert.ok(data.total >= 1)
   assert.equal(data.hits.length, Math.min(2, data.total))

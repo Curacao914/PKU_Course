@@ -396,7 +396,8 @@ test('concept, statute and case indexes link back to the notes that mention them
 
   const search = renderSearchPage()
   assert.match(search, /id="q"/)
-  assert.match(search, /fetch\('\/api\/notes'\)/, '搜索是纯客户端的：直接读站点索引')
+  assert.match(search, /'\/api\/search\?q='/, '搜索交给服务端：与 MCP 同一套检索（IDF、多词、正文）')
+  assert.ok(!search.includes("fetch('/api/notes')"), '不在浏览器里自己算打分：同一句话必须与 AI 检索给出同一批结果')
 })
 
 test('rebuilding from the publish library refreshes derived fields instead of reusing stale ones', () => {

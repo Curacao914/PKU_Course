@@ -96,19 +96,80 @@ export function createRequestHandler({
     runCommand
   })
 
-  // MCP 处理器懒加载：没装 notes-mcp 包（或明确关掉）时，站点照常工作
+  /**
+   * 笔记服务单例：MCP 与站内搜索**共用同一个**。
+   *
+   * 共用的理由不只是省内存：站内搜索与 AI 检索必须是同一套打分，
+   * 否则同一句话在页面上和在 MCP 里给出不同的结果，人就没法判断该信哪个。
+   * 懒加载：没装 notes-mcp 包（或明确关掉 MCP）时，站点照常工作。
+   */
+  let notesService = null
+  let serviceFailed = ''
+  const ensureService = async () => {
+    if (notesService || serviceFailed) return { service: notesService, failed: serviceFailed }
+    try {
+      const { createNotesService, createLocalLibrarySource } = await import('@course/notes-mcp')
+      const libraryPath = path.join(normalizedRoot, 'library.json')
+      notesService = createNotesService({
+        source: createLocalLibrarySource({ file: libraryPath }),
+        siteOrigin: mcpOrigin
+      })
+    } catch (error) {
+      serviceFailed = error instanceof Error ? error.message : String(error)
+      process.stderr.write(`[site] 笔记服务不可用：${serviceFailed}\n`)
+    }
+    return { service: notesService, failed: serviceFailed }
+  }
+
+  /**
+   * 平铺 md 文件名 → 规范路径。按发布库现算，mtime 不变就复用。
+   *
+   * 课次文件名来自 slug 的最后一段（= 课次标题），所以老链接的 <课次>.md 能对上；
+   * 标题被清洗过（含斜杠等）时再用 lessonTitle 兜一道。
+   */
+  let flatCache = { mtimeMs: 0, map: null }
+  const flatMarkdownTargets = () => {
+    const libraryFile = path.join(normalizedRoot, 'library.json')
+    let stat
+    try {
+      stat = fs.statSync(libraryFile)
+    } catch {
+      return null
+    }
+    if (flatCache.map && flatCache.mtimeMs === stat.mtimeMs) return flatCache.map
+    try {
+      const records = JSON.parse(fs.readFileSync(libraryFile, 'utf8'))
+      const map = new Map()
+      for (const record of records) {
+        const parts = String(record.slug || '').split('/').filter(Boolean)
+        const rest = parts[0] === 'notes' ? parts.slice(1) : parts
+        if (rest.length < 2) continue
+        const course = rest[0]
+        const lesson = rest[rest.length - 1]
+        map.set(`${lesson}.md`, `md/${course}/${lesson}.md`)
+        map.set(`${lesson}-一页纸.md`, `md/${course}/${lesson}-一页纸.md`)
+        const title = String(record.lessonTitle || '').trim()
+        if (title && title !== lesson) map.set(`${title}.md`, `md/${course}/${lesson}.md`)
+      }
+      flatCache = { mtimeMs: stat.mtimeMs, map }
+      return map
+    } catch {
+      return null
+    }
+  }
+
   let mcpHandler = null
   let mcpFailed = ''
   const mcpPath = '/mcp'
   const ensureMcp = async () => {
     if (mcpHandler || mcpFailed) return mcpHandler
+    const { service, failed } = await ensureService()
+    if (!service) {
+      mcpFailed = failed || 'MCP 未启用'
+      return null
+    }
     try {
-      const { createMcpHttpHandler, createNotesService, createLocalLibrarySource } = await import('@course/notes-mcp')
-      const libraryPath = path.join(normalizedRoot, 'library.json')
-      const service = createNotesService({
-        source: createLocalLibrarySource({ file: libraryPath }),
-        siteOrigin: mcpOrigin
-      })
+      const { createMcpHttpHandler } = await import('@course/notes-mcp')
       mcpHandler = createMcpHttpHandler({
         service,
         log: line => process.stderr.write(`${line}\n`)
@@ -182,6 +243,62 @@ export function createRequestHandler({
       return
     }
 
+    /**
+     * 站内搜索：与 MCP 用**同一套检索**（同一服务实例、同一打分）。
+     *
+     * 以前搜索页在浏览器里自己算 bigram 覆盖度：没有 IDF，泛词会把专名压下去，
+     * 多词查询与整句问句也处理不了。现在页面只负责展示，检索在服务端做——
+     * 同时也就能搜正文（浏览器里没有正文）。
+     */
+    if (pathname === '/api/search') {
+      const query = String(url.searchParams.get('q') || '').trim()
+      const rawLimit = Number(url.searchParams.get('limit'))
+      const limit = Math.min(Math.max(Number.isFinite(rawLimit) && rawLimit > 0 ? Math.floor(rawLimit) : 12, 1), 30)
+      if (!query) {
+        sendJson(res, 400, { ok: false, error: 'missing_query', message: '给一个查询词：/api/search?q=…' })
+        return
+      }
+      const { service, failed } = await ensureService()
+      if (!service) {
+        sendJson(res, 503, { ok: false, error: 'search_unavailable', message: failed || '检索服务不可用' })
+        return
+      }
+      try {
+        const found = await service.searchNotes({ query, includeBody: true, limit })
+        sendJson(res, 200, {
+          ok: true,
+          query: found.query,
+          total: found.total,
+          bodyScanned: found.bodyScanned,
+          fuzzy: found.fuzzy,
+          terms: found.terms,
+          hits: found.hits.map(hit => ({
+            slug: hit.slug,
+            url: `/${String(hit.slug).replace(/^\/+/, '')}.html`,
+            anchor: hit.location?.id ? `/${String(hit.slug).replace(/^\/+/, '')}.html#${hit.location.id}` : '',
+            courseName: hit.courseName,
+            lessonTitle: hit.lessonTitle,
+            lessonDate: hit.lessonDate,
+            theme: hit.theme || '',
+            keywords: (hit.keywords || []).slice(0, 6),
+            section: hit.location?.title || '',
+            snippets: hit.snippets
+          }))
+        })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        // 区分"查询本身没词/不合法"与"发布库读不到"：前者是调用方的问题（400），
+        // 后者是站点的问题（503）——都报 400 会让人去改查询，白费功夫。
+        const serverSide = /读不到发布库|发布库不是合法 JSON|发布库格式不对/.test(message)
+        sendJson(res, serverSide ? 503 : 400, {
+          ok: false,
+          error: serverSide ? 'library_unavailable' : 'search_failed',
+          message
+        })
+      }
+      return
+    }
+
     if (pathname === '/favicon.ico') {
       send(res, 204, '')
       return
@@ -219,6 +336,34 @@ export function createRequestHandler({
     if (/^(library|\.?[^/]*\.tmp)\.json$/.test(candidate) || candidate.startsWith('library.json')) {
       send(res, 404, 'not found', { 'cache-control': 'no-store' })
       return
+    }
+
+    /**
+     * 旧链接兼容：/md/<课次>.md → /md/<课程>/<课次>.md。
+     *
+     * 平铺路径是路径规则改版前的形状（那时两门课同一天同名课次会互相覆盖，所以改成了
+     * 带课程目录）。收藏夹、聊天记录、别人转发的链接里还留着老地址，直接 404 不友好；
+     * 这里按发布库把它们 302 到规范路径——只认库里真实存在的课次，不做模糊猜测。
+     */
+    let decodedCandidate = ''
+    try {
+      decodedCandidate = decodeURIComponent(candidate)
+    } catch {
+      decodedCandidate = ''
+    }
+    if (decodedCandidate.startsWith('md/') && !decodedCandidate.slice(3).includes('/')) {
+      const flat = flatMarkdownTargets()
+      const canonical = flat?.get(decodedCandidate.slice(3))
+      if (canonical) {
+        const location = `/${canonical.split('/').map(segment => encodeURIComponent(segment)).join('/')}`
+        res.writeHead(302, {
+          location,
+          'cache-control': 'public, max-age=3600',
+          'content-length': 0
+        })
+        res.end()
+        return
+      }
     }
 
     // 无扩展名时补 .html，让 /notes/课程/课次 这种干净链接也能用

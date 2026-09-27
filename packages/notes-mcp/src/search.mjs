@@ -1,5 +1,5 @@
 import { lessonDateOf, splitSections } from './records.mjs'
-import { corpusTerms, fuzzyTerms, normalizeText, queryTerms } from './query.mjs'
+import { corpusTerms, fuzzyTerms, normalizeText, queryTerms, requiredUnits } from './query.mjs'
 
 /**
  * 词面检索的打分：一个词值多少钱 = 字段权重 × 词本身的权重 × 这个词在语料里有多稀有（IDF）。
@@ -87,6 +87,10 @@ export function locateByHeading(record = {}, terms = []) {
  */
 export function scoreRecord({ record = {}, terms = [], idf = () => 1, markdown = '', includeBody = false } = {}) {
   const matchedTerms = new Set()
+  // 元数据侧命中与"最佳小节"命中分开记：长正文里"行为""共同"这种碎片到处都有，
+  // 散落在各节的弱命中堆起来会让每节课都"命中"，那就等于没检索。
+  const metadataTerms = new Set()
+  let sectionTerms = new Set()
   const kindScores = new Map()
   const snippets = []
   let location = null
@@ -100,6 +104,7 @@ export function scoreRecord({ record = {}, terms = [], idf = () => 1, markdown =
         const occurrences = findMatches(fieldText, term)
         if (!occurrences.length) continue
         matchedTerms.add(term)
+        metadataTerms.add(term)
         fieldScore += spec.weight * weight * idf(term) * Math.min(occurrences.length, 3)
         if (snippets.length < MAX_SNIPPETS) {
           const at = occurrences[0]
@@ -140,12 +145,13 @@ export function scoreRecord({ record = {}, terms = [], idf = () => 1, markdown =
       bodyScore += sectionScore
       sectionTerms.forEach(term => matchedTerms.add(term))
       if (!bestSection || sectionScore > bestSection.score) {
-        bestSection = { title: section.title, id: section.id, score: sectionScore }
+        bestSection = { title: section.title, id: section.id, score: sectionScore, terms: sectionTerms }
       }
     }
   }
   if (bestSection) {
     location = { title: bestSection.title, id: bestSection.id }
+    sectionTerms = bestSection.terms
   } else if (!location) {
     // 只命中关键词/概念时：用标题定位，别让调用方自己去猜是哪一节
     location = locateByHeading(record, terms.filter(item => matchedTerms.has(item.term)))
@@ -158,6 +164,8 @@ export function scoreRecord({ record = {}, terms = [], idf = () => 1, markdown =
     kinds,
     kind: kinds[0] || '正文',
     matchedTerms,
+    metadataTerms,
+    sectionTerms,
     location,
     snippets: [...new Set(snippets)].slice(0, MAX_SNIPPETS),
     bodyScore
@@ -168,11 +176,24 @@ export function scoreRecord({ record = {}, terms = [], idf = () => 1, markdown =
  * 命中门槛：多词查询不能因为"沾到一个 n-gram"就算命中，否则排序会被噪声淹掉。
  * 至少覆盖 1/3 的词，或者命中了一个足够稀有的词（只在一两节课出现的专名）。
  */
-export function isConfidentHit({ matchedTerms, terms, idf = () => 1 }) {
+export function isConfidentHit({ matchedTerms = new Set(), metadataTerms, sectionTerms = new Set(), terms = [], idf = () => 1 }) {
   if (!matchedTerms.size) return false
-  const substantive = terms.filter(item => idf(item.term) >= 0.9)
-  if (substantive.some(item => matchedTerms.has(item.term))) return true
-  return matchedTerms.size >= Math.max(1, Math.ceil(terms.length / 3))
+  /**
+   * 什么才算"这一节真的在讲这个查询"：
+   *   · 元数据命中（标题/主题/关键词/概念/法条/案例/摘要）——写这些字段就是为了概括内容；
+   *   · 或者**同一个小节里**至少命中两个词——正文的局部浓度说明这一节在讲它。
+   * 只凭"某个碎片在长正文里出现过"不算：那种命中会让每节课都上榜（实测"共同行为"
+   * 一度命中 9 篇里的 9 篇，"行为"两个字到处都有）。这层收紧之后只剩真正相关的几篇。
+   */
+  const strong = new Set(metadataTerms || matchedTerms)
+  if (sectionTerms.size >= 2) sectionTerms.forEach(term => strong.add(term))
+  if (!strong.size) return false
+  if ([...strong].some(term => idf(term) >= 0.9)) return true
+  // 两三个字的碎片凑在一起也不算：中文 2-gram 里"共同""行为"这种到处都有，
+  // 只有当小节里命中了一个**三字以上**的片段时，才说明它在讲这个词组。
+  const specific = [...strong].filter(term => [...String(term)].length >= 3)
+  if (specific.length) return true
+  return strong.size >= Math.max(1, Math.ceil(terms.length / 3))
 }
 
 /**
@@ -194,6 +215,26 @@ export async function searchRecords({ records = [], query = '', includeBody = fa
   const df = term => records.filter(record => haystacks.get(record.slug).includes(term)).length
   const idf = term => Math.log(1 + records.length / (1 + df(term)))
 
+  /**
+   * 词一级单元（≤6 字、无空格）要求"真的出现"。对不上时就近邻一次（错别字回退），
+   * 近邻也找不到 → 这条查询在语料里就是没有，返回 0 条比返回一堆碎片命中诚实。
+   */
+  const candidates = corpusTerms(records)
+  const unitVariants = new Map()
+  for (const unit of requiredUnits(query)) {
+    const variants = [unit]
+    if (!records.some(record => haystacks.get(record.slug).includes(unit))) {
+      const near = fuzzyTerms(unit, candidates)
+      if (near.length) variants.push(near[0])
+    }
+    unitVariants.set(unit, variants)
+  }
+  const satisfiesRequired = (record, markdown) => {
+    if (!unitVariants.size) return true
+    const text = `${haystacks.get(record.slug) || ''}\n${normalizeText(markdown || '')}`
+    return [...unitVariants.values()].every(variants => variants.some(variant => text.includes(variant)))
+  }
+
   const run = async (activeTerms, { scanBody }) => {
     const hits = []
     let bodySkipped = 0
@@ -210,13 +251,23 @@ export async function searchRecords({ records = [], query = '', includeBody = fa
           }
         }
       }
+      if (!satisfiesRequired(record, markdown)) continue
       const scored = scoreRecord({ record, terms: activeTerms, idf, markdown, includeBody: scanBody })
-      if (!isConfidentHit({ matchedTerms: scored.matchedTerms, terms: activeTerms, idf }) || scored.score <= 0) continue
+      if (!isConfidentHit({
+        matchedTerms: scored.matchedTerms,
+        metadataTerms: scored.metadataTerms,
+        sectionTerms: scored.sectionTerms,
+        terms: activeTerms,
+        idf
+      }) || scored.score <= 0) continue
       hits.push({
         slug: record.slug,
         courseName: record.courseName,
         lessonTitle: record.lessonTitle,
         lessonDate: lessonDateOf(record),
+        // 站点搜索页与 MCP 都靠这几个字段判断"要不要点进去"，所以在检索层就给全
+        theme: record.theme || '',
+        keywords: (record.keywords || []).slice(0, 6),
         kind: scored.kind,
         kinds: scored.kinds,
         location: scored.location,
@@ -242,7 +293,6 @@ export async function searchRecords({ records = [], query = '', includeBody = fa
   }
   if (!result.hits.length) {
     // 错别字回退：只用语料里出现过的词做替换，绝不凭空造词
-    const candidates = corpusTerms(records)
     const replaced = new Map()
     for (const item of terms) {
       if (df(item.term) > 0) continue // 语料里本来就有这个词：不是错别字问题
@@ -259,9 +309,21 @@ export async function searchRecords({ records = [], query = '', includeBody = fa
       result = await run(active, { scanBody: true })
     }
   }
+  // 词一级单元的近似替换也要报出来（render 与搜索页会显示"按近似词检索：A→B"）：
+  // 猜着匹配却不说，比不命中更糟。
+  const unitFuzzy = [...unitVariants.entries()]
+    .filter(([, variants]) => variants.length > 1)
+    .map(([from, variants]) => ({ from, to: variants[1] }))
+  const seenFuzzy = new Set()
+  const fuzzyReport = [...unitFuzzy, ...fuzzy].filter(item => {
+    const key = `${item.from}→${item.to}`
+    if (seenFuzzy.has(key)) return false
+    seenFuzzy.add(key)
+    return true
+  })
   return {
     terms: active.map(item => item.term),
-    fuzzy,
+    fuzzy: fuzzyReport,
     fuzzyTerms: fuzzyUsed,
     bodyScanned,
     bodySkipped: result.bodySkipped,

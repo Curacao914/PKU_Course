@@ -148,6 +148,14 @@ function buildFixture() {
       lessonDate: record.lessonDate, metadata: record.metadata
     }]
   }))
+  // 搜索走服务端（/api/search），它读的是发布库——审计用的站点根也要有一份，
+  // 否则搜索页在这里会"检索服务不可用"，而线上却是好的。
+  fs.writeFileSync(path.join(siteRoot, 'library.json'), JSON.stringify([{
+    ...record,
+    keywords: record.keywords || [],
+    theme: record.theme || '',
+    metadata: record.metadata
+  }], null, 2))
 
   // 首页 / 索引页：横向课次条、课程过滤、条目落到正文位置，都要真的点一遍
   const execSecond = buildNoteRecord({
@@ -1117,10 +1125,14 @@ async function auditSearch(page, site, failures) {
   await record('按 / 聚焦搜索框', focused === 'q', '当前焦点 id=' + focused)
 
   await page.fill('#q', '执行措施')
-  await page.waitForTimeout(300)
+  await page.waitForSelector('#results a.card', { timeout: 5000 }).catch(() => {})
   const hits = (await page.$$('#results a.card')).length
   const hint = await page.textContent('#hint')
-  await record('输入即出结果', hits >= 1, '命中 ' + hits + ' 篇，提示「' + hint + '」')
+  await record('输入即出结果（服务端检索）', hits >= 1, '命中 ' + hits + ' 篇，提示「' + hint + '」')
+
+  // 结果卡片要指到命中的那一节（带锚点），而不只是整篇
+  const firstHref = await page.getAttribute('#results a.card', 'href')
+  await record('结果落点带小节锚点', Boolean(firstHref && firstHref.includes('#')), '首个链接：' + firstHref)
 
   await page.keyboard.press('Escape')
   await page.waitForTimeout(250)

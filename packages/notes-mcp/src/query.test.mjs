@@ -5,11 +5,19 @@ import { corpusTerms, editDistanceWithin, fuzzyTerms, queryTerms } from './query
 
 const termsOf = query => queryTerms(query).map(item => item.term)
 
-test('多词查询按虚词切开，而不是把整串当一个词', () => {
-  // 旧实现拿整串 indexOf：多词查询必然零命中，这是线上最常见的失效
-  assert.deepEqual(termsOf('资本维持与抽逃出资').filter(term => term.length >= 4).sort(), ['抽逃出资', '资本维持'])
-  assert.ok(termsOf('交易成本 资产专用性').includes('交易成本'))
+test('多词查询：整串之外还要给出词一级的片段（旧实现整串 indexOf，必然零命中）', () => {
+  const terms = termsOf('资本维持与抽逃出资')
+  assert.ok(terms.includes('资本维持'), '4-gram 要覆盖到前一个词')
+  assert.ok(terms.includes('抽逃出资'), '4-gram 要覆盖到后一个词')
   assert.ok(termsOf('交易成本 资产专用性').includes('资产专用性'))
+})
+
+test('中文单字虚词又是构词成分：不能按它们切词', () => {
+  // 这些字一旦当成分隔符，"行为/要件/存在/和解/参与" 这些真词就被切坏了——
+  // 试过一版按虚词切开，"共同行为" 变成了 "共同行"，等于把要查的词毁掉。
+  for (const [query, keep] of [['共同行为', '共同行为'], ['构成要件', '构成要件'], ['存在与和解', '存在'], ['参与分配', '参与']]) {
+    assert.ok(termsOf(query).includes(keep), `${query} 里应当保留 ${keep}`)
+  }
 })
 
 test('自然语言问句：去掉问法壳子，长片段再补 2—4 字 n-gram', () => {
@@ -31,9 +39,12 @@ test('整段短语的权重高于它切出来的 n-gram', () => {
   assert.ok(weights.get('资产专用性') > weights.get('专用性'), '整段比碎片可信')
 })
 
-test('全是疑问词与虚词的查询解析为空（调用方据此报错，而不是把整库当命中）', () => {
-  assert.deepEqual(queryTerms('为什么是这样的呢'), [])
+test('只由疑问词组成的查询解析为空（调用方据此报错，而不是把整库当命中）', () => {
+  assert.deepEqual(queryTerms('为什么'), [])
+  assert.deepEqual(queryTerms('如何'), [])
   assert.deepEqual(queryTerms('   '), [])
+  // 疑问句里只要还有实词就照常检索：拆出来的是 2—4 字片段，噪声片段在语料里出现 0 次、拿不到分
+  assert.ok(queryTerms('为什么是这样的呢').length > 0)
 })
 
 test('编辑距离：只认"差一个字符"这一档', () => {

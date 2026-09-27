@@ -12,17 +12,17 @@ const NOTE = ['# 第10-12节', '', '## 课程概览', '', '共犯的成立需要
 
 function siteDir() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-site-'))
-  writeSite({
-    records: [buildNoteRecord({
-      courseName: '刑法分论',
-      teacher: '车浩',
-      lessonTitle: '第10-12节',
-      markdown: NOTE,
-      publishedAt: '2026-09-25T00:00:00.000Z'
-    })],
-    outputDir: dir,
-    siteOrigin: 'https://course.law-tech.dev'
+  const record = buildNoteRecord({
+    courseName: '刑法分论',
+    teacher: '车浩',
+    lessonTitle: '第10-12节',
+    markdown: NOTE,
+    publishedAt: '2026-09-25T00:00:00.000Z'
   })
+  writeSite({ records: [record], outputDir: dir, siteOrigin: 'https://course.law-tech.dev' })
+  // 发布库：真实部署里由 course publish 写在站点根，站内搜索与旧链接重定向都读它。
+  // 只调 writeSite 的话这里就是空的——所以测试夹具要照实写出来。
+  fs.writeFileSync(path.join(dir, 'library.json'), JSON.stringify([record], null, 2))
   return dir
 }
 
@@ -90,6 +90,65 @@ test('the site server serves the index, note pages and the notes api', async () 
     assert.equal((await fetch(`${site.url}/healthz`, { method: 'POST' })).status, 405)
   } finally {
     await site.close()
+  }
+})
+
+test('站内搜索走服务端：与 MCP 同一套检索，结果带小节与片段', async () => {
+  const root = siteDir()
+  const site = await startSiteServer({ root, port: 0 })
+  try {
+    // 正文里才有、元数据里没有的词：能搜到才说明真的查了正文
+    const body = await fetch(`${site.url}/api/search?q=${encodeURIComponent('共同行为')}`)
+    assert.equal(body.status, 200)
+    const payload = await body.json()
+    assert.equal(payload.ok, true)
+    assert.ok(payload.hits.length >= 1, '正文里的词也要能搜到')
+    const hit = payload.hits[0]
+    assert.equal(hit.slug, 'notes/刑法分论/第10-12节')
+    assert.equal(hit.url, '/notes/刑法分论/第10-12节.html')
+    assert.ok(hit.snippets.some(snippet => snippet.includes('共同行为')))
+
+    // 多词查询（旧实现整串匹配必然零命中）
+    const multi = await (await fetch(`${site.url}/api/search?q=${encodeURIComponent('共同故意 共同行为')}`)).json()
+    assert.ok(multi.hits.length >= 1, '多词查询要能命中')
+
+    // 只有疑问词、解析后一个词都不剩 → 明确报错，而不是把整库都当命中
+    const empty = await fetch(`${site.url}/api/search?q=${encodeURIComponent('为什么')}`)
+    assert.equal(empty.status, 400)
+    assert.equal((await empty.json()).error, 'search_failed')
+
+    // 疑问句里只要有实词就照常检索（拆出的是碎片，命不中就是 0 条，不是错误）
+    const sentence = await fetch(`${site.url}/api/search?q=${encodeURIComponent('这一节到底讲了什么呢')}`)
+    assert.equal(sentence.status, 200)
+    assert.equal((await sentence.json()).ok, true)
+
+    assert.equal((await fetch(`${site.url}/api/search`)).status, 400, '缺 q 时明确报 400')
+    assert.equal((await fetch(`${site.url}/api/search?q=x`, { method: 'POST' })).status, 405)
+  } finally {
+    await site.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('旧的平铺 md 链接 302 到规范路径；库里没有的不猜', async () => {
+  // 路径规则改版前是 /md/<课次>.md，收藏与转发里还留着老地址。
+  const root = siteDir()
+  const site = await startSiteServer({ root, port: 0 })
+  try {
+    const old = await fetch(`${site.url}/md/第10-12节.md`, { redirect: 'manual' })
+    assert.equal(old.status, 302)
+    assert.equal(old.headers.get('location'), '/md/%E5%88%91%E6%B3%95%E5%88%86%E8%AE%BA/%E7%AC%AC10-12%E8%8A%82.md')
+
+    const followed = await fetch(`${site.url}/md/第10-12节.md`)
+    assert.equal(followed.status, 200)
+    assert.match(followed.headers.get('content-type'), /text\/markdown/)
+
+    // 发布库里没有的课次：不猜、不重定向，老实 404
+    const unknown = await fetch(`${site.url}/md/不存在的一节.md`, { redirect: 'manual' })
+    assert.equal(unknown.status, 404)
+  } finally {
+    await site.close()
+    fs.rmSync(root, { recursive: true, force: true })
   }
 })
 

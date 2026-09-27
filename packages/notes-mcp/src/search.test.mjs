@@ -18,7 +18,7 @@ const lesson = (slug, courseName, lessonTitle, theme, keywords, markdown, metada
 })
 
 const RECORDS = [
-  lesson('notes/商法/第2讲', '商法', '第2讲', '交易成本与企业', ['交易成本'],
+  lesson('notes/商法/第2讲', '商法', '第2讲', '交易成本与企业', ['交易成本', '资产专用性'],
     '# 第2讲\n\n## 一、为什么要有企业\n\n市场交易有成本，企业以命令替代协商。\n\n## 二、资产专用性\n\n专用性资产离开这一关系就不值钱。'),
   lesson('notes/商法/第3讲', '商法', '第3讲', '有限责任与代理成本', ['代理成本'],
     '# 第3讲\n\n## 一、有限责任\n\n有限责任降低监督成本。\n\n## 二、抽逃出资\n\n抽逃出资侵蚀资本。')
@@ -60,7 +60,7 @@ test('命中门槛：多词查询沾到一个碎片不算命中', () => {
   const parsed = queryTerms('资产专用性与交易成本')
   const partial = { matchedTerms: new Set(['专用']), terms: parsed, idf: () => 0.2 }
   assert.equal(isConfidentHit(partial), false, '只命中一个低区分度的碎片不该算命中')
-  const strong = { matchedTerms: new Set(['资产专用性']), terms: parsed, idf: term => (term === '资产专用性' ? 2 : 0.2) }
+  const strong = { matchedTerms: new Set(['交易成本']), terms: parsed, idf: term => (term === '交易成本' ? 2 : 0.2) }
   assert.equal(isConfidentHit(strong), true, '命中一个高区分度的词就算命中')
 })
 
@@ -105,14 +105,18 @@ test('错别字回退：零命中时才启用，并且只用语料里出现过�
   assert.deepEqual(typo.fuzzy, [{ from: 'dld', to: 'did' }])
   assert.ok(typo.fuzzyTerms.includes('did'))
 
-  // 中文错别字：n-gram 先命中，因此不启用回退（省一次全量比对，也不把结果搅浑）
+  // 中文错别字（五字以内的词组）：按"词一级单元"做近似替换，并把替换报出来
   const recovering = await searchRecords({ records, query: '资产专用行' })
-  assert.deepEqual(recovering.fuzzy, [])
+  assert.deepEqual(recovering.fuzzy, [{ from: '资产专用行', to: '资产专用性' }])
   assert.equal(recovering.hits[0]?.slug, 'notes/商法/第2讲')
+
+  // 语料里根本没有的近义词组：返回 0 条（以前会靠"共同/行为"这类碎片凑出好几篇假命中）
+  const absent = await searchRecords({ records, query: '共同行为' })
+  assert.equal(absent.total, 0)
 })
 
 test('一个词都不剩的查询返回空结果集，由调用方决定怎么报错', async () => {
-  const empty = await searchRecords({ records: RECORDS, query: '为什么是这样的呢' })
+  const empty = await searchRecords({ records: RECORDS, query: '为什么' })
   assert.deepEqual(empty.terms, [])
   assert.equal(empty.total, 0)
   assert.deepEqual(empty.hits, [])
