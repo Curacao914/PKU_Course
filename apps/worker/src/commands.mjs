@@ -20,6 +20,8 @@ import {
   renderBalanceWarning
 } from './billing.mjs'
 import {
+  // 简报与来源正文的绑定：生成侧写字段、发布侧校验都走 @course/notes 这一套
+  checkBriefBinding,
   callCourseModel,
   createInitialLesson,
   ONEPAGE_TARGET_CHARS,
@@ -42,7 +44,18 @@ import {
   runDeliveryCycle,
   wechatSessionState
 } from '@course/notify'
-import { buildNoteRecord, readSiteIndex, writeSite } from '@course/publish'
+import {
+  buildNoteRecord,
+  derivedBinding,
+  markdownBytesChecksum,
+  markdownChecksum,
+  migrateRecordTime,
+  noteSlug,
+  readSiteIndex,
+  verifyDerived,
+  writeJsonAtomic,
+  writeSite
+} from '@course/publish'
 import { ACTIONABLE_STAGES } from '@course/store'
 
 import {
@@ -674,11 +687,19 @@ export function createCommands(context) {
       if (produced) {
         try {
           brief = await generateBrief({ lesson: result.lesson, courseSpec, callModel, modelConfig })
+          // 绑定字段与简报一起落盘：目录是共享的，同一门课几节课的 brief.json 会互相覆盖，
+          // 发布时靠这几个字段认出"这份简报不是给这一篇的"（见 checkBriefBinding）。
+          // 指纹用生成侧给的那一个（result.sourceChecksum），不是这里另算一个——
+          // briefSourceChecksum 会做换行规范化，两边必须同一套算法。
+          const boundMarkdown = fs.readFileSync(notePath, 'utf8')
           fs.writeFileSync(briefPath, `${JSON.stringify({
             schemaVersion: 1,
-            generatedAt: new Date().toISOString(),
             course,
             lesson: lessonTitle,
+            replayKey,
+            sourceChecksum: brief.sourceChecksum,
+            sourceChars: brief.sourceChars ?? boundMarkdown.length,
+            generatedAt: clockNow().toISOString(),
             briefing: brief.briefing,
             keyPoints: brief.keyPoints,
             // 首页课次表那一列用的就是这两个：写简报的这一次调用顺手产出的，不额外花钱
@@ -774,6 +795,25 @@ export function createCommands(context) {
    * 因此重新生成站点不需要重新跑模型。
    */
   /**
+   * 这一节课在账本里记下的排课时间（discover 写入的 tasks.starts_at_text，形如 "2026-05-27 13:00"）。
+   *
+   * 用途只有一个：课次标题里没有日期时（老的"第10-12节"就是这么命名的），
+   * 拿它当 lessonDate 的第二来源。读不到不是错误——没有账本、没有这条任务都只是空串。
+   */
+  function ledgerStartsAtText(replayKey) {
+    if (!replayKey) return ''
+    let store = null
+    try {
+      store = openStore(config.ledgerPath)
+      return String(store.getTask(replayKey)?.starts_at_text || '')
+    } catch {
+      return ''
+    } finally {
+      try { store?.close() } catch {}
+    }
+  }
+
+  /**
    * 发布成功后清一次 CDN 缓存。
    *
    * 边缘缓存是这个站点的命脉（读者在国内，一天 TTL 让页面快得多），但"改完要等一天"
@@ -826,11 +866,16 @@ export function createCommands(context) {
     const outDir = path.resolve(options.options.out || path.dirname(notePath))
     fs.mkdirSync(outDir, { recursive: true })
     const onepagePath = path.join(outDir, 'onepage.json')
+    // 派生物与源正文的绑定：publish 会用这四项校验，对不上就不挂它（见 derived.mjs）
     fs.writeFileSync(onepagePath, `${JSON.stringify({
       schemaVersion: 1,
-      generatedAt: new Date().toISOString(),
-      course,
-      lesson,
+      ...derivedBinding({
+        markdown,
+        courseName: course,
+        lessonTitle: lesson,
+        replayKey: options.options['replay-key'] || '',
+        generatedAt: clockNow().toISOString()
+      }),
       title: result.title,
       outline: result.outline,
       markdown: result.markdown,
@@ -894,9 +939,14 @@ export function createCommands(context) {
     fs.writeFileSync(briefPath, `${JSON.stringify({
       ...previous,
       schemaVersion: 1,
-      generatedAt: new Date().toISOString(),
+      // 绑定字段：course / lesson / 来源指纹（生成侧算好的那一个）+ 来源字数。
+      // replayKey 没传时沿用上一次文件里的——缺了它不算冲突，真正的兜底是指纹。
       course,
       lesson,
+      replayKey: options.options['replay-key'] || previous.replayKey || '',
+      sourceChecksum: result.sourceChecksum,
+      sourceChars: result.sourceChars ?? markdown.length,
+      generatedAt: clockNow().toISOString(),
       briefing: result.briefing,
       keyPoints: result.keyPoints,
       // theme 曾经只写进了 stdout 摘要、没落盘：首页那一列于是永远空着
@@ -964,31 +1014,169 @@ export function createCommands(context) {
     const notePath = path.join(from, `${safeFileName(lessonTitle)}.md`)
     if (!fs.existsSync(notePath)) throw new Error(`找不到笔记正文：${notePath}`)
     const markdown = fs.readFileSync(notePath, 'utf8')
-    // 简报（notes 阶段的产物）：放消息正文与笔记页顶部。
-    const briefPath = path.join(from, 'brief.json')
-    const brief = fs.existsSync(briefPath) ? JSON.parse(fs.readFileSync(briefPath, 'utf8')) : null
-    // 一页纸摘要（course onepage 的产物）：有就一起发布，没有就先不出现入口
-    const onepagePath = path.join(from, 'onepage.json')
-    const onepage = fs.existsSync(onepagePath) ? JSON.parse(fs.readFileSync(onepagePath, 'utf8')) : null
+    const replayKey = runSummary.replayKey || options.options['replay-key'] || ''
+    // 两种指纹，用途完全不同（见 @course/publish 的 derived.mjs）：
+    //   contentChecksum —— 原始字节：发布库记录的 checksum（"内容变没变"、通知的幂等键）
+    //   onepageChecksum —— 规范化（CRLF→LF、去掉结尾空白）：一页纸的绑定指纹，
+    //                      与生成侧的 derivedBinding 同一个函数，差一个结尾换行不算改过
+    const contentChecksum = markdownBytesChecksum(markdown)
+    const onepageChecksum = markdownChecksum(markdown)
 
-    const library = fs.existsSync(libraryForRebuild) ? JSON.parse(fs.readFileSync(libraryForRebuild, 'utf8')) : []
+    // 老发布库只有 publishedAt：读进来时整体迁移成三个时间字段（幂等，见 migrateRecordTime），
+    // 写回时全库一致——不会出现"老记录还带 publishedAt、新记录只有 lessonDate"的混合状态。
+    const library = (fs.existsSync(libraryForRebuild) ? JSON.parse(fs.readFileSync(libraryForRebuild, 'utf8')) : [])
+      .map(migrateRecordTime)
+    const slug = noteSlug({ courseName: course, lessonTitle })
+    // 同一节的"上一次发布"：先按 slug 找，再按 replayKey 找（课次标题改过时 slug 会变）
+    const previous = library.find(item => item.slug === slug) ||
+      (replayKey ? library.find(item => item.replayKey === replayKey) : null) || null
+    const nowIso = clockNow().toISOString()
+    // 首次进站时间一旦定下就不再动：RSS 的 pubDate 靠它，重新发布旧课不该改这个时间
+    const firstPublishedAt = String(previous?.firstPublishedAt || previous?.publishedAt || '') || nowIso
+    const regenerating = options.flags?.has('regenerate-derived')
+    const derivedModelConfig = {
+      apiKey: config.ai.apiKey || 'unset',
+      baseUrl: config.ai.baseUrl,
+      provider: config.ai.provider,
+      source: 'environment',
+      models: config.ai.models
+    }
+    const derivedCallModel = () => injectedCallModel ||
+      (payload => callCourseModel({ ...payload, config: { ...derivedModelConfig, ...(payload.config || {}) } }))
+
+    /**
+     * 取一份派生物（简报 / 一页纸）。
+     *
+     * 目录是共享的：同一个 --from 目录里放过同一门课几节课的 brief.json 时，谁最后写谁生效——
+     * 发布库里几节课于是共用同一段简报（真实故障：同课程第 2、3 讲的 summary 等于第 1 讲）。
+     * 所以每份派生物都必须能与「这一篇、这一版正文」对上（course / lesson / sourceChecksum）：
+     *   ok:false（不同源）→ **直接抛错中止发布**：宁可这次不发，也不发一篇串课的东西；
+     *   bound:false（老数据没有绑定字段）→ 不拦，stderr 上提示一行；
+     *   文件不存在 → 什么都不做（这一节本来就没有简报/一页纸，不是错误）；
+     *   --regenerate-derived → 不同源时用模型按当前正文重做一份，并写回笔记目录。
+     * 校验逻辑本身不在这里：简报用 @course/notes 的 checkBriefBinding，一页纸用
+     * @course/publish 的 verifyDerived —— 两者返回同一个 { ok, bound, problems } 形状，
+     * 且各自与自己的生成侧成对（指纹算法必须两边一致）。
+     */
+    const resolveDerived = async ({ label, file, check, regenerate }) => {
+      if (!fs.existsSync(file)) return { applied: false, value: null, reason: 'missing', regenerated: false }
+      let value = null
+      let problems = null
+      try {
+        value = JSON.parse(fs.readFileSync(file, 'utf8'))
+      } catch (error) {
+        problems = [`不是合法 JSON：${error instanceof Error ? error.message : String(error)}`]
+      }
+      if (!problems && (!value || typeof value !== 'object' || Array.isArray(value))) {
+        problems = ['内容不是一个对象，读不出绑定信息']
+      }
+      const result = problems ? { ok: false, bound: false, problems } : check(value)
+      if (!result.ok && !regenerating) {
+        throw new Error(`${label}与要发布的这一篇不同源，已中止发布：${result.problems.join('；')}（${file}）；` +
+          '确认这一节之后重跑 course brief / course onepage，或加 --regenerate-derived 自动重做')
+      }
+      if (!result.ok) {
+        try {
+          const payload = await regenerate()
+          fs.writeFileSync(file, `${JSON.stringify(payload, null, 2)}\n`)
+          stderr(`${label}已重新生成（原文件与这一篇不同源：${result.problems.join('；')}）`)
+          return { applied: true, value: payload, reason: 'regenerated', regenerated: true }
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error)
+          stderr(`${label}重新生成失败：${reason}（这一轮先不挂它，发布继续）`)
+          return { applied: false, value: null, reason: 'regenerate_failed', error: reason, regenerated: false }
+        }
+      }
+      // 老数据没有绑定字段：照旧挂上，但要说一句（否则「这份简报没有出处」永远没人知道）
+      if (!result.bound) stderr(`${label}未绑定来源（历史数据）：${file}`)
+      return { applied: true, value, reason: result.bound ? 'ok' : 'unbound', regenerated: false }
+    }
+
+    const briefResolution = await resolveDerived({
+      label: '简报',
+      file: path.join(from, 'brief.json'),
+      check: artifact => checkBriefBinding(artifact, { course, lesson: lessonTitle, markdown }),
+      regenerate: async () => {
+        const result = await generateBriefFromMarkdown({
+          markdown,
+          courseName: course,
+          lessonTitle,
+          courseSpec: { courseName: course, teacher },
+          callModel: derivedCallModel(),
+          modelConfig: derivedModelConfig
+        })
+        return {
+          schemaVersion: 1,
+          course,
+          lesson: lessonTitle,
+          replayKey,
+          // 指纹用生成侧的那一个（briefSourceChecksum），不要在这里另算
+          sourceChecksum: result.sourceChecksum,
+          sourceChars: result.sourceChars ?? markdown.length,
+          generatedAt: nowIso,
+          briefing: result.briefing,
+          keyPoints: result.keyPoints,
+          theme: result.theme,
+          keywords: result.keywords,
+          detail: result.detail,
+          trace: result.trace
+        }
+      }
+    })
+    const onepageResolution = await resolveDerived({
+      label: '一页纸摘要',
+      file: path.join(from, 'onepage.json'),
+      // 一页纸同一套口径，只是指纹由发布侧算（generateOnepage 不返回指纹）
+      check: artifact => verifyDerived(artifact, { courseName: course, lessonTitle, replayKey, checksum: onepageChecksum }),
+      regenerate: async () => {
+        const result = await generateOnepage({
+          markdown,
+          courseName: course,
+          lessonTitle,
+          courseSpec: { courseName: course },
+          callModel: derivedCallModel(),
+          modelConfig: derivedModelConfig
+        })
+        return {
+          schemaVersion: 1,
+          ...derivedBinding({ markdown, courseName: course, lessonTitle, replayKey, generatedAt: nowIso }),
+          title: result.title,
+          outline: result.outline,
+          markdown: result.markdown,
+          chars: result.chars,
+          trace: result.trace
+        }
+      }
+    })
+
     const record = buildNoteRecord({
       courseName: course,
       teacher,
       lessonTitle,
       markdown,
-      replayKey: runSummary.replayKey || options.options['replay-key'] || '',
-      publishedAt: options.options['published-at'] || new Date().toISOString(),
-      brief,
-      onepage
+      replayKey,
+      // 课次日期：--lesson-date > 课次标题里的日期 > 账本里的排课时间 > 已有的 lessonDate > 首次进站日期
+      lessonDate: options.options['lesson-date'] || '',
+      startsAtText: ledgerStartsAtText(replayKey),
+      previousLessonDate: previous?.lessonDate || '',
+      firstPublishedAt,
+      updatedAt: nowIso,
+      brief: briefResolution.value,
+      onepage: onepageResolution.value
     })
-    const checksum = createHash('sha256').update(record.markdown).digest('hex')
-    const previous = library.find(item => item.slug === record.slug)
-    const changed = !previous || previous.checksum !== checksum
+    // 日期只能靠首次进站时间兜底时要说出来：这个日期是猜的，页面上会照它排
+    if (record.lessonDateSource === 'published' || record.lessonDateSource === 'none') {
+      stderr(`这一节取不到上课日期，暂用 ${record.lessonDate || '（无）'} 当课次日期；可用 --lesson-date <YYYY-MM-DD> 指定`)
+    }
+    const changed = !previous || previous.checksum !== contentChecksum
 
-    const nextLibrary = [...library.filter(item => item.slug !== record.slug), { ...record, checksum }]
+    const nextLibrary = [
+      ...library.filter(item => item.slug !== record.slug && !(record.replayKey && item.replayKey === record.replayKey)),
+      { ...record, checksum: contentChecksum }
+    ]
     fs.mkdirSync(siteRoot, { recursive: true })
-    fs.writeFileSync(libraryForRebuild, `${JSON.stringify(nextLibrary, null, 2)}\n`)
+    // 发布库用 tmp + fsync + rename 原子替换：半截 JSON 会让下一次发布直接停摆
+    writeJsonAtomic(libraryForRebuild, nextLibrary)
 
     const site = writeSite({
       records: nextLibrary,
@@ -1001,7 +1189,6 @@ export function createCommands(context) {
 
     // 同一条笔记只通知一次；内容变化时才重新通知
     let delivery = null
-    const replayKey = record.replayKey || options.options['replay-key'] || ''
     const store = openStore(config.ledgerPath)
     try {
       const task = replayKey ? store.getTask(replayKey) : null
@@ -1011,12 +1198,13 @@ export function createCommands(context) {
         delivery = store.enqueueDelivery({
           // 幂等键带上内容指纹：同一课次内容变了要重新推一次，
           // 否则"改好之后再发一遍"会被去重规则静默吃掉（旧实现就是只按 slug 去重）。
-          dedupeKey: `course-note:${record.slug}:${checksum.slice(0, 12)}`,
+          dedupeKey: `course-note:${record.slug}:${contentChecksum.slice(0, 12)}`,
           purpose: 'course-note',
           // 正文用简报（一段说明 + 三条要点），不用笔记截断：截断出来的是半句话，
-          // 读者无法判断这节课讲了什么。没有简报时退回原来的摘要。
-          bodyText: brief?.briefing
-            ? renderBriefMessage({ courseName: record.courseName, lessonTitle: record.lessonTitle, brief })
+          // 读者无法判断这节课讲了什么。简报与当前正文对不上时这里就没有它（见 resolveDerived），
+          // 退回原来的摘要——宁可退一步，也不推一条与笔记内容不符的消息。
+          bodyText: briefResolution.value?.briefing
+            ? renderBriefMessage({ courseName: record.courseName, lessonTitle: record.lessonTitle, brief: briefResolution.value })
             : `${record.courseName} · ${record.lessonTitle}\n${record.summary}`,
           objectUrl: `${options.options.origin || 'https://course.law-tech.dev'}/${record.slug}.html`
         })
@@ -1036,6 +1224,15 @@ export function createCommands(context) {
         notes: index.count,
         siteDir: site.outputDir,
         written: site.written,
+        // 时间语义：lessonDate 是这节课的日期（排序与展示），firstPublishedAt 进 RSS，
+        // updatedAt 供日报判断"昨天更新了什么"；lessonDateSource 说明日期是哪来的。
+        lessonDate: record.lessonDate,
+        lessonDateSource: record.lessonDateSource,
+        firstPublishedAt: record.firstPublishedAt,
+        updatedAt: record.updatedAt,
+        // 派生物这一轮有没有被采纳；reason 说清为什么没挂（stale_source / missing_checksum …）
+        brief: { applied: briefResolution.applied, reason: briefResolution.reason },
+        onepage: { applied: onepageResolution.applied, reason: onepageResolution.reason },
         delivery: delivery ? { inserted: delivery.inserted, dedupeKey: `course-note:${record.slug}` } : null,
         task: task ? { id: task.id, to: task.stage === 'published' || task.stage === 'completed' ? task.stage : 'published' } : null,
         // 首页 / 索引页每发一篇都会变，清了边缘缓存读者才立刻看得到
@@ -2474,15 +2671,26 @@ export const USAGE = `用法：course <命令> [选项]
   balance    [--threshold <元>]                   查两个付费 API 的余额（DeepSeek 官方接口；
                                            阿里云余额需账号 AK/SK，见 docs/07）
   onepage    --from <笔记.md 或所在目录> --course <名称> --lesson <课次> [--out <目录>]
+             [--replay-key <键>]
                                            只重跑一页纸摘要：把一节笔记压进一张 A4（复习只看这一页）
+                                           产物带 sourceChecksum（所依据正文的 SHA-256），发布时校验
   brief      --from <笔记.md 或所在目录> --course <名称> --lesson <课次> [--out <目录>]
+             [--replay-key <键>]
                                            只重跑简报这一步：产出简报与首页用的关键词
                                            （笔记跑完后再补关键词时用，不必重跑整条流水线）
+                                           产物带 sourceChecksum（所依据正文的 SHA-256），发布时校验
   publish    --from <笔记目录> [--course <名称>] [--lesson <课次>] [--out <站点目录>] [--origin <域名>] [--no-purge]
+             [--replay-key <键>] [--lesson-date <YYYY-MM-DD>]
              --rebuild                     只按发布库重写站点（换模板/改样式后重建，
                                            不跑模型、不发通知）
              --no-notify                   更新站点但这一次不排推送
+             --regenerate-derived          简报/一页纸与当前正文对不上时用模型重新生成
+                                           （默认：直接中止发布——串课的简报比发布失败更糟；
+                                           原因与输出 JSON 里的 reason 都会写明）
                                            把笔记发布到站点，内容变化时排入一条微信通知
+             --lesson-date                 这一节实际是哪天上的（排序、日期列、上一讲/下一讲都按它）；
+                                           不传时依次取课次标题里的日期、账本里的排课时间、
+                                           已有的 lessonDate，最后才用首次发布那天（会标注来源）
   notify     [--probe] [--loop] [--max-items <条数>] [--retry-failed]
                                            把账本里排队的通知发到微信；--probe 只验证通道；
                                            --retry-failed 把发送失败的通知放回队列重发

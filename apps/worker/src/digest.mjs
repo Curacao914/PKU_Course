@@ -32,6 +32,15 @@ const localDay = (value, timeZone = DIGEST_TIME_ZONE) => {
 }
 
 /**
+ * 笔记"最近一次动过"的时间。
+ *
+ * 日报问的是"昨天更新了哪些课次"，所以看 updatedAt（重新发布旧课也算更新），
+ * 而不是课次日期（lessonDate 是"这节课哪天上的"，与日报无关）。
+ * 老站点索引里只有 publishedAt，退回它——行为与拆分之前一致。
+ */
+const noteUpdatedAt = note => String(note?.updatedAt || note?.firstPublishedAt || note?.publishedAt || '')
+
+/**
  * 汇总某一天的变化。
  *
  * 只统计**读者能感知到的事**：新发布的笔记、新发现的课次、卡住需要人处理的课次。
@@ -40,7 +49,7 @@ const localDay = (value, timeZone = DIGEST_TIME_ZONE) => {
 export function collectDigest({ date, index = {}, tasks = [], timeZone = DIGEST_TIME_ZONE } = {}) {
   const notes = Array.isArray(index.notes) ? index.notes : []
   const published = notes
-    .filter(note => localDay(note.publishedAt, timeZone) === date)
+    .filter(note => localDay(noteUpdatedAt(note), timeZone) === date)
     .map(note => ({
       courseName: note.courseName || '',
       lessonTitle: note.lessonTitle || '',

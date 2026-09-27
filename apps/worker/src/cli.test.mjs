@@ -5,6 +5,8 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
+import { briefSourceChecksum } from '@course/notes'
+import { markdownChecksum } from '@course/publish'
 import { openLedger } from '@course/store'
 
 import { runCli } from './cli.mjs'
@@ -134,14 +136,27 @@ test('brief --from 把主题与关键词写进 brief.json（曾经只进了 stdo
   assert.deepEqual(brief.keywords, ['共同故意', '共同行为', '片面共犯', '共犯成立'], '关键词必须落盘')
   assert.equal(brief.course, '刑法分论')
   assert.ok(brief.briefing.length >= 60)
+  // 绑定字段：这份简报是给哪一门课、哪一节、哪一版正文生成的（发布时要靠它认出串课）
+  assert.equal(brief.lesson, '第10-12节')
+  assert.equal(brief.sourceChecksum, briefSourceChecksum(fs.readFileSync(notePath, 'utf8')), '指纹来自生成侧')
+  assert.equal(brief.sourceChars, fs.readFileSync(notePath, 'utf8').length)
+  assert.ok(brief.generatedAt, '生成时间也要落盘')
   // 简报输入只要标题与每节开头：不该把整篇笔记喂进去
   const payload = model.payloads.find(item => item.role === 'brief')
   const sent = JSON.stringify(payload.prompt)
-  assert.ok(sent.includes('各节标题与摘要'), '简报输入应当是小节标题与摘要')
-  assert.ok(!sent.includes('META: CONCEPT'), 'META 清单不进简报输入')
+  assert.ok(sent.includes('各节标题与开头'), '简报输入应当是成品正文的小节标题与开头')
+  assert.ok(!sent.includes('META: CONCEPT'), 'META 原始行不进简报输入')
 })
 
 const parse = line => JSON.parse(line)
+
+/**
+ * 指纹一律引真实实现，不在测试里自己算一个"看起来一样"的：
+ *   简报 → `briefSourceChecksum`（@course/notes）
+ *   一页纸 → `markdownChecksum`（@course/publish）
+ * 两者现已同口径（CRLF→LF、去掉结尾空白再取 SHA-256）；测试自己实现一份的话，
+ * 两边算法一旦漂移，测试会跟着一起漂。
+ */
 
 /** 与 pipeline 测试同构的假模型：按角色分发。 */
 function fakeModel() {
@@ -575,6 +590,39 @@ test('--revise rewrites only the named module and keeps the rest', async () => {
   assert.match(stateAfter.lesson.finalNote.markdown, /补上了法条依据/, '重新拼装后的成品包含修订内容')
 })
 
+test('notes 阶段写出的 brief.json 与成品正文绑定，publish 认它（自己产的东西自己敢挂）', async () => {
+  // 这条把生成侧与校验侧连起来测：两边的指纹算法必须成对（一个 trimEnd、一个不 trimEnd，
+  // 就会变成"自己生成的简报自己不敢挂"）。
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const transcriptPath = path.join(dir, 'raw-transcript.md')
+  fs.writeFileSync(transcriptPath, '[00:00:01 – 00:00:05] 内容')
+  const notesDir = path.join(dir, 'notes')
+  const model = fakeModel()
+  const { deps, lines, errors, ledger } = harness({ callModel: model.callModel })
+  ledger.discoverReplays([{ replay_key: 'replay-1', course_key: 'course-abc' }])
+
+  assert.equal(await runCli([
+    'notes', '--transcript', transcriptPath, '--course', '刑法分论', '--lesson', '第10-12节',
+    '--replay-key', 'replay-1', '--output-dir', notesDir
+  ], deps), 0, 'stderr: ' + errors.join(' | '))
+
+  const noteText = fs.readFileSync(path.join(notesDir, '第10-12节.md'), 'utf8')
+  const brief = JSON.parse(fs.readFileSync(path.join(notesDir, 'brief.json'), 'utf8'))
+  assert.equal(brief.course, '刑法分论')
+  assert.equal(brief.lesson, '第10-12节')
+  assert.equal(brief.replayKey, 'replay-1')
+  assert.equal(brief.sourceChecksum, briefSourceChecksum(noteText), '指纹按生成侧那套算（会做换行规范化）')
+  assert.equal(brief.sourceChars, noteText.length)
+  assert.ok(brief.generatedAt)
+
+  // 发布这一份：必须被采纳——不是 unbound，更不是中止发布
+  const siteDir = path.join(dir, 'site')
+  assert.equal(await runCli(['publish', '--from', notesDir, '--out', siteDir, '--replay-key', 'replay-1', '--no-notify'], deps), 0, 'stderr: ' + errors.join(' | '))
+  assert.deepEqual(parse(lines.at(-1)).brief, { applied: true, reason: 'ok' })
+  assert.match(fs.readFileSync(path.join(siteDir, 'notes/刑法分论/第10-12节.html'), 'utf8'), /本课简报/, '简报要真的挂到页面上')
+})
+
+
 test('notes stops at the outline gate in manual mode and records why', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
   const transcriptPath = path.join(dir, 'raw-transcript.md')
@@ -657,9 +705,18 @@ test('publish pushes the briefing, not a truncated note', async () => {
   fs.writeFileSync(path.join(notesDir, 'notes-run-summary.json'), JSON.stringify({
     course: '法律实证分析', lesson: '2026-09-23第1-2节', status: 'completed', stopReason: 'completed'
   }))
-  fs.writeFileSync(path.join(notesDir, '2026-09-23第1-2节.md'), '# 2026-09-23第1-2节\n\n## 课程概览\n\n正文。')
+  const noteText = '# 2026-09-23第1-2节\n\n## 课程概览\n\n正文。'
+  fs.writeFileSync(path.join(notesDir, '2026-09-23第1-2节.md'), noteText)
+  // 简报必须带 sourceChecksum：它是"生成时刻那一版正文"的指纹，
+  // 对不上（正文改过、或老文件根本没有指纹）就不挂它（见 publish 的 resolveDerived）
   fs.writeFileSync(path.join(notesDir, 'brief.json'), JSON.stringify({
     schemaVersion: 1,
+    course: '法律实证分析',
+    lesson: '2026-09-23第1-2节',
+    replayKey: 'replay-1',
+    sourceChecksum: briefSourceChecksum(noteText),
+    sourceChars: noteText.length,
+    generatedAt: '2026-09-25T00:00:00.000Z',
     briefing: '本节从数据评价的宏观维度讲到变量的测量水平，老师强调先确定分析单元再谈变量。',
     keyPoints: ['分析单元决定数据结构', '定性变量也能数字化', '测量水平决定可用统计量']
   }))
@@ -683,6 +740,233 @@ test('publish pushes the briefing, not a truncated note', async () => {
 
   const page = fs.readFileSync(path.join(siteDir, 'notes/法律实证分析/2026-09-23第1-2节.html'), 'utf8')
   assert.match(page, /本课简报/, '笔记页顶部要有简报，读者先建立基本印象')
+})
+
+/**
+ * 假模型：只回答派生物那两种角色（brief / onepage）。
+ * publish 的 --regenerate-derived 走这条路验证"自动重新生成"，绝不真调 API。
+ */
+function fakeDerivedModel() {
+  const calls = []
+  const callModel = async payload => {
+    calls.push(payload.role)
+    if (payload.role === 'brief') {
+      return {
+        parsed: {
+          briefing: '重新生成后的简报：这一版正文把分析单元与变量测量分开讲，先说清分析单元决定了数据结构，' +
+            '再讲定性变量同样可以数字化，最后落到测量水平决定能用哪些统计量。',
+          keyPoints: ['要点一', '要点二', '要点三'],
+          theme: '重新生成的主题',
+          keywords: ['甲', '乙'],
+          detail: '## 主线'
+        },
+        trace: { role: 'brief' }
+      }
+    }
+    if (payload.role === 'onepage') {
+      return { parsed: { title: '重新生成的一页纸', markdown: ONEPAGE_MARKDOWN, outline: ['一、体系', '二、要点'] }, trace: { role: 'onepage' } }
+    }
+    throw new Error('未预期的角色：' + payload.role)
+  }
+  return { callModel, calls }
+}
+
+/** 一张合法的一页纸：够 400 字、不超上限、没有"长墙"段落（validateOnepage 的三条硬要求）。 */
+const ONEPAGE_MARKDOWN = ['## 一、体系', '', ...Array.from({ length: 30 }, (_, index) => '- 要点 ' + (index + 1) + '：' + '内容'.repeat(5))].join('\n')
+
+test('正文改一个字符之后，旧简报与旧一页纸都被拦下（中止发布）', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const notesDir = path.join(dir, 'notes')
+  fs.mkdirSync(notesDir, { recursive: true })
+  fs.writeFileSync(path.join(notesDir, 'notes-run-summary.json'), JSON.stringify({ course: '法律实证分析', lesson: '2026-09-23第1-2节', status: 'completed' }))
+  const firstText = '# 2026-09-23第1-2节\n\n## 课程概览\n\n第一版正文。'
+  const changedText = firstText.replace('第一版正文。', '第一版正文！')
+  const notePath = path.join(notesDir, '2026-09-23第1-2节.md')
+  fs.writeFileSync(notePath, firstText)
+  const briefPath = path.join(notesDir, 'brief.json')
+  const onepagePath = path.join(notesDir, 'onepage.json')
+  // 简报与一页纸各自用自己那套指纹：简报是 briefSourceChecksum（会做换行规范化），
+  // 一页纸是发布侧算的原始 SHA-256（generateOnepage 不返回指纹）
+  const boundBrief = text => JSON.stringify({
+    schemaVersion: 1, course: '法律实证分析', lesson: '2026-09-23第1-2节', replayKey: 'replay-1',
+    sourceChecksum: briefSourceChecksum(text), sourceChars: text.length, generatedAt: '2026-09-25T00:00:00.000Z',
+    briefing: '这一版正文的简报，说的是第一版里的事。', keyPoints: ['要点']
+  })
+  fs.writeFileSync(briefPath, boundBrief(firstText))
+  fs.writeFileSync(onepagePath, JSON.stringify({
+    schemaVersion: 1, course: '法律实证分析', lesson: '2026-09-23第1-2节', replayKey: 'replay-1',
+    // 生成侧看到的是"末尾多一个换行"的那一份（运维脚本会写 record.markdown + '\n'）：
+    // 指纹必须仍然算作同一段文字，不然这一条会被判 stale_source 白白中止
+    sourceChecksum: markdownChecksum(firstText + '\n'), generatedAt: '2026-09-25T00:00:00.000Z',
+    title: '第一版的一页纸', markdown: '第一版的一页纸内容', chars: 10
+  }))
+
+  const siteDir = path.join(dir, 'site')
+  const { deps, lines: output, errors } = harness()
+  const args = ['publish', '--from', notesDir, '--out', siteDir, '--replay-key', 'replay-1']
+  const notePage = () => fs.readFileSync(path.join(siteDir, 'notes/法律实证分析/2026-09-23第1-2节.html'), 'utf8')
+
+  // ① 对得上：正常采纳（CLI 生成的派生物走的就是这条路）
+  assert.equal(await runCli(args, deps), 0, 'stderr: ' + errors.join(' | '))
+  assert.deepEqual(parse(output.at(-1)).brief, { applied: true, reason: 'ok' })
+  assert.deepEqual(parse(output.at(-1)).onepage, { applied: true, reason: 'ok' })
+  assert.match(notePage(), /这一版正文的简报，说的是第一版里的事。/)
+
+  // ② 正文改一个字符：直接中止发布——宁可这次不发，也不发一篇与正文不符的简报
+  fs.writeFileSync(notePath, changedText)
+  assert.equal(await runCli(args, deps), 1, '不同源时必须失败，而不是悄悄不挂')
+  assert.match(errors.join('\n'), /简报与要发布的这一篇不同源，已中止发布/)
+  assert.match(errors.join('\n'), /来源指纹与要发布的笔记正文不符/, '错误信息里要带上 problems')
+  assert.match(errors.join('\n'), /--regenerate-derived/, '并给出怎么补')
+  assert.match(notePage(), /这一版正文的简报，说的是第一版里的事。/,
+    '中止得彻底：站点还是上一次发布的内容，没有被写坏')
+
+  // 一页纸同样是硬拦：把简报换成对得上的，只留一页纸过期
+  fs.writeFileSync(briefPath, boundBrief(changedText))
+  assert.equal(await runCli(args, deps), 1)
+  assert.match(errors.join('\n'), /一页纸摘要与要发布的这一篇不同源，已中止发布/)
+  assert.match(errors.join('\n'), /来源指纹与要发布的笔记正文不符/)
+
+  // ③ 老数据（没有绑定字段）：不拦，但要在 stderr 上说清这是历史数据
+  fs.rmSync(onepagePath)
+  fs.writeFileSync(briefPath, JSON.stringify({ schemaVersion: 1, course: '法律实证分析', lesson: '2026-09-23第1-2节', briefing: '老格式的简报' }))
+  assert.equal(await runCli(args, deps), 0, 'stderr: ' + errors.join(' | '))
+  assert.deepEqual(parse(output.at(-1)).brief, { applied: true, reason: 'unbound' })
+  assert.match(errors.join('\n'), /简报未绑定来源（历史数据）/)
+  assert.match(notePage(), /老格式的简报/)
+
+  // ④ 重新绑定之后：又回到 ok
+  fs.writeFileSync(notePath, firstText)
+  fs.writeFileSync(briefPath, boundBrief(firstText))
+  assert.equal(await runCli(args, deps), 0)
+  assert.deepEqual(parse(output.at(-1)).brief, { applied: true, reason: 'ok' })
+  assert.match(notePage(), /这一版正文的简报，说的是第一版里的事。/)
+})
+
+test('同一个 --from 目录里留着上一讲的 brief.json：发布这一讲直接中止（串课简报的真实故障）', async () => {
+  // 现象：同课程第 2、3 讲的 summary 等于第 1 讲——brief.json 按目录存放，谁最后写谁生效。
+  // 绑定字段就是为了在发布前当场认出「这份简报不是给这一讲的」。
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const notesDir = path.join(dir, 'notes')
+  fs.mkdirSync(notesDir, { recursive: true })
+  fs.writeFileSync(path.join(notesDir, 'notes-run-summary.json'), JSON.stringify({ course: '商法概论', lesson: '2026-09-20第2-4节', status: 'completed' }))
+  const noteText = '# 2026-09-20第2-4节\n\n## 课程概览\n\n第二讲正文。'
+  fs.writeFileSync(path.join(notesDir, '2026-09-20第2-4节.md'), noteText)
+  const briefPath = path.join(notesDir, 'brief.json')
+  fs.writeFileSync(briefPath, JSON.stringify({
+    schemaVersion: 1,
+    course: '商法概论',
+    lesson: '2026-09-07第5-6节',
+    sourceChecksum: briefSourceChecksum('# 2026-09-07第5-6节\n\n## 课程概览\n\n第一讲正文。'),
+    generatedAt: '2026-09-08T00:00:00.000Z',
+    briefing: '这是第一讲的简报，正被错误地挂到第二讲上。',
+    keyPoints: ['第一讲要点']
+  }))
+
+  const siteDir = path.join(dir, 'site')
+  const { deps, lines: output, errors } = harness()
+  assert.equal(await runCli(['publish', '--from', notesDir, '--out', siteDir, '--no-notify'], deps), 1)
+  assert.match(errors.join('\n'), /课次不符（简报是 2026-09-07第5-6节，要发布的是 2026-09-20第2-4节）/)
+  assert.ok(!fs.existsSync(path.join(siteDir, 'library.json')), '中止得彻底：一个字都不写进发布库')
+
+  // 补上这一讲自己的简报（course brief 的产物）之后发布成功，页面上的简报是这一讲的
+  fs.writeFileSync(briefPath, JSON.stringify({
+    schemaVersion: 1, course: '商法概论', lesson: '2026-09-20第2-4节',
+    sourceChecksum: briefSourceChecksum(noteText), sourceChars: noteText.length,
+    generatedAt: '2026-09-21T00:00:00.000Z',
+    briefing: '第二讲自己的简报，讲的是第二讲的内容。', keyPoints: ['第二讲要点']
+  }))
+  assert.equal(await runCli(['publish', '--from', notesDir, '--out', siteDir, '--no-notify'], deps), 0, 'stderr: ' + errors.join(' | '))
+  assert.deepEqual(parse(output.at(-1)).brief, { applied: true, reason: 'ok' })
+  const page = fs.readFileSync(path.join(siteDir, 'notes/商法概论/2026-09-20第2-4节.html'), 'utf8')
+  assert.match(page, /第二讲自己的简报，讲的是第二讲的内容。/)
+  assert.ok(!page.includes('这是第一讲的简报'), '第一讲的简报绝不能出现在第二讲的页面上')
+})
+
+test('--regenerate-derived：按当前正文重做派生物、写回文件，下一次直接用', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const notesDir = path.join(dir, 'notes')
+  fs.mkdirSync(notesDir, { recursive: true })
+  fs.writeFileSync(path.join(notesDir, 'notes-run-summary.json'), JSON.stringify({ course: '法律实证分析', lesson: '2026-09-23第1-2节', status: 'completed' }))
+  const noteText = '# 2026-09-23第1-2节\n\n## 课程概览\n\n第一版正文，随后又改过一次。'
+  fs.writeFileSync(path.join(notesDir, '2026-09-23第1-2节.md'), noteText)
+  const briefPath = path.join(notesDir, 'brief.json')
+  const onepagePath = path.join(notesDir, 'onepage.json')
+  fs.writeFileSync(briefPath, JSON.stringify({ schemaVersion: 1, course: '法律实证分析', lesson: '2026-09-23第1-2节', replayKey: 'replay-1', sourceChecksum: briefSourceChecksum('更早的正文'), briefing: '过期的简报' }))
+  fs.writeFileSync(onepagePath, JSON.stringify({ schemaVersion: 1, course: '法律实证分析', lesson: '2026-09-23第1-2节', replayKey: 'replay-1', sourceChecksum: 'deadbeef', markdown: '过期的一页纸', title: '旧的' }))
+
+  const siteDir = path.join(dir, 'site')
+  const model = fakeDerivedModel()
+  const { deps, lines: output, errors } = harness({ callModel: model.callModel })
+  const args = ['publish', '--from', notesDir, '--out', siteDir, '--replay-key', 'replay-1', '--regenerate-derived']
+  assert.equal(await runCli(args, deps), 0, 'stderr: ' + errors.join(' | '))
+  const payload = parse(output.at(-1))
+  assert.deepEqual(payload.brief, { applied: true, reason: 'regenerated' }, 'stderr: ' + errors.join(' | '))
+  assert.deepEqual(payload.onepage, { applied: true, reason: 'regenerated' }, 'stderr: ' + errors.join(' | '))
+  assert.deepEqual(model.calls.slice().sort(), ['brief', 'onepage'], '两份派生物各重新生成一次')
+
+  // 重新生成的结果写回笔记目录：带上与当前正文一致的指纹，并注明是给哪一节生成的
+  const rewrittenBrief = JSON.parse(fs.readFileSync(briefPath, 'utf8'))
+  assert.equal(rewrittenBrief.sourceChecksum, briefSourceChecksum(noteText), '简报的指纹来自生成侧')
+  assert.equal(rewrittenBrief.sourceChars, noteText.length)
+  assert.equal(rewrittenBrief.replayKey, 'replay-1')
+  assert.equal(rewrittenBrief.course, '法律实证分析')
+  assert.equal(rewrittenBrief.lesson, '2026-09-23第1-2节')
+  assert.match(rewrittenBrief.briefing, /重新生成后的简报/)
+  assert.equal(JSON.parse(fs.readFileSync(onepagePath, 'utf8')).sourceChecksum, markdownChecksum(noteText), '一页纸的指纹由发布侧按同一个函数算')
+
+
+  const page = fs.readFileSync(path.join(siteDir, 'notes/法律实证分析/2026-09-23第1-2节.html'), 'utf8')
+  assert.match(page, /重新生成后的简报/, '重新生成的简报这一轮就挂上了')
+  assert.ok(payload.written.includes('onepage/法律实证分析/2026-09-23第1-2节.html'), '重新生成的一页纸写成了页面')
+  assert.ok(payload.written.includes('md/法律实证分析/2026-09-23第1-2节-一页纸.md'), '一页纸的 Markdown 也写出来了')
+
+  // 下一次发布：文件已经对得上，直接用，不再花模型调用
+  model.calls.length = 0
+  assert.equal(await runCli(args.slice(0, -1), deps), 0)
+  assert.deepEqual(parse(output.at(-1)).brief, { applied: true, reason: 'ok' })
+  assert.deepEqual(model.calls, [], '对得上的派生物不再重新生成')
+
+  // 本来就没有一页纸的课次：--regenerate-derived 不会凭空生成一份（不发多出来的模型调用）
+  fs.rmSync(onepagePath)
+  assert.equal(await runCli(args, deps), 0)
+  const missing = parse(output.at(-1))
+  assert.deepEqual(missing.onepage, { applied: false, reason: 'missing' })
+  assert.deepEqual(model.calls, [], '不存在就是不存在，不自动生成')
+})
+
+test('老发布库（只有 publishedAt）在下次发布时整体迁移成三个时间字段', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const siteDir = path.join(dir, 'site')
+  fs.mkdirSync(siteDir, { recursive: true })
+  // 老库：只有 publishedAt，课次标题里带日期
+  fs.writeFileSync(path.join(siteDir, 'library.json'), JSON.stringify([{
+    slug: 'notes/商法概论/2026-09-07第5-6节',
+    courseName: '商法概论',
+    lessonTitle: '2026-09-07第5-6节',
+    replayKey: 'old-1',
+    publishedAt: '2026-09-10T00:00:00.000Z',
+    checksum: 'old-checksum',
+    markdown: '# 2026-09-07第5-6节\n\n## 课程概览\n\n老记录。'
+  }], null, 2))
+
+  const notesDir = path.join(dir, 'notes')
+  fs.mkdirSync(notesDir, { recursive: true })
+  fs.writeFileSync(path.join(notesDir, 'notes-run-summary.json'), JSON.stringify({ course: '商法概论', lesson: '2026-09-20第2-4节', status: 'completed' }))
+  fs.writeFileSync(path.join(notesDir, '2026-09-20第2-4节.md'), '# 2026-09-20第2-4节\n\n## 课程概览\n\n新一课。')
+
+  const { deps, errors } = harness()
+  assert.equal(await runCli(['publish', '--from', notesDir, '--out', siteDir, '--no-notify'], deps), 0, 'stderr: ' + errors.join(' | '))
+  const library = JSON.parse(fs.readFileSync(path.join(siteDir, 'library.json'), 'utf8'))
+  assert.equal(library.length, 2)
+  const legacy = library.find(item => item.replayKey === 'old-1')
+  assert.equal(legacy.lessonDate, '2026-09-07', '课次日期从标题迁移出来')
+  assert.equal(legacy.firstPublishedAt, '2026-09-10T00:00:00.000Z', 'publishedAt 就是它第一次进站的时间')
+  assert.equal(legacy.updatedAt, '2026-09-10T00:00:00.000Z')
+  assert.equal('publishedAt' in legacy, false)
+  assert.equal(library.some(item => 'publishedAt' in item), false, '整库迁移，不留混合状态')
+  assert.match(fs.readFileSync(path.join(siteDir, 'index.html'), 'utf8'), /<td class="lesson-date">2026-09-07<\/td>/,
+    '老记录重建后首页日期列也是课次日期')
 })
 
 test('publish --rebuild rewrites the site from the library without touching the ledger', async () => {
@@ -732,12 +1016,104 @@ test('publish --no-notify updates the site without queueing another push', async
   assert.ok(fs.existsSync(path.join(siteDir, 'notes/刑法分论/第10-12节.html')), '站点照样要更新')
 })
 
+test('重新发布一节旧课：课次日期与首次进站时间不变、updatedAt 变新，首页顺序不动', async () => {
+  // 用户报的正是这件事：旧课改个错字重新发布，它就变成"最新一课"。
+  // 现在排序只看 lessonDate，发布时间另有两个字段各管一件事。
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const siteDir = path.join(dir, 'site')
+  let clock = new Date('2026-09-25T00:30:00Z')
+  const { deps, lines: output } = harness({ now: () => clock })
+  const publishLesson = async (lesson, markdown) => {
+    const notesDir = fs.mkdtempSync(path.join(dir, 'notes-'))
+    fs.writeFileSync(path.join(notesDir, 'notes-run-summary.json'), JSON.stringify({ course: '商法概论', lesson, status: 'completed' }))
+    fs.writeFileSync(path.join(notesDir, lesson + '.md'), markdown)
+    assert.equal(await runCli(['publish', '--from', notesDir, '--out', siteDir, '--no-notify'], deps), 0)
+    return parse(output.at(-1))
+  }
+
+  const earlier = await publishLesson('2026-09-07第5-6节', '# 2026-09-07第5-6节\n\n## 课程概览\n\n第一版。')
+  clock = new Date('2026-09-26T00:30:00Z')
+  await publishLesson('2026-09-20第2-4节', '# 2026-09-20第2-4节\n\n## 课程概览\n\n第二版。')
+  clock = new Date('2026-10-01T00:30:00Z')
+  const again = await publishLesson('2026-09-07第5-6节', '# 2026-09-07第5-6节\n\n## 课程概览\n\n改了个错字。')
+
+  assert.equal(earlier.lessonDate, '2026-09-07')
+  assert.equal(earlier.lessonDateSource, 'title', '课次标题里的日期就是这一节的日期')
+  assert.equal(again.changed, true, '正文变了')
+  assert.equal(again.lessonDate, '2026-09-07', '重新发布不改课次日期')
+  assert.equal(again.firstPublishedAt, earlier.firstPublishedAt, '首次进站时间保持不变')
+  assert.equal(again.firstPublishedAt, '2026-09-25T00:30:00.000Z')
+  assert.equal(again.updatedAt, '2026-10-01T00:30:00.000Z', '最近一次重新发布的时间')
+
+  const home = fs.readFileSync(path.join(siteDir, 'index.html'), 'utf8')
+  assert.ok(home.indexOf('2026-09-20第2-4节') < home.indexOf('2026-09-07第5-6节'),
+    '最新一课仍是 09-20 那节，重新发布的那节不会窜上去')
+  assert.match(home, /<td class="lesson-date">2026-09-07<\/td>/, '首页日期列也是课次日期')
+
+  const library = JSON.parse(fs.readFileSync(path.join(siteDir, 'library.json'), 'utf8'))
+  assert.equal(library.length, 2, '同一节重新发布不该在发布库里留下两条')
+  const stored = library.find(item => item.lessonTitle === '2026-09-07第5-6节')
+  assert.equal(stored.firstPublishedAt, '2026-09-25T00:30:00.000Z')
+  assert.equal(stored.updatedAt, '2026-10-01T00:30:00.000Z')
+  assert.equal(stored.lessonDate, '2026-09-07')
+  assert.equal('publishedAt' in stored, false, 'publishedAt 已经拆成三个字段')
+  // 发布库是原子替换的：临时文件不残留，目录里只有一份 library.json
+  assert.deepEqual(fs.readdirSync(siteDir).filter(name => name.startsWith('library.json')), ['library.json'])
+})
+
+test('课次日期：--lesson-date 优先，账本排课时间兜底，取不到时如实标注来源', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  // 笔记文件名与 publish 的 safeFileName 同规则：空格换成短横
+  const writeNotes = (lesson, markdown) => {
+    const notesDir = fs.mkdtempSync(path.join(dir, 'notes-'))
+    fs.writeFileSync(path.join(notesDir, 'notes-run-summary.json'), JSON.stringify({ course: '商法概论', lesson, status: 'completed' }))
+    fs.writeFileSync(path.join(notesDir, lesson.replace(/\s+/g, '-') + '.md'), markdown)
+    return notesDir
+  }
+
+  // ① 老式标题（第10-12节）里没有日期：用账本里 discover 记下的排课时间
+  const withLedger = harness()
+  withLedger.ledger.discoverReplays([{
+    replay_key: 'replay-1', course_key: 'course-abc', title: '第10-12节 共犯与罪数', starts_at_text: '2026-05-27 13:00'
+  }])
+  const fromLedger = writeNotes('第10-12节 共犯与罪数', '# 第10-12节 共犯与罪数\n\n## 课程概览\n\n正文。')
+  assert.equal(await runCli(['publish', '--from', fromLedger, '--out', path.join(dir, 'site-a'), '--replay-key', 'replay-1', '--no-notify'], withLedger.deps), 0, 'stderr: ' + withLedger.errors.join(' | '))
+  const ledgerPayload = parse(withLedger.lines.at(-1))
+  assert.equal(ledgerPayload.lessonDate, '2026-05-27')
+  assert.equal(ledgerPayload.lessonDateSource, 'ledger')
+
+  // ② 显式 --lesson-date 压过标题里的日期
+  const explicitHarness = harness()
+  const withTitle = writeNotes('2026-09-20第2-4节', '# 2026-09-20第2-4节\n\n## 课程概览\n\n正文。')
+  assert.equal(await runCli(['publish', '--from', withTitle, '--out', path.join(dir, 'site-b'), '--lesson-date', '2026-09-19', '--no-notify'], explicitHarness.deps), 0)
+  const explicitPayload = parse(explicitHarness.lines.at(-1))
+  assert.equal(explicitPayload.lessonDate, '2026-09-19')
+  assert.equal(explicitPayload.lessonDateSource, 'explicit')
+
+  // ③ 什么线索都没有：退回首次发布的日期，并且**在输出里标注这是猜的**
+  const bare = harness()
+  const noClue = writeNotes('补课', '# 补课\n\n## 课程概览\n\n正文。')
+  assert.equal(await runCli(['publish', '--from', noClue, '--out', path.join(dir, 'site-c'), '--no-notify'], bare.deps), 0)
+  const barePayload = parse(bare.lines.at(-1))
+  assert.equal(barePayload.lessonDate, '2026-09-25', '退回首次发布那一天（harness 的固定时钟）')
+  assert.equal(barePayload.lessonDateSource, 'published')
+  assert.match(bare.errors.join('\n'), /取不到上课日期/, '要让运维看得出这个日期是兜底的')
+  assert.match(bare.errors.join('\n'), /--lesson-date/)
+})
+
 test('the daily digest lists what changed yesterday and stays silent when nothing did', async () => {
   const { collectDigest, digestSubject, renderDigestHtml, renderDigestText, sendResendEmail } = await import('./digest.mjs')
   const index = { notes: [
+    // 昨天第一次进站的一节
     { courseName: '商法概论', lessonTitle: '2026-09-20第2-4节', slug: 'notes/商法概论/2026-09-20第2-4节', markdown: 'x'.repeat(18000), readMinutes: 45,
-      publishedAt: '2026-09-25T23:43:00.000Z', brief: { briefing: '本讲从为什么要有企业推进到为什么要有公司。', keyPoints: ['交易成本', '有限责任', '刺破面纱'] } },
-    { courseName: '刑事执行法', lessonTitle: '旧课', slug: 'notes/x', markdown: 'x', publishedAt: '2026-09-20T00:00:00.000Z' }
+      lessonDate: '2026-09-20', firstPublishedAt: '2026-09-25T23:43:00.000Z', updatedAt: '2026-09-25T23:43:00.000Z',
+      brief: { briefing: '本讲从为什么要有企业推进到为什么要有公司。', keyPoints: ['交易成本', '有限责任', '刺破面纱'] } },
+    // 上周就发布过的旧课，昨天只是又没动过：不进日报
+    { courseName: '刑事执行法', lessonTitle: '旧课', slug: 'notes/x', markdown: 'x',
+      lessonDate: '2026-09-14', firstPublishedAt: '2026-09-20T00:00:00.000Z', updatedAt: '2026-09-20T00:00:00.000Z' },
+    // 旧课改错字重新发布：日报问的是"昨天更新了什么"，所以它照样要出现
+    { courseName: '国际法学', lessonTitle: '第一课 国家责任的构成', slug: 'notes/国际法学/第一课-国家责任的构成', markdown: 'x',
+      lessonDate: '2026-09-08', firstPublishedAt: '2026-09-09T00:00:00.000Z', updatedAt: '2026-09-25T20:00:00.000Z' }
   ] }
   const tasks = [
     { courseName: '普通法专题', title: '2026-09-24第7-9节', stage: 'discovered', updatedAt: '2026-09-25T23:31:00.000Z' },
@@ -746,9 +1122,11 @@ test('the daily digest lists what changed yesterday and stays silent when nothin
   ]
   // 北京时间 2026-09-26 的「昨天」= 09-25（UTC 的 09-25 16:00 之后也算 09-26，按东八区算）
   const report = collectDigest({ date: '2026-09-26', index, tasks, timeZone: 'Asia/Shanghai' })
-  assert.equal(report.published.length, 1, '只算昨天发布的（09-25T23:43Z = 北京时间 09-26 07:43）')
+  assert.equal(report.published.length, 2,
+    '昨天更新过的都算：09-25T23:43Z 首次进站的那节 + 09-25T20:00Z 重新发布的那节（旧课首发在 09-09，不算）')
+  assert.deepEqual(report.published.map(note => note.lessonTitle).sort(), ['2026-09-20第2-4节', '第一课 国家责任的构成'])
   assert.equal(report.hasNews, true)
-  assert.match(digestSubject(report), /1 篇新笔记/)
+  assert.match(digestSubject(report), /2 篇新笔记/)
   assert.equal(report.problems.length, 1)
   assert.equal(report.waiting, 1)
 
@@ -890,6 +1268,13 @@ test('cycle drives one task through every stage and delivers the notification', 
   assert.match(sent[0], /打开课程笔记|course\.law-tech\.dev/)
   assert.equal(ledger.getTask('replay-1').stage, 'published')
   assert.equal(code, 0)
+  // 自动链路里课次日期来自标题（discover 刷新过的那一个），首页日期列与排序都用它
+  const home = fs.readFileSync(path.join(scratch, 'site', 'index.html'), 'utf8')
+  assert.match(home, /<td class="lesson-date">2026-05-27<\/td>/)
+  const library = JSON.parse(fs.readFileSync(path.join(scratch, 'site', 'library.json'), 'utf8'))
+  assert.equal(library[0].lessonDate, '2026-05-27')
+  assert.equal(library[0].lessonDateSource, 'title')
+  assert.equal(library[0].firstPublishedAt, library[0].updatedAt, '首次发布时两个时间相同')
 })
 
 test('cycle reports a missing prerequisite instead of crashing', async () => {
