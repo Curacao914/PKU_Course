@@ -1,6 +1,7 @@
 import { cleanText, transcriptLines } from '@course/core'
 
 import { buildPrompt, callCourseModel } from './ai-adapter.mjs'
+import { outlineIdsOf } from './outline-ids.mjs'
 // 审查只回答"要不要重写这一段"，不再有五项评分，因此这里也不需要量纲归一化。
 
 /**
@@ -149,7 +150,11 @@ export function splicePlaceholderContext(lesson = {}) {
   const outline = lesson.outline || []
   const byOutline = new Map(outline.map(node => [node.id, []]))
   ;(lesson.nodes || []).forEach(node => {
-    if (byOutline.has(node.outlineNodeId)) byOutline.get(node.outlineNodeId).push(node)
+    // 合并写单元覆盖多个大纲模块：只挂到 outlineNodeId 会让其余模块在接缝上下文里
+    // 变成"没有任何已批准节点"，章节总结与索引表于是缺内容（正文是对的，缺的是体系层）
+    for (const id of outlineIdsOf(node)) {
+      if (byOutline.has(id)) byOutline.get(id).push(node)
+    }
   })
   const lines = [
     `# ${lesson.title || '单课笔记'}`, '',

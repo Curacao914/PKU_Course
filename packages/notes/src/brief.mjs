@@ -1,6 +1,7 @@
 import { cleanText } from '@course/core'
 
 import { buildPrompt } from './ai-adapter.mjs'
+import { coversOutline } from './outline-ids.mjs'
 
 /**
  * 课程简报：给"要不要细读"用的一段话。
@@ -28,7 +29,9 @@ export function buildBriefSource(lesson = {}) {
   const splice = lesson.finalNote?.assembly?.spliceData || {}
   const overview = splice.courseOverview || {}
   const sections = (lesson.outline || []).map((outlineNode, index) => {
-    const nodes = (lesson.nodes || []).filter(node => node.outlineNodeId === outlineNode.id)
+    // 合并写单元覆盖多个大纲模块：只比 outlineNodeId 会让其余模块的摘要变成空的，
+    // 简报于是被第一个模块支配（这正是"摘要像上一课/首课"那个现象的来源）
+    const nodes = (lesson.nodes || []).filter(node => coversOutline(node, outlineNode.id))
     const digest = nodes
       .map(node => cleanText(node.draft || '').replace(/\s+/g, ' ').slice(0, 220))
       .filter(Boolean)

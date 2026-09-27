@@ -8,6 +8,8 @@
  * 任务类型：generate-outline / plan-nodes / write-node / review-node / revise-node /
  * assemble / revise-final-note / final-review / reconcile-final-review / idle。
  */
+import { coversOutline } from './outline-ids.mjs'
+
 const orderedLessons = workflow => [...(workflow.lessons || [])].sort((a, b) => Number(a.order || 0) - Number(b.order || 0))
 const latestReview = node => (node.reviewerReports || []).at(-1)?.value || null
 
@@ -23,7 +25,9 @@ function nodeWithNeighborContext(lesson, node) {
   // 结构表只有标题与分工，没有别节正文，既省 token 又不会诱导重复。
   const outline = Array.isArray(lesson.outline) ? lesson.outline : []
   const structure = outline.map((item, position) => {
-    const child = nodes.find(candidate => candidate.outlineNodeId === item.id)
+    // 一次调用可能写完多个模块：合并节点的覆盖范围在 outlineNodeIds，
+    // 只比 outlineNodeId 会让第二三四个模块拿不到目标、也不被标成"正在写"
+    const child = nodes.find(candidate => coversOutline(candidate, item.id))
     return {
       order: position + 1,
       outlineNodeId: item.id,
@@ -31,7 +35,7 @@ function nodeWithNeighborContext(lesson, node) {
       kind: item.kind || 'content',
       lineRange: item.lineRange,
       goal: child?.writerBrief?.currentNodeGoal || item.rationale || '',
-      isCurrent: item.id === node.outlineNodeId
+      isCurrent: coversOutline(node, item.id)
     }
   })
 

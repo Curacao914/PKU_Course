@@ -2,6 +2,7 @@ import { cleanText, transcriptLines } from '@course/core'
 
 // assembly 只依赖 @course/core，不反向依赖本模块，因此这里引用它不会成环。
 import { nodeBodyPieces } from './assembly.mjs'
+import { outlineIdsOf } from './outline-ids.mjs'
 
 /**
  * 节点生命周期：从大纲切分节点，到每个节点通过审查。
@@ -453,9 +454,7 @@ export function splitWriteUnit(lesson, nodeId, {
   const node = (lesson.nodes || []).find(item => item.id === nodeId)
   if (!node) throw new Error(`节点不存在：${nodeId}`)
   // 去重：大纲模块与写作节点不是一一对应（体量大时一个模块切成多段）
-  const ids = [...new Set(Array.isArray(node.outlineNodeIds) && node.outlineNodeIds.length
-    ? node.outlineNodeIds
-    : [node.outlineNodeId])]
+  const ids = [...new Set(outlineIdsOf(node))]
   if (ids.length <= 1) return lesson
 
   const outlineById = new Map((lesson.outline || []).map(item => [item.id, item]))

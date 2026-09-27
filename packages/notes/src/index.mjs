@@ -1,4 +1,11 @@
 export {
+  coversOutline,
+  isMergedWriteUnit,
+  outlineIdsOf,
+  primaryOutlineIdOf
+} from './outline-ids.mjs'
+
+export {
   COMMON_RULES,
   ROLE_MODEL_ENV,
   ROLE_SYSTEM,

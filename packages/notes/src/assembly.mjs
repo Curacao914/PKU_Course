@@ -1,5 +1,7 @@
 import { cleanText, transcriptLines } from '@course/core'
 
+import { coversOutline, outlineIdsOf } from './outline-ids.mjs'
+
 /**
  * 机械拼装：把已批准节点、接缝数据与元数据合成单课最终笔记。
  *
@@ -173,9 +175,7 @@ const headingKey = value => String(value || '')
  */
 export function nodeBodyPieces(node = {}) {
   const body = stripRawMeta(node.draft || '')
-  const ids = Array.isArray(node.outlineNodeIds) && node.outlineNodeIds.length
-    ? node.outlineNodeIds
-    : [node.outlineNodeId].filter(Boolean)
+  const ids = outlineIdsOf(node).filter(Boolean)
   const pieces = new Map(ids.map(id => [id, '']))
   if (!ids.length || !body) return pieces
 
@@ -732,7 +732,7 @@ export function renderQuizOverview(sectionQuizzes = {}, lesson = {}) {
  * 类型由大纲阶段判定并跟着节点走；拼装层只负责按类型分流，不改内容。
  */
 export function sectionKind(lesson = {}, outlineNode = {}) {
-  const child = (lesson.nodes || []).find(node => node.outlineNodeId === outlineNode.id)
+  const child = (lesson.nodes || []).find(node => coversOutline(node, outlineNode.id))
   const kind = child?.kind || outlineNode.kind || 'content'
   return ['content', 'logistics', 'digression'].includes(kind) ? kind : 'content'
 }
@@ -743,7 +743,7 @@ export function buildFinalNoteMarkdown({ courseSpec = {}, lesson = {}, spliceDat
   const byOutline = new Map((lesson.outline || []).map(item => [item.id, []]))
   const orphan = []
   ;(lesson.nodes || []).forEach(node => {
-    const ids = Array.isArray(node.outlineNodeIds) && node.outlineNodeIds.length ? node.outlineNodeIds : [node.outlineNodeId]
+    const ids = outlineIdsOf(node)
     // 大纲之外的节点（正常情况下不该有）单独收集：宁可多一个「其他」小节，也不能丢正文
     if (!ids.some(id => byOutline.has(id))) {
       orphan.push(stripMetaBlock(node.draft))
