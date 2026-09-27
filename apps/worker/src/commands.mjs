@@ -736,6 +736,8 @@ export function createCommands(context) {
       lesson,
       briefing: result.briefing,
       keyPoints: result.keyPoints,
+      // theme 曾经只写进了 stdout 摘要、没落盘：首页那一列于是永远空着
+      theme: result.theme,
       keywords: result.keywords,
       detail: result.detail,
       trace: result.trace
@@ -802,6 +804,8 @@ export function createCommands(context) {
       lesson,
       briefing: result.briefing,
       keyPoints: result.keyPoints,
+      // theme 曾经只写进了 stdout 摘要、没落盘：首页那一列于是永远空着
+      theme: result.theme,
       keywords: result.keywords,
       detail: result.detail,
       trace: result.trace

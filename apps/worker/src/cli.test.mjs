@@ -74,6 +74,40 @@ function harness(overrides = {}) {
   return { deps, lines, errors, calls, ledger }
 }
 
+test('brief --from 把主题与关键词写进 brief.json（曾经只进了 stdout，页面那一列一直是空的）', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-brief-'))
+  const notePath = path.join(dir, '第10-12节.md')
+  fs.writeFileSync(notePath, [
+    '# 第10-12节 共犯与罪数',
+    '',
+    '## 一、共犯的成立条件',
+    '',
+    '共同故意是共犯成立的主观要件，共同行为是客观要件，二者缺一不可。',
+    '',
+    '<details><summary>元数据</summary>',
+    '<pre><code>',
+    'META: CONCEPT: 共同故意',
+    '</code></pre>',
+    '</details>'
+  ].join('\n'))
+
+  const model = fakeModel()
+  const { deps } = harness({ callModel: model.callModel })
+  const code = await runCli(['brief', '--from', dir, '--course', '刑法分论', '--lesson', '第10-12节'], deps)
+  assert.equal(code, 0)
+
+  const brief = JSON.parse(fs.readFileSync(path.join(dir, 'brief.json'), 'utf8'))
+  assert.equal(brief.theme, '共犯成立的条件与判断顺序', '主题必须落盘')
+  assert.deepEqual(brief.keywords, ['共同故意', '共同行为', '片面共犯', '共犯成立'], '关键词必须落盘')
+  assert.equal(brief.course, '刑法分论')
+  assert.ok(brief.briefing.length >= 60)
+  // 简报输入只要标题与每节开头：不该把整篇笔记喂进去
+  const payload = model.payloads.find(item => item.role === 'brief')
+  const sent = JSON.stringify(payload.prompt)
+  assert.ok(sent.includes('各节标题与摘要'), '简报输入应当是小节标题与摘要')
+  assert.ok(!sent.includes('META: CONCEPT'), 'META 清单不进简报输入')
+})
+
 const parse = line => JSON.parse(line)
 
 /** 与 pipeline 测试同构的假模型：按角色分发。 */
@@ -116,6 +150,8 @@ function fakeModel() {
       return { parsed: {
         briefing: '本节从共同故意的认定讲到共同行为的边界，老师用两个例子说明片面共犯为何不成立共同犯罪，并强调判断顺序是先看共同故意再看行为分担。',
         keyPoints: ['共同故意是成立前提', '片面共犯不成立共犯', '判断顺序不可颠倒'],
+        theme: '共犯成立的条件与判断顺序',
+        keywords: ['共同故意', '共同行为', '片面共犯', '共犯成立'],
         detail: '## 本课主线\n\n从共犯的成立条件展开。'
       }, trace: { role } }
     }
