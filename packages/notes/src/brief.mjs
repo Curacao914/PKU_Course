@@ -1,7 +1,17 @@
 import { cleanText } from '@course/core'
 
 import { buildPrompt } from './ai-adapter.mjs'
+import { briefSourceChecksum, buildBriefSourceFromFinalNote } from './brief-source.mjs'
 import { coversOutline } from './outline-ids.mjs'
+
+// 受控上下文的实现住在 brief-source.mjs（只认成品正文）；这里保留同名入口，老调用方不用改。
+export {
+  briefSourceChecksum,
+  buildBriefSourceFromFinalNote,
+  buildBriefSourceFromMarkdown,
+  checkBriefBinding,
+  assertBriefBinding
+} from './brief-source.mjs'
 
 /**
  * 课程简报：给"要不要细读"用的一段话。
@@ -142,11 +152,20 @@ export async function generateBrief({ lesson, courseSpec = {}, callModel, modelC
         title: lesson.title,
         sectionCount: (lesson.outline || []).length
       },
-      sourceText: buildBriefSource(lesson),
+      // 上下文只取成品正文：写单元怎么切分与简报无关（详见 brief-source.mjs 的说明）
+      sourceText: buildBriefSourceFromFinalNote(lesson.finalNote.markdown, {
+        courseName: lesson.courseName || courseSpec.courseName || '',
+        lessonTitle: lesson.title || '',
+        mainLine: lesson.outlineMainLine || lesson.blueprint?.mainLine || ''
+      }),
       schema: BRIEF_SCHEMA
     })
   })
-  return { ...validateBrief(result.parsed, { courseName: lesson.courseName || courseSpec.courseName || '' }), trace: result.trace }
+  return {
+    ...validateBrief(result.parsed, { courseName: lesson.courseName || courseSpec.courseName || '' }),
+    sourceChecksum: briefSourceChecksum(lesson.finalNote.markdown),
+    trace: result.trace
+  }
 }
 
 /**
@@ -154,10 +173,10 @@ export async function generateBrief({ lesson, courseSpec = {}, callModel, modelC
  *
  * 用途：笔记跑完之后才加上字段（关键词就是这样），而中间状态早就被清理了——
  * 为了一列关键词把整条笔记流水线再跑一遍，那是几十次模型调用。这里只重跑简报这一步：
- * 输入是笔记的小节标题与每节开头，输出几百字，一次调用的事。
+ * 输入是成品正文的受控切片（概览 + 各节标题与开头 + 术语 + 知识连接），一次调用的事。
  */
 export async function generateBriefFromMarkdown({
-  markdown, courseName = '', lessonTitle = '', courseSpec = {}, callModel, modelConfig
+  markdown, courseName = '', lessonTitle = '', mainLine = '', courseSpec = {}, callModel, modelConfig
 } = {}) {
   const text = String(markdown || '')
   if (!text.trim()) throw new Error('没有笔记正文，无法生成简报')
@@ -169,36 +188,17 @@ export async function generateBriefFromMarkdown({
       promptVersion: courseSpec.promptVersion,
       courseSpec,
       lessonBlueprint: { title: lessonTitle, sectionCount: countSections(text) },
-      sourceText: buildBriefSourceFromMarkdown(text, { courseName, lessonTitle }),
+      sourceText: buildBriefSourceFromFinalNote(text, { courseName, lessonTitle, mainLine }),
       schema: BRIEF_SCHEMA
     })
   })
-  return { ...validateBrief(result.parsed, { courseName }), trace: result.trace }
-}
-
-/** 笔记正文切成"标题 + 每节开头"，形状与 buildBriefSource 一致：简报要的是主线，不是全文。 */
-export function buildBriefSourceFromMarkdown(markdown = '', { courseName = '', lessonTitle = '' } = {}) {
-  const lines = String(markdown || '').split('\n')
-  const sections = []
-  let current = null
-  for (const line of lines) {
-    const heading = line.match(/^(#{2,3})\s+(.+?)\s*$/)
-    if (heading) {
-      if (current) sections.push(current)
-      current = { title: heading[2], body: [] }
-      continue
-    }
-    if (current && current.body.length < 6 && line.trim() && !/^\s*META:/.test(line)) current.body.push(line.trim())
+  return {
+    ...validateBrief(result.parsed, { courseName }),
+    // 指纹与身份一起落盘：发布时用来发现"brief.json 与要发的这一篇不同源"
+    sourceChecksum: briefSourceChecksum(text),
+    sourceChars: text.length,
+    trace: result.trace
   }
-  if (current) sections.push(current)
-  return [
-    `课程：${courseName}`,
-    `课次：${lessonTitle}`,
-    '',
-    '## 各节标题与摘要',
-    ...sections.slice(0, 24).map((section, index) =>
-      `${index + 1}. ${section.title}${section.body.length ? `\n   摘要：${section.body.join(' ').slice(0, 220)}` : ''}`)
-  ].join('\n')
 }
 
 function countSections(markdown = '') {

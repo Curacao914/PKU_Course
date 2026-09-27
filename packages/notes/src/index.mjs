@@ -45,6 +45,16 @@ export {
 } from './brief.mjs'
 
 export {
+  BRIEF_SOURCE_BUDGET,
+  assertBriefBinding,
+  buildBriefSourceFromFinalNote,
+  briefSourceChecksum,
+  charCount as sourceCharCount,
+  checkBriefBinding,
+  parseFinalNote
+} from './brief-source.mjs'
+
+export {
   ONEPAGE_MAX_CHARS,
   ONEPAGE_SCHEMA,
   ONEPAGE_TARGET_CHARS,
