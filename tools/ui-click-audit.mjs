@@ -1135,35 +1135,39 @@ async function auditIndexPages(page, site, failures) {
   await record('落点高亮闪一下', flashed, flashed ? '目标小节带 anchor-flash' : '没有看到高亮')
   await record('正文里标出这个术语', landed.marks >= 1, landed.marks + ' 处高亮')
 
-  // 知识地图：按课程画"哪几节在讲同一批概念"
+  // 知识地图：课次先后 + 每节课的骨架 + 跨课次概念
   await page.goto(site.url + '/map/index.html', { waitUntil: 'domcontentloaded' })
   await page.waitForSelector('#map-rail button[data-course]', { timeout: 8000 })
   const mapCourses = await page.$$eval('#map-rail button[data-course]', nodes => nodes.length)
   const mapData = await page.$eval('#map-data', node => JSON.parse(node.textContent))
-  const sharedTerms = mapData.courses
+  const skeleton = mapData.courses.flatMap(course => course.lessons.flatMap(lesson => lesson.sections || []))
+  const sharedTerms = [...new Set(mapData.courses
     .flatMap(course => course.lessons.flatMap(lesson => lesson.terms))
-    .filter((term, index, all) => all.indexOf(term) !== index)
-  await record('地图数据完整', mapCourses >= 1 && sharedTerms.length >= 1,
-    mapCourses + ' 门课可选；跨课次概念 ' + [...new Set(sharedTerms)].length + ' 个')
+    .filter((term, index, all) => all.indexOf(term) !== index))]
+  await record('地图数据完整', mapCourses >= 1 && skeleton.length >= 1,
+    mapCourses + ' 门课可选；课次骨架 ' + skeleton.length + ' 节、跨课次概念 ' + sharedTerms.length + ' 个')
+
   const firstTitle = await page.textContent('#map-title')
-  // 有跨课次概念的那门课必须画出图；只有一节讲过概念的课要给出说明而不是空白
   await page.click('#map-rail button[data-course="商法概论"]')
   await page.waitForTimeout(1500)
   const richCourse = await page.evaluate(() => ({
     title: document.getElementById('map-title').textContent,
     svg: document.querySelectorAll('#map-holder svg').length,
-    edges: document.querySelectorAll('#map-holder svg [data-lines]').length
+    drawn: document.querySelectorAll('#map-holder svg [data-lines]').length
   }))
   await record('地图跟着课程切换', richCourse.title === '商法概论' && richCourse.svg >= 1,
-    (firstTitle || '') + ' → ' + richCourse.title + '，画布 ' + richCourse.svg + ' 张图')
+    (firstTitle || '') + ' → ' + richCourse.title + '，画布 ' + richCourse.svg + ' 张图（含骨架 ' +
+    (richCourse.drawn ? '有' : '无') + '）')
+  // 只讲一节课概念的小课程也要有东西可画：靠课次骨架，而不是空白
   await page.click('#map-rail button[data-course="法律实证分析"]')
   await page.waitForTimeout(1200)
   const thinCourse = await page.evaluate(() => ({
     title: document.getElementById('map-title').textContent,
+    svg: document.querySelectorAll('#map-holder svg').length,
     explained: !document.getElementById('map-fallback').hidden
   }))
-  await record('没有跨课次概念时给说明', thinCourse.title === '法律实证分析' && thinCourse.explained,
-    thinCourse.title + '：' + (thinCourse.explained ? '给了说明' : '一片空白'))
+  await record('冷门课程也有图可看', thinCourse.title === '法律实证分析' && (thinCourse.svg >= 1 || thinCourse.explained),
+    thinCourse.title + '：' + (thinCourse.svg >= 1 ? '画出了骨架' : '给了说明'))
   // 本地夹具没有绘图库（线上才有 /assets/mermaid.min.js），所以这里只要求"不出错、
   // 要么画出图、要么给出为什么没画"
   const mapState = await page.evaluate(() => ({

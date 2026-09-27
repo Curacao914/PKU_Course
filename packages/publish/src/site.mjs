@@ -926,16 +926,21 @@ export function renderNotePage(record, { siteOrigin = '', neighbours = {}, cours
  * 图是客户端按需渲染的：绘图库 3.5MB，进页面就下载太贵；也只在选中某门课时画那一门。
  */
 export function renderKnowledgeMapPage({ notes = [], siteOrigin = '' } = {}) {
+  // 图里画三样东西：课次的先后、每节课的骨架（二级标题）、以及跨课次重复出现的概念。
+  // 只画"反复出现的概念"是因为实测：224 个概念里只有 7 个跨了两节课——全都画上去，
+  // 得到的不是知识图谱，而是一团毛线。
   const courses = new Map()
   for (const note of notes) {
     const course = note.courseName || '未分类'
     const terms = [...new Set((note.metadata?.concepts || []).map(term => String(term).trim()).filter(Boolean))]
-    if (!terms.length) continue
+    const sections = (note.headings || []).filter(heading => heading.level === 2 && heading.text)
+      .map(heading => String(heading.text).trim()).filter(Boolean).slice(0, 6)
     if (!courses.has(course)) courses.set(course, [])
     courses.get(course).push({
       slug: note.slug,
       lessonTitle: note.lessonTitle,
       publishedAt: note.publishedAt || '',
+      sections,
       terms
     })
   }
@@ -988,25 +993,32 @@ const rail = document.getElementById('map-rail')
 const MERMAID_VERSION = '${MERMAID_VERSION}'
 
 function sourceFor (course) {
+  const clean = value => String(value).replace(/["\\[\\](){}|]/g, '').slice(0, 28)
+  const lessons = course.lessons.slice(0, 14)
+  if (!lessons.length) return ''
   const counts = new Map()
-  for (const lesson of course.lessons) {
+  for (const lesson of lessons) {
     for (const term of new Set(lesson.terms)) counts.set(term, (counts.get(term) || 0) + 1)
   }
-  const shared = [...counts.entries()].filter(([, n]) => n > 1)
+  const shared = [...counts.entries()].filter(pair => pair[1] > 1)
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'zh'))
-    .slice(0, 40)
-  if (!shared.length) return ''
+    .slice(0, 20)
   const lines = ['graph LR']
-  const clean = value => String(value).replace(/["\[\]()]/g, '')
-  course.lessons.slice(0, 14).forEach(function (lesson, index) {
+  lessons.forEach(function (lesson, index) {
     lines.push('  L' + index + '["' + clean(lesson.lessonTitle) + '"]')
+    // 课次先后：这节课接在下节课前面
+    if (index) lines.push('  L' + (index - 1) + ' --> L' + index)
+    ;(lesson.sections || []).forEach(function (section, at) {
+      lines.push('  S' + index + '_' + at + '["' + clean(section) + '"]')
+      lines.push('  L' + index + ' --> S' + index + '_' + at)
+    })
   })
   shared.forEach(function (pair, index) {
     lines.push('  C' + index + '(["' + clean(pair[0]) + '"])')
   })
-  course.lessons.slice(0, 14).forEach(function (lesson, lessonIndex) {
+  lessons.forEach(function (lesson, lessonIndex) {
     shared.forEach(function (pair, termIndex) {
-      if (lesson.terms.indexOf(pair[0]) >= 0) lines.push('  L' + lessonIndex + ' --> C' + termIndex)
+      if (lesson.terms.indexOf(pair[0]) >= 0) lines.push('  C' + termIndex + ' -.-> L' + lessonIndex)
     })
   })
   return lines.join('\\n')

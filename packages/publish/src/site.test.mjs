@@ -512,8 +512,10 @@ test('every page inline script parses — a syntax error means a blank page', ()
       const start = html.indexOf('<script', at)
       if (start < 0) break
       const open = html.indexOf('>', start) + 1
+      const tag = html.slice(start, open)
       const end = html.indexOf('</script>', open)
-      scripts.push(html.slice(open, end))
+      // 数据块（application/json 之类）不是脚本，别拿去当 JS 解析
+      if (!/type="(?!module|text\/javascript)/.test(tag)) scripts.push(html.slice(open, end))
       at = end + 9
     }
     assert.ok(scripts.length >= 1, name + ' 应该至少有一段内联脚本')
