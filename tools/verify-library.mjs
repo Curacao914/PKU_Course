@@ -14,9 +14,11 @@
  * 有没有孤儿 md、一页纸路径是否成对、笔记页是否存在。
  * 退出码：0 = 全部通过；1 = 有硬错误。软提示（历史数据未绑定）只打印，不影响退出码。
  */
-import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
+
+import { briefSourceChecksum } from '@course/notes'
+import { markdownBytesChecksum, markdownChecksum } from '@course/publish'
 
 const DEFAULT_LIBRARY = path.join(process.env.HOME || '', '.course-worker', 'site', 'library.json')
 const argv = process.argv.slice(2)
@@ -26,15 +28,17 @@ const positional = argv.filter((item, index) => !item.startsWith('--') && !(site
 const file = path.resolve(positional[0] || process.env.COURSE_LIBRARY || DEFAULT_LIBRARY)
 
 /**
- * 两种指纹，各有各的用途，不能混：
- *   bytesChecksum   原始字节：发布库的 checksum（内容比对的幂等键。改成规范化会让整库
- *                   在下次发布时集体判定为"变了"，每节重推一条通知——所以它保持原样）；
- *   sourceChecksum  规范化后（CRLF→LF、去尾部空白）：派生物（简报/一页纸）与正文的绑定。
- *                   生成侧读的是笔记文件、校验侧读的是发布库字段，两者差一个换行不该算改动。
- * 这两个口径分别与 @course/publish 的 markdownBytesChecksum / markdownChecksum 一致。
+ * 指纹直接**借用生成侧自己的实现**，不在这里另写一份。
+ *
+ * 这里踩过坑：工具原先自己算 sha256，与生产者的口径差一个（trimEnd/CRLF）规范化，
+ * 于是"绑得好好的简报"被判成"与正文不符"——检查一旦误报，人就会把它关掉，比不查更糟。
+ *   markdownBytesChecksum  原始字节：发布库的 checksum（内容比对的幂等键。改成规范化会让
+ *                          整库在下次发布时集体判定为"变了"，每节重推一条通知）；
+ *   briefSourceChecksum    简报的来源指纹（@course/notes，生成侧写字段时用的就是它）；
+ *   markdownChecksum       一页纸的来源指纹（@course/publish，derivedBinding 用的就是它）。
  */
-const bytesChecksum = markdown => crypto.createHash('sha256').update(String(markdown || ''), 'utf8').digest('hex')
-const sourceChecksum = markdown => bytesChecksum(String(markdown || '').replace(/\r\n?/g, '\n').trimEnd())
+const bytesChecksum = markdownBytesChecksum
+const sourceChecksum = markdownChecksum
 const short = value => String(value || '').slice(0, 36)
 
 function load() {
@@ -82,7 +86,8 @@ for (const record of records) {
     if (!bound) notes.push(`${label}：简报未绑定来源（历史数据）`)
     if (brief.course && brief.course !== record.courseName) errors.push(`${label}：简报来自别的课程（${brief.course}）`)
     if (brief.lesson && brief.lesson !== record.lessonTitle) errors.push(`${label}：简报来自别的课次（${brief.lesson}）`)
-    if (brief.sourceChecksum && record.markdown && brief.sourceChecksum !== sourceChecksum(record.markdown)) {
+    // 简报的指纹是生成侧（briefSourceChecksum）算的：两边必须同一套算法，否则误报
+    if (brief.sourceChecksum && record.markdown && brief.sourceChecksum !== briefSourceChecksum(record.markdown)) {
       errors.push(`${label}：简报的来源指纹与正文不符`)
     }
   }
@@ -119,15 +124,27 @@ for (const record of records) {
   }
 }
 
-// 6) 发布日期：整批刷成同一个时刻，说明是重发布把首发时间冲掉了（真实发生过）
-const stampCount = new Map()
-for (const record of records) {
-  const stamp = String(record.publishedAt || '')
-  if (stamp) stampCount.set(stamp, [...(stampCount.get(stamp) || []), record.lessonTitle])
+/**
+ * 6) 首次进站时间：整批完全相同，说明重发布把首发时间冲掉了（真实发生过）。
+ *
+ * 这里原先看的是 publishedAt —— 那个字段已经拆成三个时间，于是这条检查永远不触发
+ * （空值不会进 Map，检查静默失效）。现在看 firstPublishedAt（"第一次进站"才是它的语义），
+ * updatedAt 整批相同只提示一句：批量重发布本来就会这样，不是缺陷。
+ */
+const countBy = key => {
+  const counts = new Map()
+  for (const record of records) {
+    const stamp = String(record[key] || '')
+    if (!stamp) continue
+    counts.set(stamp, [...(counts.get(stamp) || []), record.lessonTitle])
+  }
+  return counts
 }
-for (const [stamp, lessons] of stampCount) {
-  if (lessons.length > 1) notes.push(`${lessons.length} 节课的发布时间完全相同（${stamp}）：确认这是同一批首发，而不是重发布冲掉了首发时间`)
+for (const [stamp, lessons] of countBy('firstPublishedAt')) {
+  if (lessons.length > 1) notes.push(`${lessons.length} 节课的首次进站时间完全相同（${stamp}）：确认这是同一批首发，而不是重发布冲掉了首发时间`)
 }
+const updated = [...countBy('updatedAt').values()].filter(lessons => lessons.length > 1)
+if (updated.length) notes.push(`${updated.reduce((sum, lessons) => sum + lessons.length, 0)} 节课的最近更新时间相同：批量重发布就会这样，确认是预期操作即可`)
 
 // 7) 同课程不许串课：几节课共用同一段摘要/主题/关键词，是"派生物串了目录"的典型症状
 const byCourse = new Map()
