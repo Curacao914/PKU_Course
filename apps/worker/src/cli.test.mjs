@@ -969,6 +969,78 @@ test('老发布库（只有 publishedAt）在下次发布时整体迁移成三�
     '老记录重建后首页日期列也是课次日期')
 })
 
+test('两节课共用同一个 replayKey 时，发布其中一节不得把另一节从发布库里删掉', async () => {
+  // 真实数据里出现过：国际刑法学 2026-09-16 与 2026-09-23 的 replayKey 相同。
+  // 按 replayKey 无条件替换旧记录，会在发布其中一节时把另一节一起抹掉——
+  // 站点上凭空少一整节课，而且没有任何报错，只有翻发布库才发现。
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const siteDir = path.join(dir, 'site')
+  fs.mkdirSync(siteDir, { recursive: true })
+  const shared = 'replay-shared'
+  const legacy = (title, date, checksum) => ({
+    slug: `notes/国际刑法学/${title}`,
+    courseName: '国际刑法学',
+    lessonTitle: title,
+    replayKey: shared,
+    lessonDate: date,
+    firstPublishedAt: `${date}T00:00:00.000Z`,
+    updatedAt: `${date}T00:00:00.000Z`,
+    checksum,
+    markdown: `# ${title}\n\n## 课程概览\n\n正文。`
+  })
+  fs.writeFileSync(path.join(siteDir, 'library.json'), JSON.stringify([
+    legacy('2026-09-16第10-12节', '2026-09-16', 'checksum-a'),
+    legacy('2026-09-23第10-12节', '2026-09-23', 'checksum-b')
+  ], null, 2))
+
+  const notesDir = path.join(dir, 'notes')
+  fs.mkdirSync(notesDir, { recursive: true })
+  fs.writeFileSync(path.join(notesDir, 'notes-run-summary.json'), JSON.stringify({
+    course: '国际刑法学', lesson: '2026-09-16第10-12节', replayKey: shared, status: 'completed'
+  }))
+  fs.writeFileSync(path.join(notesDir, '2026-09-16第10-12节.md'), ['# 2026-09-16第10-12节', '', '## 课程概览', '', '改过一遍的正文。'].join('\n'))
+
+  const { deps, errors } = harness()
+  assert.equal(await runCli(['publish', '--from', notesDir, '--out', siteDir, '--no-notify'], deps), 0, 'stderr: ' + errors.join(' | '))
+  const library = JSON.parse(fs.readFileSync(path.join(siteDir, 'library.json'), 'utf8'))
+  assert.equal(library.length, 2, '发布一节不能把共用 replayKey 的另一节删掉')
+  assert.ok(library.some(item => item.lessonTitle === '2026-09-23第10-12节'), '另一节必须还在库里')
+  assert.match(library.find(item => item.lessonTitle === '2026-09-16第10-12节').markdown, /改过一遍的正文/)
+})
+
+test('课次标题改了（slug 跟着变）时，旧记录按 replayKey 换掉，不留重复的一节', async () => {
+  // 这是 replayKey 兜底的**唯一**用途：改名之后 slug 变了，按 slug 找不到旧记录，
+  // 若不换掉它，站点上会同时出现改名前后两节。
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const siteDir = path.join(dir, 'site')
+  fs.mkdirSync(siteDir, { recursive: true })
+  fs.writeFileSync(path.join(siteDir, 'library.json'), JSON.stringify([{
+    slug: 'notes/国际刑法学/第10-12节',
+    courseName: '国际刑法学',
+    lessonTitle: '第10-12节',
+    replayKey: 'replay-rename',
+    lessonDate: '2026-09-16',
+    firstPublishedAt: '2026-09-16T00:00:00.000Z',
+    updatedAt: '2026-09-16T00:00:00.000Z',
+    checksum: 'old',
+    markdown: '# 第10-12节\n\n## 课程概览\n\n旧标题下的正文。'
+  }], null, 2))
+
+  const notesDir = path.join(dir, 'notes')
+  fs.mkdirSync(notesDir, { recursive: true })
+  fs.writeFileSync(path.join(notesDir, 'notes-run-summary.json'), JSON.stringify({
+    course: '国际刑法学', lesson: '2026-09-16第10-12节', replayKey: 'replay-rename', status: 'completed'
+  }))
+  fs.writeFileSync(path.join(notesDir, '2026-09-16第10-12节.md'), ['# 2026-09-16第10-12节', '', '## 课程概览', '', '新标题下的正文。'].join('\n'))
+
+  const { deps, errors } = harness()
+  assert.equal(await runCli(['publish', '--from', notesDir, '--out', siteDir, '--no-notify'], deps), 0, 'stderr: ' + errors.join(' | '))
+  const library = JSON.parse(fs.readFileSync(path.join(siteDir, 'library.json'), 'utf8'))
+  assert.equal(library.length, 1, '改名不留下重复的一节')
+  assert.equal(library[0].slug, 'notes/国际刑法学/2026-09-16第10-12节')
+  assert.equal(library[0].firstPublishedAt, '2026-09-16T00:00:00.000Z', '改名不重置首次进站时间')
+})
+
 test('publish --rebuild rewrites the site from the library without touching the ledger', async () => {
   // 换模板、改样式之后要重生成 HTML，但这些跟笔记内容无关：不该为了它们再跑一遍模型，
   // 也不该因为"重新生成"而再推一次微信。

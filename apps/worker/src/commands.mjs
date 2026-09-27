@@ -1028,8 +1028,9 @@ export function createCommands(context) {
       .map(migrateRecordTime)
     const slug = noteSlug({ courseName: course, lessonTitle })
     // 同一节的"上一次发布"：先按 slug 找，再按 replayKey 找（课次标题改过时 slug 会变）
-    const previous = library.find(item => item.slug === slug) ||
-      (replayKey ? library.find(item => item.replayKey === replayKey) : null) || null
+    const previousBySlug = library.find(item => item.slug === slug) || null
+    const previousByReplayKey = replayKey ? library.find(item => item.replayKey === replayKey) : null
+    const previous = previousBySlug || previousByReplayKey || null
     const nowIso = clockNow().toISOString()
     // 首次进站时间一旦定下就不再动：RSS 的 pubDate 靠它，重新发布旧课不该改这个时间
     const firstPublishedAt = String(previous?.firstPublishedAt || previous?.publishedAt || '') || nowIso
@@ -1170,8 +1171,19 @@ export function createCommands(context) {
     }
     const changed = !previous || previous.checksum !== contentChecksum
 
+    /**
+     * 换掉这一节在库里的旧记录。
+     *
+     * 按 slug 换是常规路径；按 replayKey 换只用于"课次标题改过、slug 跟着变了"的改名场景，
+     * 而且**只在 slug 找不到旧记录时才动它**。
+     *
+     * 不能无条件按 replayKey 删：真实数据里出过两节课共用同一个 replayKey
+     * （国际刑法学 2026-09-16 与 2026-09-23 都是 replay-c6cdcf0c…），无条件删会让
+     * 发布其中一节时把另一节从发布库里抹掉——站点上少一整节课，而且没有任何报错。
+     */
+    const staleByRename = !previousBySlug && previousByReplayKey ? previousByReplayKey : null
     const nextLibrary = [
-      ...library.filter(item => item.slug !== record.slug && !(record.replayKey && item.replayKey === record.replayKey)),
+      ...library.filter(item => item.slug !== record.slug && (!staleByRename || item.slug !== staleByRename.slug)),
       { ...record, checksum: contentChecksum }
     ]
     fs.mkdirSync(siteRoot, { recursive: true })
