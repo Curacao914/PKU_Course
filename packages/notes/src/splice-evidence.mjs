@@ -1,6 +1,7 @@
 import { cleanText } from '@course/core'
 
 import { charCount, sectionProse } from './brief-source.mjs'
+import { nodeBodyPieces } from './node-pieces.mjs'
 import { coversOutline } from './outline-ids.mjs'
 
 /**
@@ -79,12 +80,20 @@ export function nodeEvidence(draft = '', { limit = SPLICE_EVIDENCE.perNode } = {
   return text
 }
 
-/** 每个大纲节点对应哪些已批准节点正文（合并写单元要挂到它覆盖的每一节）。 */
+/**
+ * 每个大纲节点对应的**正文片段**（不是整个写单元）。
+ *
+ * 合并写单元覆盖好几节时，必须按模块标题把它拆回各节——否则每一节拿到的都是
+ * 同一段开头，依据就成了复制品（真实数据验收时踩到过）。
+ * 拆分规则与拼装同源（nodeBodyPieces），所以"依据里的这一段"与"成品里的这一节"
+ * 永远是同一段文字。
+ */
 export function draftsByOutline(lesson = {}) {
   const map = new Map((lesson.outline || []).map(node => [node.id, []]))
   for (const node of lesson.nodes || []) {
-    for (const outlineNode of lesson.outline || []) {
-      if (coversOutline(node, outlineNode.id) && map.has(outlineNode.id)) map.get(outlineNode.id).push(node)
+    if (!(lesson.outline || []).some(outlineNode => coversOutline(node, outlineNode.id))) continue
+    for (const [outlineId, piece] of nodeBodyPieces(node)) {
+      if (map.has(outlineId) && piece) map.get(outlineId).push(piece)
     }
   }
   return map
@@ -100,7 +109,7 @@ export function spliceEvidence(lesson = {}, { perNode = SPLICE_EVIDENCE.perNode,
   const build = cap => {
     const entries = outline.map(node => {
       const parts = (drafts.get(node.id) || [])
-        .map(child => nodeEvidence(child.draft, { limit: cap }))
+        .map(piece => nodeEvidence(piece, { limit: cap }))
         .filter(Boolean)
       return {
         id: node.id,
@@ -146,8 +155,8 @@ function renderSpliceEvidence(entries = []) {
 export function sectionBodyIndex(lesson = {}) {
   const drafts = draftsByOutline(lesson)
   const index = new Map()
-  for (const [id, nodes] of drafts) {
-    index.set(id, nodes.map(node => sectionProse(node.draft)).filter(Boolean).join('\n'))
+  for (const [id, pieces] of drafts) {
+    index.set(id, pieces.map(piece => sectionProse(piece)).filter(Boolean).join('\n'))
   }
   return index
 }

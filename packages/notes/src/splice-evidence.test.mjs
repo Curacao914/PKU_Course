@@ -42,8 +42,22 @@ const lesson = {
       '',
       '1. 共同故意的判断标准是什么？'
     ].join('\n')),
-    // 合并写单元：这一节点同时覆盖 o1 与 o2
-    node('n2', 'o1', '罪数的判断以行为个数与法益侵害个数为基础，这是罪数判断的基本标准。', { outlineNodeIds: ['o1', 'o2'] })
+    // 合并写单元：这一节点同时覆盖 o1 与 o2，按模块标题拆回各节
+    node('n2', 'o1', [
+      '### 共犯的成立条件',
+      '',
+      '这一段的规则句是：共犯的成立需要意思联络，缺了它就只有同时犯而没有共犯。',
+      '',
+      '### 罪数判断',
+      '',
+      '罪数的判断以行为个数与法益侵害个数为基础，这是罪数判断的基本标准。'
+    ].join('\n'), {
+      outlineNodeIds: ['o1', 'o2'],
+      moduleBriefs: [
+        { outlineNodeId: 'o1', title: '共犯的成立条件' },
+        { outlineNodeId: 'o2', title: '罪数判断' }
+      ]
+    })
   ]
 }
 
@@ -65,12 +79,29 @@ test('摘录是节选：铺垫、举例、META 与自测都不进模型', () => 
   assert.ok(!evidence.includes('自测'), '自测是接缝层自己出的题，不是依据')
 })
 
-test('合并写单元覆盖到的每一节都拿得到依据（P0 语义的延续）', () => {
+test('合并写单元按模块拆回各节：每节拿到自己那一段，不是同一段开头', () => {
+  // 这一条是真实数据验收时踩出来的：一个写单元写完整节课时，若整段草稿都当依据，
+  // 每节的"依据"就会是同一段开头，依据本身成了复制品。
   const { byOutlineId } = spliceEvidence(lesson)
-  assert.match(byOutlineId.o1, /罪数的判断以行为个数与法益侵害个数为基础/, '覆盖的第一节要拿到')
-  assert.match(byOutlineId.o2, /罪数的判断以行为个数与法益侵害个数为基础/, '覆盖的第二节同样要拿到')
+  assert.match(byOutlineId.o1, /共犯的成立需要意思联络/, '第一节拿自己那段')
+  assert.match(byOutlineId.o2, /罪数的判断以行为个数与法益侵害个数为基础/, '第二节拿自己那段')
+  assert.ok(!byOutlineId.o2.includes('共犯的成立需要意思联络'), '第二节不该拿到第一节的段落')
   const drafts = draftsByOutline(lesson)
-  assert.deepEqual(drafts.get('o2').map(item => item.id), ['n2'])
+  assert.equal(drafts.get('o2').length, 1)
+  assert.match(drafts.get('o2')[0], /罪数的判断以行为个数/)
+})
+
+test('合并写单元的模块标题对不上时：整段归第一节，其余节明说没有依据（不复制、不编）', () => {
+  // nodeBodyPieces 的契约违反兜底：正文一段都不能丢，于是整段归第一节，
+  // 其余节的依据就是空的——接缝层看到的是"没有依据"，而不是拿别人的段落凑数。
+  const merged = node('n2', 'o1', '罪数的判断以行为个数与法益侵害个数为基础，这是罪数判断的基本标准。', {
+    outlineNodeIds: ['o1', 'o2']
+  })
+  const split = { title: 'T', outline: [{ id: 'o1', title: '一、共犯' }, { id: 'o2', title: '二、罪数' }], nodes: [merged] }
+  const { byOutlineId, text } = spliceEvidence(split)
+  assert.match(byOutlineId.o1, /罪数的判断以行为个数/)
+  assert.equal(byOutlineId.o2, '')
+  assert.match(text, /本节没有可直接引用的规则句/)
 })
 
 test('没有可引用依据的节明说没有，不编', () => {
@@ -113,6 +144,7 @@ test('正文索引按大纲节点聚合，供机械校验使用', () => {
   const index = sectionBodyIndex(lesson)
   assert.match(index.get('o1'), /共犯的成立需要共同故意与共同行为/)
   assert.ok(!index.get('o1').includes('META'), '索引里的正文同样要清理装饰')
-  assert.match(index.get('o2'), /罪数的判断以行为个数/)
+  assert.match(index.get('o2'), /罪数的判断以行为个数/, '索引按模块拆分，不是整段草稿')
+  assert.ok(!index.get('o2').includes('共犯的成立需要意思联络'))
   assert.equal(index.get('o3'), '')
 })
