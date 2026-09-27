@@ -1086,11 +1086,12 @@ export function renderTermIndexPage({ title, description, kind, notes = [], site
     courses.get(course).push({ note, terms })
   }
 
-  // 每条术语出现在几节课里：跨课次的词是复习时最该先看的，单独标出来
+  // 每条术语出现在几节课里：跨课次的词是复习时最该先看的，单独标出来。
+  // 这里数的是**课次**不是课程——原先按课程计数，同一门课里跨了两节的词反而标不出来。
   const spread = new Map()
   for (const lessons of courses.values()) {
-    for (const term of new Set(lessons.flatMap(lesson => lesson.terms))) {
-      spread.set(term, (spread.get(term) || 0) + 1)
+    for (const lesson of lessons) {
+      for (const term of new Set(lesson.terms)) spread.set(term, (spread.get(term) || 0) + 1)
     }
   }
 
@@ -1098,7 +1099,7 @@ export function renderTermIndexPage({ title, description, kind, notes = [], site
     const anchor = ((note.anchors && note.anchors[bucket]) || {})[term] || ''
     const href = `/${escapeHtml(note.slug)}.html?mark=${encodeURIComponent(term)}` + (anchor ? `#${escapeHtml(anchor)}` : '')
     const shared = (spread.get(term) || 0) > 1
-    return `<a class="chip${shared ? ' chip-shared' : ''}" href="${href}"${shared ? ' title="这门课不止一节讲过"' : ''}>${escapeHtml(term)}</a>`
+    return `<a class="chip${shared ? ' chip-shared' : ''}" href="${href}"${shared ? ' title="不止一节课讲过"' : ''}>${escapeHtml(term)}</a>`
   }
 
   const sections = [...courses.entries()].map(([course, lessons]) => [
