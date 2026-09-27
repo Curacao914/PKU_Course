@@ -1031,17 +1031,26 @@ async function auditNotePage(page, site, noteUrl, failures) {
   const marked = await page.$$eval('article .annot-mark', nodes => nodes.length)
   await record('⌘H 高亮', marked >= 1, '正文里出现 ' + marked + ' 处高亮')
 
+  // ⌘B 与按钮一样可切：同一段再按一次取消，再按一次又加回来
+  await selectSomeText()
+  await page.keyboard.press('Meta+b')
+  await page.waitForTimeout(200)
+  const toggledOff = await page.$$eval('article .annot-bold', nodes => nodes.length)
+  await record('再按一次取消加粗', toggledOff < bolded, '加粗从 ' + bolded + ' 处变成 ' + toggledOff + ' 处')
+
   await selectSomeText()
   await page.keyboard.press('Meta+b')
   await page.waitForTimeout(200)
   const boldAgain = await page.$$eval('article .annot-bold', nodes => nodes.length)
-  await record('⌘B 加粗', boldAgain > bolded, '加粗从 ' + bolded + ' 处变成 ' + boldAgain + ' 处')
+  await record('⌘B 加粗', boldAgain > toggledOff, '加粗从 ' + toggledOff + ' 处变回 ' + boldAgain + ' 处')
 
-  const annotsKept = await page.evaluate(() => {
+  const annotStore = await page.evaluate(() => {
     const raw = localStorage.getItem('course.annots:' + location.pathname)
-    return raw ? JSON.parse(raw).length : 0
+    const list = raw ? JSON.parse(raw) : []
+    return { count: list.length, kinds: [...new Set(list.map(item => item.kind))].sort() }
   })
-  await record('批注存在浏览器里', annotsKept >= 4, 'localStorage 里 ' + annotsKept + ' 条')
+  await record('批注存在浏览器里', annotStore.count >= 3 && annotStore.kinds.length >= 3,
+    'localStorage 里 ' + annotStore.count + ' 条，类型：' + annotStore.kinds.join('/'))
 
   // 目录：点一条要跳到对应小节，且当前小节会被高亮
   await page.evaluate(() => window.scrollTo(0, 0))

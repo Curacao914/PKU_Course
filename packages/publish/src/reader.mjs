@@ -333,17 +333,32 @@ export const READER_SCRIPT = '<script>' + String.raw`
     return span
   }
 
-  /** 选区是否整个落在某个同类批注里——是的话，再按一次就是取消。 */
-  function enclosingAnnot (range, kind) {
+  /**
+   * 选区里有没有这一类批注——有就是"再按一次取消"。
+   *
+   * 两种情况都要认：①选区落在批注内部（往上找祖先）；②选区把批注整个包住
+   * （选中一整段时就是这种，祖先只是 <p>，只看祖先会漏，表现为"取消不掉"）。
+   */
+  function annotsInRange (range, kind) {
+    var found = []
     var node = range.commonAncestorContainer
     if (node && node.nodeType === 3) node = node.parentNode
     while (node && node !== document.body) {
       if (node.classList && node.classList.contains('annot-' + kind)) {
-        return node.contains(range.startContainer) && node.contains(range.endContainer) ? node : null
+        if (node.contains(range.startContainer) && node.contains(range.endContainer)) found.push(node)
+        break
       }
       node = node.parentNode
     }
-    return null
+    var article = document.querySelector('article')
+    if (article) {
+      [].slice.call(article.querySelectorAll('.annot-' + kind)).forEach(function (element) {
+        if (found.indexOf(element) >= 0) return
+        // intersectsNode 对"选区包含批注"和"批注包含选区"都返回 true，正好是要的语义
+        try { if (range.intersectsNode(element)) found.push(element) } catch (error) {}
+      })
+    }
+    return found
   }
 
   function applyAnnotation (kind) {
@@ -354,18 +369,22 @@ export const READER_SCRIPT = '<script>' + String.raw`
     var range = selection.getRangeAt(0)
 
     // 同一个按钮再按一次 = 取消：把包着的 span 拆掉，并从本地记录里删掉
-    var existing = enclosingAnnot(range, kind)
-    if (existing) {
-      var parent = existing.parentNode
-      while (existing.firstChild) parent.insertBefore(existing.firstChild, existing)
-      parent.removeChild(existing)
-      parent.normalize()
-      var index = marks.findIndex(function (mark) {
-        return mark.kind === kind && mark.anchor && mark.anchor.text &&
-          (existing.textContent || '').indexOf(mark.anchor.text) >= 0
+    var existing = annotsInRange(range, kind)
+    if (existing.length) {
+      var removed = ''
+      existing.forEach(function (element) {
+        removed += element.textContent || ''
+        var parent = element.parentNode
+        if (!parent) return
+        while (element.firstChild) parent.insertBefore(element.firstChild, element)
+        parent.removeChild(element)
+        parent.normalize()
       })
-      if (index >= 0) marks.splice(index, 1)
-      else marks = marks.filter(function (mark) { return !(mark.kind === kind && text.indexOf(mark.anchor && mark.anchor.text) >= 0) })
+      marks = marks.filter(function (mark) {
+        if (mark.kind !== kind) return true
+        var anchorText = (mark.anchor && mark.anchor.text) || ''
+        return !(anchorText && removed.indexOf(anchorText) >= 0)
+      })
       saveMarks()
       selection.removeAllRanges()
       hideSelbar()

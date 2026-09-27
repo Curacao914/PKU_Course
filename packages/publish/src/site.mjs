@@ -96,8 +96,8 @@ a:hover { color: var(--accent-ink); }
 
 .wrap { max-width: 760px; margin: 0 auto; padding: 40px 24px 96px; }
 /* 表格页（首页/索引/地图）用宽版：一行里有课次、关键词、时长、日期，760px 会挤成一团 */
-.wrap.wide { max-width: 1180px; padding: 34px 28px 96px; }
-.wrap.wide .index-shell { grid-template-columns: 168px minmax(0, 1fr); gap: 24px; }
+.wrap.wide { max-width: 1360px; padding: 30px 22px 96px; }
+.wrap.wide .index-shell { grid-template-columns: 164px minmax(0, 1fr); gap: 22px; }
 /* 长文页：左栏目录 + 正文 */
 .shell { display: grid; grid-template-columns: var(--rail-w) minmax(0, 1fr); gap: 56px;
   max-width: 1140px; margin: 0 auto; padding: 36px 24px 112px; }
