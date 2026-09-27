@@ -6,7 +6,7 @@ import test from 'node:test'
 
 import { ToolError } from './errors.mjs'
 import { createFixtureService, LIBRARY_PATH, readLibrary, startFakeSite } from './fixtures/fixture.mjs'
-import { createLocalLibrarySource, createRemoteSiteSource, createSource, normalizeOrigin } from './sources.mjs'
+import { createLocalLibrarySource, createRemoteSiteSource, createSource, markdownPathOf, normalizeOrigin } from './sources.mjs'
 
 function tempLibrary(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'notes-mcp-'))
@@ -58,7 +58,7 @@ test('本地发布库：文件缺失/坏 JSON/结构不对都给可操作的报�
   await assert.rejects(() => createLocalLibrarySource({ file: notArray }).listNotes(), /记录数组/)
 })
 
-test('远程站点：索引不含正文，正文按 /md/<文件名>.md 取', async t => {
+test('远程站点：索引不含正文，正文按 /md/<课程>/<课次>.md 取', async t => {
   const site = await startFakeSite()
   t.after(() => site.close())
   const source = createRemoteSiteSource({ origin: site.origin, ttlMs: 0 })
@@ -69,7 +69,11 @@ test('远程站点：索引不含正文，正文按 /md/<文件名>.md 取', asy
   const markdown = await source.readMarkdown('notes/国际法学/第一课-国家责任的构成')
   assert.match(markdown, /^# 国际法学/)
   assert.ok(site.requests.includes('/api/notes'))
-  assert.ok(site.requests.some(url => url.startsWith('/md/')))
+  // 与 publish 写出的文件同一条路径（markdown-path.mjs）：带课程，不是只有课次那一段
+  assert.equal(decodeURIComponent(markdownPathOf('notes/国际法学/第一课-国家责任的构成')),
+    '/md/国际法学/第一课-国家责任的构成.md')
+  assert.ok(site.requests.includes(markdownPathOf('notes/国际法学/第一课-国家责任的构成')),
+    '请求的正是这条路径：' + site.requests.join(', '))
 })
 
 test('远程站点：TTL 内复用缓存，ttl=0 时每次都重新取', async t => {

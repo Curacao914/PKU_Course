@@ -5,6 +5,13 @@ import { escapeHtml, extractHeadings, renderMarkdown, slugify, summarizeMarkdown
 import { PREF_MENU_SCRIPT, READER_SCRIPT, courseNav, settingsMenu, svgIcon, toolBar } from './reader.mjs'
 import { ONEPAGE_CSS, renderOnepagePage } from './onepage.mjs'
 import { renderDocPage, renderLlmsTxt, usePageShell } from './docs.mjs'
+// 时间语义（lessonDate / firstPublishedAt / updatedAt）与 Markdown 路径各有一个唯一实现，
+// 站内所有排序、日期列、下载链接、llms.txt 都从这里取，不再各自拼。
+import {
+  compareFirstPublishedDescending, compareLessonAscending, compareLessonDescending,
+  firstPublishedAtOf, lessonDateOf, resolveLessonDate
+} from './lesson-date.mjs'
+import { markdownPath, onePageMarkdownPath } from './markdown-path.mjs'
 
 /**
  * 站点生成：把已完成的笔记变成可以对外阅读的页面。
@@ -613,14 +620,41 @@ export function termAnchors(markdown = '') {
   return anchors
 }
 
+/**
+ * 派生物的出处字段：原样带进发布库（缺哪个就不带哪个，老数据不受影响）。
+ *
+ * 只挑这几个字段，不整份复制：brief.json / onepage.json 里还有 trace（模型调用记录），
+ * 那是生成过程的账，不该塞进发布库。
+ */
+function bindingFields(artifact = {}) {
+  const fields = {
+    course: artifact.course,
+    lesson: artifact.lesson,
+    replayKey: artifact.replayKey,
+    sourceChecksum: artifact.sourceChecksum,
+    sourceChars: artifact.sourceChars,
+    generatedAt: artifact.generatedAt
+  }
+  return Object.fromEntries(Object.entries(fields)
+    .filter(([, value]) => value !== undefined && value !== null && String(value).trim() !== '')
+    .map(([key, value]) => [key, typeof value === 'number' ? value : String(value)]))
+}
+
 export function buildNoteRecord({
-  courseName, teacher = '', lessonTitle, markdown, replayKey = '', publishedAt = new Date().toISOString(), source = 'course-worker',
+  courseName, teacher = '', lessonTitle, markdown, replayKey = '', source = 'course-worker',
+  // 三个时间各管一件事（见 lesson-date.mjs）：publishedAt 一个字段扛四件事的老写法已经拆掉。
+  // lessonDate 优先显式传入（--lesson-date），其次课次标题里的日期，再次账本里的 starts_at_text，
+  // 再退到记录里已有的那一天，最后才是首次发布的日期（这种兜底会在记录里标注来源）。
+  lessonDate = '', startsAtText = '', previousLessonDate = '',
+  firstPublishedAt = new Date().toISOString(), updatedAt = '',
   brief = null, onepage = null
 }) {
   const body = String(markdown ?? '')
   if (!body.trim()) throw new Error('笔记正文为空，不能发布')
   const slug = noteSlug({ courseName, lessonTitle })
   const briefing = String(brief?.briefing || '').trim()
+  const published = String(firstPublishedAt || '') || new Date().toISOString()
+  const resolved = resolveLessonDate({ explicit: lessonDate, lessonTitle, startsAtText, previousLessonDate, fallbackAt: published })
   return {
     slug,
     courseName: String(courseName || '').trim(),
@@ -628,11 +662,17 @@ export function buildNoteRecord({
     lessonTitle: String(lessonTitle || '').trim(),
     replayKey,
     source,
-    publishedAt,
+    lessonDate: resolved.lessonDate,
+    // 来源要落盘：这样"这个日期是猜的"在记录里看得见，展示时不再临时猜
+    lessonDateSource: resolved.lessonDateSource,
+    firstPublishedAt: published,
+    updatedAt: String(updatedAt || '') || published,
     // 简报：首页与笔记页顶部先用它给读者一个基本印象，再进入正文的细节。
     // 列表页也用它当摘要——比截断正文前 120 字有用得多。
+    // 出处（course / lesson / sourceChecksum…）一并留在发布库里：这份简报是给哪一篇、
+    // 哪一版正文生成的，是事后追查串课的唯一线索（tools/verify-library.mjs 就查它）。
     brief: briefing
-      ? { briefing, keyPoints: (brief.keyPoints || []).filter(Boolean).slice(0, 5) }
+      ? { briefing, keyPoints: (brief.keyPoints || []).filter(Boolean).slice(0, 5), ...bindingFields(brief) }
       : null,
     summary: briefing ? summarizeMarkdown(briefing) : summarizeMarkdown(body),
     headings: extractHeadings(body),
@@ -649,7 +689,8 @@ export function buildNoteRecord({
       ? {
         title: String(onepage.title || '').trim(),
         markdown: String(onepage.markdown).trim(),
-        chars: Number(onepage.chars || String(onepage.markdown).replace(/\s/g, '').length)
+        chars: Number(onepage.chars || String(onepage.markdown).replace(/\s/g, '').length),
+        ...bindingFields(onepage)
       }
       : null,
     ...keywordFields({
@@ -1050,7 +1091,9 @@ export function renderNotePage(record, { siteOrigin = '', neighbours = {}, cours
     record.courseName ? `<a href="/courses/${escapeHtml(slugify(record.courseName))}/">${escapeHtml(record.courseName)}</a>` : '',
     record.teacher ? escapeHtml(record.teacher) : '',
     `约 ${readMinutes} 分钟`,
-    record.publishedAt ? `${escapeHtml(String(record.publishedAt).slice(0, 10))} 发布` : ''
+    // 这里写的是**这节课是哪天上的**（读者关心的），不是"哪天发布的"——
+    // 旧课重新发布不该让页面上出现一个与课程内容无关的新日期。
+    lessonDateOf(record) ? `${escapeHtml(lessonDateOf(record))} 课次` : ''
   ].filter(Boolean).join(' · ')
 
   const railExtra = [
@@ -1128,7 +1171,7 @@ export function renderKnowledgeMapPage({ notes = [], siteOrigin = '' } = {}) {
     courses.get(course).push({
       slug: note.slug,
       lessonTitle: note.lessonTitle,
-      publishedAt: note.publishedAt || '',
+      lessonDate: lessonDateOf(note),
       sections,
       terms
     })
@@ -1271,7 +1314,8 @@ export function renderOnepagePageHtml(record, { siteOrigin = '', courseLessons =
     description: record.summary || '',
     canonical: siteOrigin ? `${siteOrigin}/${onepageSlug(record.slug)}` : '',
     layout: 'onepage',
-    topRight: toolBar({ ...record, onepage: true }),
+    // onepagePage 是页面类型标记：工具栏据此下载这一页纸而不是整篇笔记
+    topRight: toolBar({ ...record, onepagePage: true }),
     // 顶栏工具（底色/打印/复制/字号）的交互在阅读页脚本里：不带上它，这一排按钮就是死的
     scripts: READER_SCRIPT,
     body
@@ -1523,7 +1567,8 @@ const SEARCH_SCRIPT = `<script>
 
 export function renderIndexPage(records, { siteOrigin = '' } = {}) {
   const groups = new Map()
-  for (const record of [...records].sort((a, b) => String(b.publishedAt).localeCompare(String(a.publishedAt)))) {
+  // "最新"= 最近上过的一节课（lessonDate），不是最近发布过一次的笔记
+  for (const record of [...records].sort(compareLessonDescending)) {
     const key = record.courseName || '未分类'
     if (!groups.has(key)) groups.set(key, [])
     groups.get(key).push(record)
@@ -1562,7 +1607,7 @@ export function renderIndexPage(records, { siteOrigin = '' } = {}) {
       `${record.onepage ? ` <a class="onepage-link" href="/${escapeHtml(onepageSlug(record.slug))}.html" title="一页纸摘要" aria-label="一页纸摘要">${svgIcon('sheet')}</a>` : ''}</td>`,
     `<td class="lesson-keywords">${record.theme ? `<span class="lesson-theme">${escapeHtml(record.theme)}</span>` : ''}${(record.keywords || []).map(term => `<span class="kw">${escapeHtml(term)}</span>`).join('')}</td>`,
     record.readMinutes ? `<td class="lesson-meta">约 ${record.readMinutes} 分钟</td>` : '<td class="lesson-meta"></td>',
-    record.publishedAt ? `<td class="lesson-date">${escapeHtml(String(record.publishedAt).slice(0, 10))}</td>` : '<td class="lesson-date"></td>',
+    lessonDateOf(record) ? `<td class="lesson-date">${escapeHtml(lessonDateOf(record))}</td>` : '<td class="lesson-date"></td>',
     '</tr>'
   ].join('')
 
@@ -1612,14 +1657,15 @@ export function renderFeed(records = [], { siteOrigin = '', siteName = SITE_NAME
   const esc = value => String(value ?? '')
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
   const items = [...records]
-    .sort((left, right) => String(right.publishedAt).localeCompare(String(left.publishedAt)))
+    // 订阅器里"新"的判据是**首次进站时间**：重新发布一节旧课不该让它跳回列表顶部
+    .sort(compareFirstPublishedDescending)
     .slice(0, 50)
     .map(record => [
       '    <item>',
       `      <title>${esc(`${record.courseName ? `${record.courseName} · ` : ''}${record.lessonTitle}`)}</title>`,
       `      <link>${esc(`${base}/${record.slug}.html`)}</link>`,
       `      <guid isPermaLink="true">${esc(`${base}/${record.slug}.html`)}</guid>`,
-      `      <pubDate>${new Date(record.publishedAt || now).toUTCString()}</pubDate>`,
+      `      <pubDate>${new Date(firstPublishedAtOf(record) || now).toUTCString()}</pubDate>`,
       `      <description>${esc(record.summary || '')}</description>`,
       '    </item>'
     ].join('\n')).join('\n')
@@ -1653,11 +1699,40 @@ export function keywordFields({ brief = null, markdown = '', concepts = [], cour
   return { keywords: deriveKeywords(markdown, { concepts, courseName, limit }), keywordsSource: 'ranked' }
 }
 
-export function refreshRecord(record = {}) {
-  const markdown = String(record.markdown ?? '')
-  if (!markdown.trim()) return record
+/**
+ * 把老记录的时间字段迁移成 lessonDate / firstPublishedAt / updatedAt 三元组。
+ *
+ * 旧发布库里只有 publishedAt 一个字段（既当课次日期、又当发布时间）。读进来时：
+ *   firstPublishedAt ← publishedAt（那确实是它第一次进站的时间）
+ *   updatedAt        ← publishedAt
+ *   lessonDate       ← 课次标题里的日期 → 已有值 → publishedAt 的日期
+ * 迁移是幂等的，而且**只在记录里没有这些字段时**才推导：已经落盘的 lessonDate
+ * 不再被重算，否则一次 --rebuild 就会把补写过的日期改回去。
+ * 迁移后不再保留 publishedAt——它一个字段扛四件事正是这次要拆掉的东西。
+ */
+export function migrateRecordTime(record = {}) {
+  const { publishedAt, ...rest } = record
+  const firstPublishedAt = String(rest.firstPublishedAt || '') || String(publishedAt || '')
+  const updatedAt = String(rest.updatedAt || '') || firstPublishedAt
+  const stored = String(rest.lessonDate || '')
+  const resolved = stored
+    ? { lessonDate: stored, lessonDateSource: rest.lessonDateSource || 'stored' }
+    : resolveLessonDate({ lessonTitle: rest.lessonTitle, startsAtText: rest.startsAtText, fallbackAt: firstPublishedAt })
   return {
-    ...record,
+    ...rest,
+    lessonDate: resolved.lessonDate,
+    lessonDateSource: resolved.lessonDateSource,
+    firstPublishedAt,
+    updatedAt
+  }
+}
+
+export function refreshRecord(record = {}) {
+  const withTime = migrateRecordTime(record)
+  const markdown = String(withTime.markdown ?? '')
+  if (!markdown.trim()) return withTime
+  return {
+    ...withTime,
     headings: extractHeadings(markdown),
     onepage: record.onepage || null,
     readMinutes: record.readMinutes || estimateReadMinutes(markdown),
@@ -1708,12 +1783,12 @@ export function writeSite({ records = [], outputDir, siteOrigin = '', docs = [] 
 
   // 全量重写时顺手把派生字段按正文重算：模板与解析规则改了，重建出来的站点才是新的
   const sorted = records.map(refreshRecord)
-    .sort((a, b) => String(b.publishedAt).localeCompare(String(a.publishedAt)))
+    .sort(compareLessonDescending)
 
-  // 上一讲 / 下一讲：同一门课内按发布时间排序后的相邻两篇
+  // 上一讲 / 下一讲：同一门课内按**上课日期**排序后的相邻两篇
   const neighboursOf = record => {
     const sameCourse = sorted.filter(item => item.courseName === record.courseName)
-      .sort((a, b) => String(a.publishedAt).localeCompare(String(b.publishedAt)))
+      .sort(compareLessonAscending)
     const at = sameCourse.findIndex(item => item.slug === record.slug)
     return { previous: at > 0 ? sameCourse[at - 1] : null, next: at >= 0 && at < sameCourse.length - 1 ? sameCourse[at + 1] : null }
   }
@@ -1722,7 +1797,7 @@ export function writeSite({ records = [], outputDir, siteOrigin = '', docs = [] 
   // 带上一页纸有没有、多少字——一页纸页面的左栏会顺带标出来。
   const lessonsOfCourse = record => sorted
     .filter(item => item.courseName === record.courseName)
-    .sort((a, b) => String(a.publishedAt).localeCompare(String(b.publishedAt)))
+    .sort(compareLessonAscending)
     .map(item => ({
       slug: item.slug,
       lessonTitle: item.lessonTitle,
@@ -1737,16 +1812,17 @@ export function writeSite({ records = [], outputDir, siteOrigin = '', docs = [] 
       courseLessons: lessonsOfCourse(record)
     }))
     // 同时写出一份 Markdown：页面上的「下载 / 复制 Markdown」直接取它，
-    // 正文全文就不必再内嵌进 HTML（那会让每页翻一倍）
-    const fileName = String(record.slug).split('/').pop()
-    write(`md/${fileName}.md`, `${record.markdown || ''}\n`)
+    // 正文全文就不必再内嵌进 HTML（那会让每页翻一倍）。
+    // 路径必须带课程：只按课次命名的话，两门课同一天同名课次会互相覆盖
+    // （后发布的那节把先发布的正文顶掉）。唯一实现见 markdown-path.mjs。
+    write(markdownPath(record), `${record.markdown || ''}\n`)
     // 一页纸：有就写出来（没有的课次不占位，页面上的入口只在有时出现）
     if (record.onepage?.markdown) {
       write(`${onepageSlug(record.slug)}.html`, renderOnepagePageHtml(record, {
         siteOrigin,
         courseLessons: lessonsOfCourse(record)
       }))
-      write(`md/${fileName}-一页纸.md`, `${record.onepage.markdown || ''}\n`)
+      write(onePageMarkdownPath(record), `${record.onepage.markdown || ''}\n`)
     }
   }
 

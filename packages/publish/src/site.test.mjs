@@ -21,6 +21,7 @@ import {
   renderTermIndexPage,
   writeSite
 } from './site.mjs'
+import { markdownPath, onePageMarkdownPath } from './markdown-path.mjs'
 
 const NOTE = [
   '# 第10-12节 共犯与罪数',
@@ -50,7 +51,8 @@ const record = (over = {}) => buildNoteRecord({
   teacher: '车浩',
   lessonTitle: '第10-12节 共犯与罪数',
   markdown: NOTE,
-  publishedAt: '2026-09-25T00:00:00.000Z',
+  firstPublishedAt: '2026-09-25T00:00:00.000Z',
+  updatedAt: '2026-09-25T00:00:00.000Z',
   ...over
 })
 
@@ -64,7 +66,12 @@ test('a record carries summary, headings and metadata', () => {
   const built = record()
   assert.equal(built.slug, 'notes/刑法分论/第10-12节-共犯与罪数')
   assert.equal(built.courseName, '刑法分论')
-  assert.equal(built.publishedAt, '2026-09-25T00:00:00.000Z')
+  // 三个时间字段各管一件事：课次日期、首次进站、最近一次重新发布
+  assert.equal(built.lessonDate, '2026-09-25', '标题里没有日期时退回首次发布的那天')
+  assert.equal(built.lessonDateSource, 'published')
+  assert.equal(built.firstPublishedAt, '2026-09-25T00:00:00.000Z')
+  assert.equal(built.updatedAt, '2026-09-25T00:00:00.000Z')
+  assert.equal('publishedAt' in built, false, 'publishedAt 已拆成 lessonDate / firstPublishedAt / updatedAt')
   assert.match(built.summary, /共犯的成立需要共同故意与共同行为/)
   assert.ok(built.summary.length <= 151, '摘要应被截断')
   // ## 课程概览 / ### 核心问题 / ### 一、共犯… / ## 知识连接
@@ -283,9 +290,9 @@ test('the reading page extras match what the reader asked for', () => {
 
 test('the index groups by course and lists newest first', () => {
   const html = renderIndexPage([
-    record({ lessonTitle: '第1-2节', publishedAt: '2026-09-01T00:00:00.000Z' }),
-    record({ lessonTitle: '第10-12节 共犯与罪数', publishedAt: '2026-09-25T00:00:00.000Z' }),
-    record({ courseName: '国际法学', lessonTitle: '第3-4节', publishedAt: '2026-09-10T00:00:00.000Z' })
+    record({ lessonTitle: '第1-2节', firstPublishedAt: '2026-09-01T00:00:00.000Z' }),
+    record({ lessonTitle: '第10-12节 共犯与罪数', firstPublishedAt: '2026-09-25T00:00:00.000Z' }),
+    record({ courseName: '国际法学', lessonTitle: '第3-4节', firstPublishedAt: '2026-09-10T00:00:00.000Z' })
   ])
   assert.match(html, /<h2>刑法分论<\/h2>/, '一门课一组')
   assert.match(html, /<h2>国际法学<\/h2>/)
@@ -308,8 +315,9 @@ test('writeSite lays out the whole site and can be regenerated from scratch', ()
     'notes.json',
     'notes/刑法分论/第10-12节-共犯与罪数.html',
     // 每篇同时写出一份 Markdown：页面上的下载 / 复制 Markdown 取它，
-    // 正文全文就不必再内嵌进 HTML（那会让每页翻一倍）
-    'md/第10-12节-共犯与罪数.md',
+    // 正文全文就不必再内嵌进 HTML（那会让每页翻一倍）。
+    // 路径带课程：只按课次命名时，两门课同一天同名课次会互相覆盖
+    'md/刑法分论/第10-12节-共犯与罪数.md',
     'concepts/index.html',
     'statutes/index.html',
     'cases/index.html',
@@ -329,6 +337,11 @@ test('writeSite lays out the whole site and can be regenerated from scratch', ()
   assert.equal(index.count, 1)
   assert.equal(index.notes[0].slug, 'notes/刑法分论/第10-12节-共犯与罪数')
   assert.equal('markdown' in index.notes[0], false, '索引里不带正文，避免索引文件过大')
+  // 索引里带三个时间字段：MCP、日报、首页都从这里取，缺一个就会退回"发布的那个时间"
+  assert.equal(index.notes[0].lessonDate, '2026-09-25')
+  assert.equal(index.notes[0].firstPublishedAt, '2026-09-25T00:00:00.000Z')
+  assert.equal(index.notes[0].updatedAt, '2026-09-25T00:00:00.000Z')
+  assert.equal('publishedAt' in index.notes[0], false)
 
   // 全量重写：删除的笔记不会残留在索引里
   const second = writeSite({ records: [], outputDir: dir })
@@ -338,8 +351,8 @@ test('writeSite lays out the whole site and can be regenerated from scratch', ()
 
 test('the feed lists the newest notes first and points at their pages', () => {
   const feed = renderFeed([
-    record({ lessonTitle: '第1-2节', publishedAt: '2026-09-01T00:00:00.000Z' }),
-    record({ lessonTitle: '第10-12节 共犯与罪数', publishedAt: '2026-09-25T00:00:00.000Z' })
+    record({ lessonTitle: '第1-2节', firstPublishedAt: '2026-09-01T00:00:00.000Z' }),
+    record({ lessonTitle: '第10-12节 共犯与罪数', firstPublishedAt: '2026-09-25T00:00:00.000Z' })
   ], { siteOrigin: 'https://course.law-tech.dev' })
   assert.match(feed, /^<\?xml version="1.0" encoding="UTF-8"\?>/)
   assert.match(feed, /<link>https:\/\/course\.law-tech\.dev\/notes\//)
@@ -504,6 +517,36 @@ test('keywords chosen while writing the brief win over the ranked fallback', () 
   assert.equal(chosen.keywordsSource, 'brief')
   assert.deepEqual(chosen.keywords, ['法人人格否认', '资本维持', '风险外部化'])
   assert.deepEqual(refreshRecord(chosen).keywords, ['法人人格否认', '资本维持', '风险外部化'], '模型挑的关键词是判断，重建时不能退回排序结果')
+})
+
+test('发布库里的简报与一页纸带着出处（体检工具靠它发现串课）', () => {
+  // 出处只存在于笔记目录里的那个文件是不够的：library.json 才是事后追查的唯一线索，
+  // 所以要随记录一起落盘（tools/verify-library.mjs 查的正是这几个字段）。
+  const bound = record({
+    markdown: NOTE,
+    brief: {
+      briefing: 'x'.repeat(80), keyPoints: ['a'], theme: '共犯成立的条件', keywords: ['共同故意'],
+      course: '刑法分论', lesson: '第10-12节 共犯与罪数', replayKey: 'replay-1',
+      sourceChecksum: 'abc123', sourceChars: 1200, generatedAt: '2026-09-25T00:00:00.000Z',
+      trace: { role: 'brief', model: 'x' }
+    },
+    onepage: {
+      title: '一页', markdown: '## 甲\n\n- 一', chars: 10,
+      course: '刑法分论', lesson: '第10-12节 共犯与罪数', sourceChecksum: 'def456'
+    }
+  })
+  assert.deepEqual(Object.keys(bound.brief).sort(),
+    ['briefing', 'course', 'generatedAt', 'keyPoints', 'lesson', 'replayKey', 'sourceChars', 'sourceChecksum'])
+  assert.equal(bound.brief.sourceChecksum, 'abc123')
+  assert.equal(bound.brief.sourceChars, 1200)
+  assert.equal('trace' in bound.brief, false, '模型调用记录不进发布库')
+  assert.equal(bound.onepage.sourceChecksum, 'def456')
+  assert.equal(bound.onepage.course, '刑法分论')
+
+  // 老数据没有出处字段：不带这些键，也不凭空补一个
+  const legacy = record({ markdown: NOTE, brief: { briefing: 'y'.repeat(80), keyPoints: [] } })
+  assert.equal('sourceChecksum' in legacy.brief, false)
+  assert.deepEqual(Object.keys(legacy.brief).sort(), ['briefing', 'keyPoints'])
 })
 
 test('the one-page view is an A4 sheet that cannot overflow', () => {
@@ -686,8 +729,8 @@ test('index entries jump to the section where the term actually appears', () => 
 
 test('the home page lays every course out as a horizontal strip of lessons', () => {
   const html = renderIndexPage([
-    record({ lessonTitle: '第1-2节', publishedAt: '2026-09-01T00:00:00.000Z' }),
-    record({ lessonTitle: '第10-12节 共犯与罪数', publishedAt: '2026-09-25T00:00:00.000Z' })
+    record({ lessonTitle: '第1-2节', firstPublishedAt: '2026-09-01T00:00:00.000Z' }),
+    record({ lessonTitle: '第10-12节 共犯与罪数', firstPublishedAt: '2026-09-25T00:00:00.000Z' })
   ])
   assert.match(html, /<section class="band" data-course="刑法分论">/)
   assert.match(html, /<table class="lesson-table">/)
@@ -754,3 +797,118 @@ test('the pages carry no broken inline script', () => {
   for (const script of scripts) new Function(script)
 })
 
+test('重新发布一节旧课：课程顺序、上一讲下一讲、最新一课都不变', () => {
+  // 用户报的正是这件事：旧课改个错字重新发布（updatedAt 变新），它就窜到首页最上面，
+  // 变成"最新一课"。排序与前后课现在只看 lessonDate，与发布时间无关。
+  const earlier = record({
+    lessonTitle: '2026-09-07第5-6节',
+    firstPublishedAt: '2026-09-08T00:00:00.000Z',
+    updatedAt: '2026-10-01T00:00:00.000Z' // 刚重新发布过
+  })
+  const later = record({
+    lessonTitle: '2026-09-20第2-4节',
+    firstPublishedAt: '2026-09-21T00:00:00.000Z',
+    updatedAt: '2026-09-21T00:00:00.000Z'
+  })
+  assert.equal(earlier.lessonDate, '2026-09-07')
+  assert.equal(later.lessonDate, '2026-09-20')
+
+  const home = renderIndexPage([earlier, later])
+  assert.ok(home.indexOf('2026-09-20第2-4节') < home.indexOf('2026-09-07第5-6节'),
+    '最新一课是最近上过的那节，不是最近重新发布的那节')
+  assert.match(home, /<td class="lesson-date">2026-09-07<\/td>/, '首页日期列写的是上课日期')
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-site-'))
+  writeSite({ records: [earlier, later], outputDir: dir })
+  const older = fs.readFileSync(path.join(dir, 'notes/刑法分论/2026-09-07第5-6节.html'), 'utf8')
+  const newer = fs.readFileSync(path.join(dir, 'notes/刑法分论/2026-09-20第2-4节.html'), 'utf8')
+  assert.match(older, /<span>下一讲<\/span><a href="notes\/刑法分论\/2026-09-20第2-4节\.html">/, '重新发布不改下一讲')
+  assert.match(newer, /<span>上一讲<\/span><a href="notes\/刑法分论\/2026-09-07第5-6节\.html">/, '上一讲同样按上课日期定')
+  assert.ok(!/<span>上一讲<\/span>/.test(older), '第一节没有上一讲')
+  // 左栏课次表按上课日期从早到晚
+  const rail = newer.match(/<ol class="lessons">([\s\S]*?)<\/ol>/)[1]
+  assert.ok(rail.indexOf('2026-09-07第5-6节') < rail.indexOf('2026-09-20第2-4节'))
+})
+
+test('两门课同一天同名课次各写一份 Markdown，不再互相覆盖', () => {
+  // 旧写法只取 slug 最后一段，两门课同一天同一课次名的正文会互相顶掉
+  const shangfa = record({ courseName: '商法概论', lessonTitle: '2026-10-12第1-2节', markdown: '# 商法概论第一节\n\n公司的特征。' })
+  const minsu = record({ courseName: '民事诉讼法', lessonTitle: '2026-10-12第1-2节', markdown: '# 民事诉讼法第一节\n\n管辖的确定。' })
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-site-'))
+  const site = writeSite({ records: [shangfa, minsu], outputDir: dir, siteOrigin: 'https://course.law-tech.dev' })
+
+  assert.equal(markdownPath(shangfa), 'md/商法概论/2026-10-12第1-2节.md')
+  assert.equal(markdownPath(minsu), 'md/民事诉讼法/2026-10-12第1-2节.md')
+  for (const relative of [markdownPath(shangfa), markdownPath(minsu)]) {
+    assert.ok(site.written.includes(relative), relative + ' 要写出来')
+  }
+  assert.match(fs.readFileSync(path.join(dir, markdownPath(shangfa)), 'utf8'), /公司的特征/)
+  assert.match(fs.readFileSync(path.join(dir, markdownPath(minsu)), 'utf8'), /管辖的确定/)
+
+  // 笔记页的下载链接、llms.txt、MCP 的请求路径三者同源
+  const page = fs.readFileSync(path.join(dir, 'notes/商法概论/2026-10-12第1-2节.html'), 'utf8')
+  const href = page.match(/<a href="([^"]+)" download title="下载 Markdown"/)[1]
+  assert.equal(decodeURIComponent(href), '/' + markdownPath(shangfa))
+  const llms = fs.readFileSync(path.join(dir, 'llms.txt'), 'utf8')
+  assert.match(llms, /\[Markdown 全文\]\(https:\/\/course\.law-tech\.dev\/md\/商法概论\/2026-10-12第1-2节\.md\)/)
+  assert.match(llms, /\[Markdown 全文\]\(https:\/\/course\.law-tech\.dev\/md\/民事诉讼法\/2026-10-12第1-2节\.md\)/)
+  assert.match(llms, /md\/<课程>\/<课次>\.md/)
+})
+
+test('RSS 的 pubDate 与条目顺序用首次进站时间，重新发布旧课不会把它顶回顶部', () => {
+  const earlier = record({
+    lessonTitle: '2026-09-07第5-6节',
+    firstPublishedAt: '2026-09-08T00:00:00.000Z',
+    updatedAt: '2026-10-01T00:00:00.000Z'
+  })
+  const later = record({ lessonTitle: '2026-09-20第2-4节', firstPublishedAt: '2026-09-21T00:00:00.000Z', updatedAt: '2026-09-21T00:00:00.000Z' })
+  const feed = renderFeed([earlier, later], { siteOrigin: 'https://course.law-tech.dev' })
+  assert.ok(feed.indexOf('2026-09-20第2-4节') < feed.indexOf('2026-09-07第5-6节'), '订阅器里新的在前')
+  assert.ok(feed.includes('<pubDate>' + new Date('2026-09-08T00:00:00.000Z').toUTCString() + '</pubDate>'),
+    'pubDate 是首次进站时间，不是最近一次重新发布时间')
+  assert.ok(!feed.includes(new Date('2026-10-01T00:00:00.000Z').toUTCString()), '重新发布的时间不进 pubDate')
+})
+
+test('老发布库只有 publishedAt：读进来时迁移成三个字段，且只迁移一次', () => {
+  const legacy = {
+    slug: 'notes/商法概论/2026-09-20第2-4节',
+    courseName: '商法概论',
+    lessonTitle: '2026-09-20第2-4节',
+    publishedAt: '2026-10-01T00:00:00.000Z',
+    markdown: '# 2026-09-20第2-4节\n\n## 课程概览\n\n正文。'
+  }
+  const migrated = refreshRecord(legacy)
+  assert.equal(migrated.lessonDate, '2026-09-20', '课次日期从标题里迁移出来')
+  assert.equal(migrated.lessonDateSource, 'title')
+  assert.equal(migrated.firstPublishedAt, '2026-10-01T00:00:00.000Z')
+  assert.equal(migrated.updatedAt, '2026-10-01T00:00:00.000Z')
+  assert.equal('publishedAt' in migrated, false, 'publishedAt 不再留在记录里')
+  // 幂等：再次读取不会把已有的 lessonDate 重算成别的东西
+  assert.equal(refreshRecord(migrated).lessonDate, '2026-09-20')
+  assert.equal(refreshRecord(migrated).lessonDateSource, 'title')
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-site-'))
+  writeSite({ records: [legacy], outputDir: dir })
+  const indexed = readSiteIndex(dir).notes[0]
+  assert.equal(indexed.lessonDate, '2026-09-20')
+  assert.equal(indexed.firstPublishedAt, '2026-10-01T00:00:00.000Z')
+  const home = fs.readFileSync(path.join(dir, 'index.html'), 'utf8')
+  assert.match(home, /<td class="lesson-date">2026-09-20<\/td>/, '老库重建后首页日期列也是上课日期')
+})
+
+test('笔记页 meta 写课次日期；有了一页纸之后笔记页下载的仍然是整篇笔记', () => {
+  const built = record({
+    markdown: NOTE,
+    onepage: { title: '共犯成立的条件', markdown: '## 一、成立条件\n\n- 共同故意', chars: 12 }
+  })
+  const note = renderNotePage(built, { siteOrigin: '' })
+  assert.match(note, /2026-09-25 课次/, 'meta 行写的是课次日期')
+  assert.ok(!/\d{4}-\d{2}-\d{2} 发布/.test(note), '不再出现"哪天发布的"')
+  const noteHref = note.match(/<a href="([^"]+)" download title="下载 Markdown"/)[1]
+  assert.equal(decodeURIComponent(noteHref), '/' + markdownPath(built), '笔记页下载的是整篇笔记')
+  assert.ok(!noteHref.includes('-一页纸'))
+
+  const onepagePage = renderOnepagePageHtml(built, { siteOrigin: '' })
+  const onepageHref = onepagePage.match(/<a href="([^"]+)" download title="下载 Markdown"/)[1]
+  assert.equal(decodeURIComponent(onepageHref), '/' + onePageMarkdownPath(built), '一页纸页面下载的是一页纸')
+})

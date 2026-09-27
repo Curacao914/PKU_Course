@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import { ToolError } from './errors.mjs'
-import { normalizeRecord, noteFileName } from './records.mjs'
+import { normalizeRecord } from './records.mjs'
 
 /**
  * 两种数据源，同一套接口：
@@ -17,6 +17,25 @@ import { normalizeRecord, noteFileName } from './records.mjs'
 
 export const DEFAULT_SITE_ORIGIN = 'https://course.law-tech.dev'
 export const DEFAULT_TTL_SECONDS = 60
+
+/**
+ * 一条记录在站点上的 Markdown 地址：/md/<课程>/<课次>.md（已做百分号编码）。
+ *
+ * 与 publish 的 markdown-path.mjs 是同一条规则，为什么在这里再写一遍：
+ * 这个包要能单独复制到任何一台机器上跑（挂 MCP 时只给它一条命令），依赖越少越好——
+ * records.mjs 开头那段"不 import @course/publish"的理由同样适用于这里。规则只有一条，
+ * 改一边记得改另一边（两边各有测试钉住同一个形状）。
+ *
+ * 旧写法取的是 slug 的最后一段（只有课次、没有课程）：两门课同一天同名课次
+ * （"2026-10-12第1-2节"）会取到同一份正文，而站点上它们本来就是两份文件。
+ */
+export function markdownPathOf(slug) {
+  const parts = String(slug ?? '').split('/').map(part => part.trim()).filter(Boolean)
+  const rest = parts[0] === 'notes' ? parts.slice(1) : parts
+  // 与 publish 一致的兜底：空 slug 给 note，目录穿越段换掉
+  const segments = (rest.length ? rest : ['note']).map(part => (part === '.' || part === '..' ? 'note' : part))
+  return `/md/${segments.map(segment => encodeURIComponent(segment)).join('/')}.md`
+}
 
 export function normalizeOrigin(origin) {
   return String(origin || DEFAULT_SITE_ORIGIN).trim().replace(/\/+$/, '') || DEFAULT_SITE_ORIGIN
@@ -124,7 +143,8 @@ export function createRemoteSiteSource({
       const key = String(slug)
       const cached = markdownCache.get(key)
       if (cached && now() - cached.at < ttl) return cached.text
-      const url = `${base}/md/${encodeURIComponent(noteFileName(key))}.md`
+      // 路径与站点写出的文件同源（publish 的 markdown-path.mjs / 上面的 markdownPathOf）
+      const url = `${base}${markdownPathOf(key)}`
       const response = await fetchChecked(url, 'markdown')
       const text = await response.text()
       markdownCache.set(key, { at: now(), text })

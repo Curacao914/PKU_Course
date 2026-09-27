@@ -11,6 +11,8 @@
  *      写上之后要能留住（存浏览器），并且下划线"从左到右画出来"、高亮"从左到右刷过去"。
  */
 
+import { markdownUrl, onePageMarkdownUrl } from './markdown-path.mjs'
+
 export const READER_ICONS = {
   sun: '<circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M4.6 4.6l1.6 1.6M17.8 17.8l1.6 1.6M2.5 12h2.2M19.3 12h2.2M4.6 19.4l1.6-1.6M17.8 6.2l1.6-1.6"/>',
   moon: '<path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"/>',
@@ -102,12 +104,14 @@ const PREF_CORE = String.raw`
  * 那要在这台 2 核机器上装一套排版引擎，而读者的浏览器本来就会排版。
  */
 export function toolBar(record = {}) {
-  // 在一页纸页面上，下载的应当是那一页纸本身，而不是整篇笔记
-  const base = String(record.slug || '').split('/').pop()
-  const fileName = `${base}${record.onepage ? '-一页纸' : ''}.md`
+  // 一页纸页面上下载的是那一页纸本身，笔记页下载的是整篇笔记。
+  // 判据是页面类型（onepagePage），而不是"这节课有没有一页纸"——旧写法用后者，
+  // 于是凡是有过一页纸的课次，笔记页上的下载按钮给出的都是一页纸。
+  // 路径本身来自 markdown-path.mjs：与写文件、llms.txt、MCP 取正文是同一条。
+  const href = record.onepagePage ? onePageMarkdownUrl(record) : markdownUrl(record)
   return [
     '<div class="tools" id="tools">',
-    `<a href="/md/${encodeURIComponent(fileName)}" download title="下载 Markdown" aria-label="下载 Markdown">${svgIcon('export')}</a>`,
+    `<a href="${href}" download title="下载 Markdown" aria-label="下载 Markdown">${svgIcon('export')}</a>`,
     `<button type="button" data-tool="print" title="打印 / 存为 PDF" aria-label="打印或存为 PDF">${svgIcon('printer')}</button>`,
     `<button type="button" data-tool="copy" title="复制 Markdown" aria-label="复制 Markdown">${svgIcon('copy')}</button>`,
     `<button type="button" data-tool="focus" title="专注模式" aria-label="专注模式">${svgIcon('focus')}</button>`,

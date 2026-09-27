@@ -1,4 +1,7 @@
 import { escapeHtml, extractHeadings, renderMarkdown, summarizeMarkdown } from './markdown.mjs'
+// 课次先后按上课日期，Markdown 地址与站点写出的文件同源（两个唯一实现都在这里引）
+import { compareLessonAscending } from './lesson-date.mjs'
+import { markdownPath, onePageMarkdownPath } from './markdown-path.mjs'
 
 /**
  * 站点上的产品文档：给人和给 AI 读的同一份内容。
@@ -67,12 +70,17 @@ export function renderLlmsTxt({ records = [], siteOrigin = '', pages = [] } = {}
       `- ${course}（${items.length} 讲）`,
       ...items
         .slice()
-        .sort((a, b) => String(a.publishedAt).localeCompare(String(b.publishedAt)))
+        .sort(compareLessonAscending)
         .map(item => {
           const theme = item.theme ? `主题 — ${item.theme}` : ''
           const keywords = (item.keywords || []).length ? `关键词 — ${item.keywords.join('、')}` : ''
           const detail = [theme, keywords].filter(Boolean).join('｜')
-          return `  - [${item.lessonTitle}](${absolute(`/${item.slug}.html`)})${detail ? `：${detail}` : ''}`
+          const lines = [`  - [${item.lessonTitle}](${absolute(`/${item.slug}.html`)})${detail ? `：${detail}` : ''}`]
+          // 顺带给出 Markdown 原文地址：AI 取全文不必再解析 HTML。
+          // 地址与站点写出的文件同源（markdown-path.mjs），不会出现"链接指向一个不存在的文件"
+          lines.push(`    - [Markdown 全文](${absolute(`/${markdownPath(item)}`)})`)
+          if (item.onepage?.markdown) lines.push(`    - [一页纸 Markdown](${absolute(`/${onePageMarkdownPath(item)}`)})`)
+          return lines.join('\n')
         })
     ].join('\n')),
     '',
@@ -85,7 +93,8 @@ export function renderLlmsTxt({ records = [], siteOrigin = '', pages = [] } = {}
     '## 怎么用',
     '- 只想知道"有哪些课"：读上面这份清单即可，不必抓页面。',
     '- 要按主题取用内容：用笔记 MCP（见「机器可读入口」第一条），它按 课程 → 课次 → 正文 分层返回，避免一次灌进过多文本。',
-    '- 要全文：`/md/<课次>.md`（每篇笔记发布时同时写出一份 Markdown），一页纸则是 `/md/<课次>-一页纸.md`。'
+    // 路径带课程：只按课次命名的话，两门课同一天同名课次会互相覆盖
+    '- 要全文：`/md/<课程>/<课次>.md`（每篇笔记发布时同时写出一份 Markdown），一页纸则是 `/md/<课程>/<课次>-一页纸.md`。'
   ]
   return lines.join('\n')
 }

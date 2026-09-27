@@ -3,8 +3,7 @@ import http from 'node:http'
 import { fileURLToPath } from 'node:url'
 
 import { createNotesService } from '../service.mjs'
-import { createSource } from '../sources.mjs'
-import { noteFileName } from '../records.mjs'
+import { createSource, markdownPathOf } from '../sources.mjs'
 
 /**
  * 测试夹具：一份 fixture library.json + 一个"假站点"。
@@ -37,8 +36,9 @@ export async function startFakeSite({ records = readLibrary() } = {}) {
     }
     const match = url.pathname.match(/^\/md\/(.+)$/)
     if (match) {
-      const name = decodeURIComponent(match[1]).replace(/\.md$/i, '')
-      const record = records.find(item => noteFileName(item.slug) === name)
+      // 与客户端同一条路径规则（sources.mjs 的 markdownPathOf）：夹具必须按真实站点
+      // 的路径发文件，否则测试会"绿灯通过但线上取不到正文"
+      const record = records.find(item => markdownPathOf(item.slug) === url.pathname)
       if (!record) {
         res.writeHead(404, { 'content-type': 'text/plain' })
         res.end('not found')
