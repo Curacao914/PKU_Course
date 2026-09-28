@@ -265,9 +265,19 @@ export function openLedger(databasePath = ':memory:', options = {}) {
         if (!ACTIONABLE_STAGES.includes(task.stage)) {
           return { claimed: false, reason: `terminal:${task.stage}`, task }
         }
-        // 自己已经持有的租约：续租而不是拒绝。
-        // 编排循环会先领取再调用各阶段命令，命令内部还会再领一次；如果这里把
-        // 「自己持有」也当成冲突，链路在第一步就会失败。
+        // 自己已经持有的有效租约：**只续租，不算新的一次尝试**。
+        //
+        // 这条路径在真实链路里每次都会走到：编排循环先 claimNext() 领一次，随后
+        // download / transcribe / notes / publish 各子命令内部再 claimForRun() 领一次。
+        // 如果每次都 attempts += 1，一次真正的失败会被记成两三次——"连续失败到上限就停下"
+        // 的闸门于是提前触发（用户看到的是"明明只失败了一次，任务就停了"）。
+        // 语义上它也不该算：attempts 是"这个阶段试了几次"，而"同一个人接着干"不是新的一试。
+        const heldByMe = Boolean(task.lease_expires_at) && task.lease_expires_at > at && task.claimed_by === workerId
+        if (heldByMe) {
+          statements.heartbeat.run(leaseUntil, at, at, task.id, workerId)
+          return { claimed: true, reason: 'renewed', task: this.getTask(key) }
+        }
+        // 别人持有的有效租约：拒绝
         if (task.lease_expires_at && task.lease_expires_at > at && task.claimed_by !== workerId) {
           return { claimed: false, reason: 'leased', task }
         }

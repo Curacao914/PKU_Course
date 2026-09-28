@@ -309,6 +309,55 @@ test('delivery enqueue validates its inputs', () => {
   db.close()
 })
 
+test('同一 worker 再次领取 = 续租，不算新的一次尝试（否则一次失败会被记成好几次）', () => {
+  // 真实链路里每一步都会走到这里：编排循环先 claimNext() 领一次，
+  // 随后各阶段子命令内部再 claimForRun() 领一次。每次都 attempts+=1 的话，
+  // 一次真正的失败会被记成两三次，"连续失败到上限就停下"的闸门于是提前触发。
+  const db = ledger()
+  db.discoverReplays([REPLAY])
+  const claimed = db.claimNext({ workerId: 'w1', leaseSeconds: 900, now: '2026-09-25T00:00:00.000Z' })
+  assert.equal(claimed.attempts, 1, '第一次领取算一次尝试')
+
+  const again = db.claimTask({ replayKey: REPLAY.replay_key, workerId: 'w1', leaseSeconds: 900, now: '2026-09-25T00:00:05.000Z' })
+  assert.equal(again.claimed, true)
+  assert.equal(again.reason, 'renewed', '同一 worker 的有效租约是续租')
+  assert.equal(again.task.attempts, 1, '续租不得再累加 attempts')
+
+  // 别的 worker 在同一时间仍然领不走
+  const other = db.claimTask({ replayKey: REPLAY.replay_key, workerId: 'w2', leaseSeconds: 900, now: '2026-09-25T00:00:06.000Z' })
+  assert.equal(other.claimed, false)
+  assert.equal(other.reason, 'leased')
+
+  // 租约过期之后：算新的一次尝试
+  const afterExpiry = db.claimTask({ replayKey: REPLAY.replay_key, workerId: 'w1', leaseSeconds: 900, now: '2026-09-25T01:00:00.000Z' })
+  assert.equal(afterExpiry.claimed, true)
+  assert.equal(afterExpiry.reason, 'claimed')
+  assert.equal(afterExpiry.task.attempts, 2, '租约过期后重新领取才算新的一次')
+  db.close()
+})
+
+test('连续失败计数：一次失败只 +1（cycle 领一次 + 子命令续租，不重复计）', () => {
+  const db = ledger()
+  db.discoverReplays([REPLAY])
+  const task = db.claimNext({ workerId: 'w1', now: '2026-09-25T00:00:00.000Z' })
+  // 模拟 download 子命令内部再领一次（claimForRun 的路径），然后失败
+  db.claimTask({ replayKey: REPLAY.replay_key, workerId: 'w1', now: '2026-09-25T00:00:01.000Z' })
+  db.reportStage({ id: task.id, stage: 'downloading', error: '教学网登录失败', now: '2026-09-25T00:00:02.000Z' })
+  assert.equal(db.getTask(REPLAY.replay_key).attempts, 1, '一次真实失败只能增加一次')
+
+  // 第二轮：失败后任务仍停在可执行的 downloading 阶段（真实链路就是这样重试的），
+  // 再领一次、子命令续租、再失败 → 2
+  db.claimNext({ workerId: 'w1', now: '2026-09-25T00:11:00.000Z' })
+  db.claimTask({ replayKey: REPLAY.replay_key, workerId: 'w1', now: '2026-09-25T00:11:01.000Z' })
+  db.reportStage({ id: task.id, stage: 'downloading', error: '教学网登录失败', now: '2026-09-25T00:11:02.000Z' })
+  assert.equal(db.getTask(REPLAY.replay_key).attempts, 2, '两次失败 = 2，不是 4')
+
+  // 成功一次就清零（语义：当前阶段连续失败次数）
+  db.reportStage({ id: task.id, stage: 'downloaded', now: '2026-09-25T00:12:00.000Z' })
+  assert.equal(db.getTask(REPLAY.replay_key).attempts, 0)
+  db.close()
+})
+
 test('投递租约：领取后进程挂掉，租约过期会被重新领取（通知不会静默消失）', () => {
   const db = ledger()
   db.enqueueDelivery({ dedupeKey: 'note:1', purpose: 'course-note', bodyText: '正文', scheduledFor: '2026-09-25T00:00:00.000Z' })

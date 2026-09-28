@@ -1499,6 +1499,32 @@ test('备份：快照写完立刻验证、记 sha256 清单；配了异地就必
   assert.ok(failurePayload.offsite.failed.length >= 1)
 })
 
+test('cycle：一次真实失败只把连续失败计数 +1（领取与子命令续租不重复计）', async () => {
+  // 真实故障：cycle 先 claimTask 领一次，download 子命令内部 claimForRun 对同一 worker
+  // 又领一次，底层每次 attempts+=1 —— 一次失败被记成两次，闸门提前触发。
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-attempts-'))
+  // acquire 是"返回适配器的函数"，不是适配器本身（第一版写错了，失败原因记成 acquire is not a function）
+  const { deps, ledger } = harness({
+    acquire: async () => ({
+      discover: async () => ({ loginMode: 'existing-session', courses: [] }),
+      download: async () => { throw new Error('教学网登录失败') }
+    })
+  })
+  const env = {
+    ...deps.env,
+    COURSE_WORKER_SCRATCH_DIR: dir,
+    PKU_USERNAME: 'u', PKU_PASSWORD: 'p',
+    DASHSCOPE_API_KEY: 'sk-x', R2_ENDPOINT: 'https://x.r2.cloudflarestorage.com',
+    COURSE_AI_API_KEY: 'sk-ai'
+  }
+  ledger.discoverReplays([{ replay_key: 'replay-1', course_key: 'course-abc', course_name: '刑法分论', title: '2026-05-27第10-12节' }])
+
+  await runCli(['cycle', '--replay-key', 'replay-1', '--max-tasks', '1'], { ...deps, env })
+  const task = ledger.getTask('replay-1')
+  assert.equal(task.attempts, 1, '一次真实失败只能增加一次连续失败计数')
+  assert.match(String(task.last_error || ''), /登录失败|教学网/, '失败原因要记下来')
+})
+
 test('verify 不加 --yes 只做前置检查：绝不下载、不转写、不发推送', async () => {
   // 真实教训：排查问题时顺手敲了一下 verify，它真跑了一整轮——下载 1.3G、开始转写
   // （按小时计费），跑下去还会写笔记并可能给读者推一条。这个闸门就是为此加的。
