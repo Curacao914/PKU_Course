@@ -59,7 +59,7 @@ function resolveCourse(records, course) {
   throw new ToolError(`找不到课程「${course}」。现有课程：${names.join(' / ') || '（发布库是空的）'}`)
 }
 
-export function createNotesService({ source, siteOrigin = '' } = {}) {
+export function createNotesService({ source, siteOrigin = '', semantic = null } = {}) {
   if (!source) throw new Error('createNotesService 需要 source（createSource 的产物）')
   // canonical URL：AI 引用来源时要给用户能直接点开的地址
   const origin = String(siteOrigin || 'https://course.law-tech.dev').replace(/\/+$/, '')
@@ -70,6 +70,18 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
    * 远程数据源据此断掉正在飞的请求（本地库是读一次文件，不受影响）。
    */
   const listNotes = context => source.listNotes({ signal: context?.signal })
+
+  /**
+   * 语义命中时给的片段：索引里只有向量，正文得从记录里现取。
+   * 取那一节的 ownBody 前 120 字——与字面检索的片段一样"自带上下文"，读者不必点进去才知道是什么。
+   */
+  function sectionSnippet (record, sectionId) {
+    const markdown = String(record.markdown || '')
+    if (!markdown) return ''
+    const section = splitSections(markdown).find(item => item.id === sectionId)
+    const body = String(section?.ownBody || '').replace(/s+/g, ' ').trim()
+    return body ? clip(body, 120) : ''
+  }
 
   /** 第一层：课程总览。 */
   async function listCourses({ query = '', limit = 50 } = {}, context = {}) {
@@ -177,6 +189,25 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
     if (!found.terms.length) {
       throw new ToolError(`查询「${text}」里没有可检索的词：去掉疑问词与虚词之后为空，请给出具体的术语、法条或人名。`)
     }
+
+    /**
+     * 语义回退（Phase 5.2 收尾，见 semantic.mjs 的定位说明）。
+     *
+     * **只在字面检索一条都没命中时**走一次：字面命中就用字面（零成本、可解释）。
+     * 三条纪律：命中带 similarity 与 semantic:true（调用方必须把"这是猜着找的"标出来）；
+     * 字面为空这件事本身也报出去（lexicalTotal=0）；服务慢/挂/超时都静默退回"没有结果"。
+     */
+    let hits = found.hits
+    let semanticUsed = false
+    if (!hits.length && semantic?.enabled) {
+      try {
+        const fallback = await semantic.search({ query: text, records: scoped, snippetOf: sectionSnippet, limit })
+        if (fallback.length) { hits = fallback; semanticUsed = true }
+      } catch {
+        // 回退失败不是错误：调用方拿到的仍然是"字面没有命中"这个事实
+        semanticUsed = false
+      }
+    }
     return {
       query: text,
       course: course ? scoped[0]?.courseName || String(course) : '',
@@ -184,8 +215,11 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
       // 实际用到哪一层看 coverage / escalated
       includeBody: Boolean(includeBody),
       ...found,
+      lexicalTotal: found.total,
+      semantic: { used: semanticUsed, enabled: Boolean(semantic?.enabled) },
+      total: hits.length,
       limit,
-      hits: found.hits.slice(0, limit)
+      hits: hits.slice(0, limit)
     }
   }
 

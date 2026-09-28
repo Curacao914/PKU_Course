@@ -185,11 +185,29 @@ export function createRequestHandler({
   const ensureService = async () => {
     if (notesService || serviceFailed) return { service: notesService, failed: serviceFailed }
     try {
-      const { createNotesService, createLocalLibrarySource } = await import('@course/notes-mcp')
+      const { createNotesService, createLocalLibrarySource, createSemanticFallback } = await import('@course/notes-mcp')
       const libraryPath = path.join(normalizedRoot, 'library.json')
+      /**
+       * 语义回退（Phase 5.2 收尾）：字面检索零命中时才用，见 packages/notes-mcp/src/semantic.mjs。
+       *
+       * 默认**关闭**：公开进程刻意不加载任何机密，而查询向量化要一次带 key 的网络调用。
+       * 要用就在公开环境里放一把**只给 embedding 用**的 key（COURSE_EMBED_API_KEY）；
+       * 没配就静默关闭——而不是让公开进程去读 DASHSCOPE_API_KEY（那是整条流水线的 key）。
+       */
+      const semanticKey = String(process.env.COURSE_EMBED_API_KEY || '')
+      const semanticIndex = String(process.env.COURSE_EMBED_INDEX || path.join(normalizedRoot, 'embeddings.json'))
+      const semantic = createSemanticFallback({
+        indexFile: semanticIndex,
+        apiKey: semanticKey,
+        model: String(process.env.COURSE_EMBED_MODEL || 'text-embedding-v3'),
+        timeoutMs: Number(process.env.COURSE_EMBED_TIMEOUT_MS || 1000),
+        minScore: Number(process.env.COURSE_EMBED_MIN_SCORE || 0.55)
+      })
+      process.stderr.write(`[site] 语义回退：${semantic.enabled ? '已启用' : '未启用（没配 COURSE_EMBED_API_KEY）'}；索引 ${semanticIndex}\n`)
       notesService = createNotesService({
         source: createLocalLibrarySource({ file: libraryPath }),
-        siteOrigin: mcpOrigin
+        siteOrigin: mcpOrigin,
+        semantic
       })
     } catch (error) {
       serviceFailed = error instanceof Error ? error.message : String(error)

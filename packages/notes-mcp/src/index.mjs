@@ -18,4 +18,12 @@ export { TOOL_DEFINITIONS, findTool, toolDefinitions } from './tools.mjs'
 export { INSTRUCTIONS, PREFERRED_PROTOCOL_VERSION, SERVER_INFO, SUPPORTED_PROTOCOL_VERSIONS, createProtocolServer } from './protocol.mjs'
 export { runStdioServer } from './stdio.mjs'
 export { createMcpHttpHandler } from './http.mjs'
+export {
+  createQueryEmbedder,
+  createSemanticFallback,
+  embedTexts,
+  loadEmbeddingIndex,
+  parseEmbeddingIndex,
+  semanticHits
+} from './semantic.mjs'
 export { USAGE, parseServerArgv, resolveSettings } from './settings.mjs'

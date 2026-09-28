@@ -9,6 +9,7 @@ import { checkFreeSpace, createValidatedAcquisitionRuntime, formatBytes } from '
 import {
   addMaterial, guessMaterialIdentity, listMaterials, ocrMaterial, parseInboxName, pendingOcrMaterials, readDecks, unassignedDir
 } from '@course/materials'
+import { embedTexts, loadEmbeddingIndex, splitSections } from '@course/notes-mcp'
 import { buildIntegrationPlan, checkNoteQuality, formatQualityReport, renderIntegrationMarkdown } from '@course/notes'
 
 import { formatInventory, scanArtifactInventory } from './artifact-inventory.mjs'
@@ -959,6 +960,105 @@ export function createCommands(context) {
    * 与 course brief 一样是「只重跑一步」的入口：笔记已经跑完、只想补一页纸时用它，
    * 不必把整条流水线再走一遍。输出 onepage.json，发布时会被带进站点。
    */
+  /**
+   * 建立/更新语义检索的向量索引（Phase 5.2 收尾）。
+   *
+   * 与检索侧同一套单元定义：**一小节一条向量**（标题 + 该节正文），键是 `<slug>#<sectionId>`，
+   * 值里带**内容指纹**——指纹一致的小节直接复用旧向量，所以日常增量几乎不花钱。
+   * 预算纪律照旧：必须给上限（--max-cost 或 COURSE_EMBED_MAX_COST_CNY），
+   * 预计花费超上限在发请求之前就停；用量以接口返回的 usage 为准。
+   * 索引写进站点目录（与 library.json 同处，原子替换）——检索读它，公开进程不加载任何机密。
+   */
+  async function embedRun(options) {
+    const siteRoot = path.resolve(options.options['site-root'] || path.join(config.scratchRoot, 'site'))
+    const libraryFile = path.resolve(options.options.library || path.join(siteRoot, 'library.json'))
+    if (!fs.existsSync(libraryFile)) throw new Error(`找不到发布库 ${libraryFile}（先 course publish，或用 --library 指一份）`)
+    const records = JSON.parse(fs.readFileSync(libraryFile, 'utf8'))
+    const indexFile = path.resolve(options.options.out || path.join(siteRoot, 'embeddings.json'))
+    const apiKey = String(env.COURSE_EMBED_API_KEY || env.DASHSCOPE_API_KEY || '').trim()
+    const capCny = Number(options.options['max-cost'] || env.COURSE_EMBED_MAX_COST_CNY || 0)
+    const model = String(options.options.model || env.COURSE_EMBED_MODEL || 'text-embedding-v3')
+    if (!apiKey) throw new Error('向量化需要 API key：配 COURSE_EMBED_API_KEY 或 DASHSCOPE_API_KEY')
+    if (!(capCny > 0)) throw new Error('必须给花费上限：--max-cost <元> 或 COURSE_EMBED_MAX_COST_CNY（预算纪律）')
+
+    // ① 收集单元（与检索侧同一套：小节 = 标题 + ownBody）
+    const units = []
+    for (const record of records) {
+      const markdown = String(record.markdown || '')
+      if (!markdown.trim()) continue
+      const bodies = new Map(splitSections(markdown).map(section => [section.id, String(section.ownBody || '').trim()]))
+      const sections = Array.isArray(record.sections) && record.sections.length
+        ? record.sections
+        : [...bodies.keys()].map(id => ({ id, title: id, fingerprint: '' }))
+      for (const section of sections) {
+        const body = bodies.get(section.id) || ''
+        if (!body) continue
+        units.push({
+          key: `${record.slug}#${section.id}`,
+          fingerprint: String(section.fingerprint || ''),
+          text: [section.title, body].filter(Boolean).join('\n').trim()
+        })
+      }
+    }
+    if (!units.length) throw new Error('发布库里没有任何可向量化的小节（先跑一次 course publish --rebuild --write-back 让记录带上小节索引）')
+
+    // ② 增量：指纹一致的小节复用旧向量
+    const existing = loadEmbeddingIndex(indexFile).index
+    const items = {}
+    const todo = []
+    for (const unit of units) {
+      const previous = existing?.items?.get(unit.key)
+      if (previous && unit.fingerprint && previous.fingerprint === unit.fingerprint) {
+        items[unit.key] = { fingerprint: unit.fingerprint, vector: previous.vector }
+        continue
+      }
+      todo.push(unit)
+    }
+
+    // ③ 只对"新出现/改过"的小节花钱
+    let stats = { tokens: 0, calls: 0, hits: 0, costCny: 0 }
+    if (todo.length) {
+      const cacheFile = String(options.options.cache || env.COURSE_EMBED_CACHE || path.join(config.scratchRoot, `embeddings-cache-${model}.json`))
+      const result = await embedTexts({
+        texts: todo.map(unit => unit.text),
+        type: 'document',
+        apiKey,
+        model,
+        cacheFile,
+        capCny,
+        onProgress: progress => stderr(`  向量化 ${progress.done}/${progress.total}（已花 ¥${progress.costCny.toFixed(4)}）`)
+      })
+      stats = result.stats
+      todo.forEach((unit, index) => {
+        items[unit.key] = { fingerprint: unit.fingerprint, vector: result.vectors[index] }
+      })
+    }
+
+    const payload = {
+      version: 1,
+      provider: 'dashscope',
+      model,
+      dim: Object.values(items)[0]?.vector?.length || 0,
+      createdAt: new Date().toISOString(),
+      cost: { tokens: stats.tokens, calls: stats.calls, cacheHits: stats.hits, cny: Number(stats.costCny.toFixed(4)), capCny },
+      counts: { units: units.length, reused: units.length - todo.length, embedded: todo.length },
+      items
+    }
+    writeJsonAtomic(indexFile, payload)
+
+    emit({
+      indexFile,
+      units: units.length,
+      reused: units.length - todo.length,
+      embedded: todo.length,
+      dim: payload.dim,
+      costCny: payload.cost.cny,
+      capCny,
+      library: libraryFile
+    }, options)
+    return 0
+  }
+
   /**
    * 只报异常的对账（Phase 5.2 C2）。
    *
@@ -3224,7 +3324,7 @@ export function createCommands(context) {
   return {
     doctor, discover, download, transcribe, notes, materials, balance, publish,
     notify, cycle, verify, status, retry, prune, backup, digest, 'ppt-reminder': pptReminder,
-    brief: briefRun, onepage: onepageRun, integrate: integrateRun, artifacts: artifactsRun, reconcile: reconcileRun,
+    brief: briefRun, onepage: onepageRun, integrate: integrateRun, artifacts: artifactsRun, reconcile: reconcileRun, embed: embedRun,
     'admin-passwd': adminPassword, mcp
   }
 }
@@ -3280,6 +3380,11 @@ export const USAGE = `用法：course <命令> [选项]
                                            只报异常的对账：卡住的任务 / 失败或过期的通知 / 与正文不同源的
                                            派生产物 / 缺课件 / 余额偏低。没有异常时一个字都不说；
                                            有阻塞项才返回 1（交给 cron 告警），--notify 才排通知
+  embed      [--site-root <站点目录>] [--library <library.json>] [--out <embeddings.json>]
+             --max-cost <元> [--model <名称>]
+                                           建立/更新语义检索的向量索引（一小节一条向量，带内容指纹）：
+                                           指纹没变的小节复用旧向量，只对新出现/改过的小节花钱；
+                                           必须给 --max-cost（预算纪律），实际用量以接口返回为准
   artifacts  [--site-root <站点目录>] [--library <library.json>] [--integrations <目录>]
                                            列出所有派生产物（简报/一页纸/章级整合）与当前正文的同源情况：
                                            新鲜 / 失效 / 未绑定 / 孤立。只报告，不自动重做
