@@ -1464,6 +1464,90 @@ async function auditIndexPages(page, site, noteUrl, failures) {
   return results
 }
 
+/**
+ * 手机视口下的两处布局（真实浏览器、真视口）：
+ *   1. 笔记页：目录必须在正文**之前**、课次导航在正文**之后**——手机读者一打开就能跳小节；
+ *   2. 管理台通知记录：窄屏是卡片（两行 grid），拉丁串（course-note / failed / 日期）不逐字硬换行。
+ */
+async function auditMobileLayout (page, site, noteUrl, failures) {
+  const results = []
+  const record = async (name, ok, detail) => {
+    results.push({ name, ok, detail })
+    console.log('  ' + (ok ? '✔' : '✖') + ' ' + name.padEnd(22) + detail)
+    if (!ok) failures.push('移动端 ' + name + '：' + detail)
+  }
+  console.log('移动端布局（390×844）')
+  await page.setViewportSize({ width: 390, height: 844 })
+
+  await page.goto(site.url + noteUrl, { waitUntil: 'domcontentloaded' })
+  await page.waitForTimeout(300)
+  const geometry = await page.evaluate(() => {
+    const at = selector => {
+      const node = document.querySelector(selector)
+      if (!node) return null
+      const rect = node.getBoundingClientRect()
+      return { top: Math.round(rect.top + window.scrollY), visible: rect.width > 0 && rect.height > 0 }
+    }
+    return {
+      article: at('.col article') || at('.col'),
+      toc: at('.rail-right .rail-toggle'),
+      courseNav: at('.rail-left'),
+      detailOpen: Boolean(document.querySelector('.rail-right .rail-toggle details[open]'))
+    }
+  })
+  await record('本页目录在正文之前', Boolean(geometry.toc?.visible && geometry.toc.top < (geometry.article?.top ?? 0)),
+    '目录 top=' + (geometry.toc?.top ?? -1) + '，正文 top=' + (geometry.article?.top ?? -1))
+  // 课次导航（左栏）在夹具里可能只有一节课、渲染为空，所以直接核对**计算样式里的顺序**：
+  // 目录 1 → 正文 2 → 课次导航 3，这正是用户要的移动端阅读顺序。
+  const orders = await page.evaluate(() => ({
+    toc: getComputedStyle(document.querySelector('.rail-right .rail-toggle')).order,
+    article: getComputedStyle(document.querySelector('.col')).order,
+    courseNav: getComputedStyle(document.querySelector('.rail-left')).order
+  }))
+  await record('顺序：目录 < 正文 < 课次导航', Number(orders.toc) < Number(orders.article) && Number(orders.article) < Number(orders.courseNav),
+    'order 目录=' + orders.toc + '，正文=' + orders.article + '，课次导航=' + orders.courseNav)
+  await record('目录默认展开可点', geometry.detailOpen, '折叠块 open=' + geometry.detailOpen)
+  await record('目录链接可点区域足够大', await page.evaluate(() => {
+    const link = document.querySelector('.rail nav.toc a')
+    return Boolean(link && link.getBoundingClientRect().height >= 36)
+  }), '首个目录链接高度 ≥36px')
+
+  // 管理台：通知记录在窄屏是卡片，且不用逐字换行
+  await page.goto(site.url + '/admin', { waitUntil: 'domcontentloaded' })
+  await page.waitForTimeout(400)
+  // 通知记录在「设置」这一栏里：先切到设置栏，再点分类按钮（与主审计同一套路径）
+  await page.click('#tabs [data-tab="settings"], [data-act="tab"][data-value="settings"]').catch(async () => {
+    await page.evaluate(() => {
+      const tab = [...document.querySelectorAll('[data-tab], .tab')].find(node => /设置/.test(node.textContent || ''))
+      if (tab) tab.click()
+    })
+  })
+  await page.waitForTimeout(200)
+  await page.click('#settingsRail [data-act="pick-pane"][data-value="deliveries"]')
+  await page.waitForSelector('.notify-item', { timeout: 5000 }).catch(() => {})
+  await page.waitForTimeout(200)
+  const cardState = await page.evaluate(() => {
+    const row = document.querySelector('.notify-item')
+    if (!row) return { rows: 0 }
+    const style = getComputedStyle(row)
+    const purpose = row.querySelector('.notify-purpose')
+    return {
+      rows: document.querySelectorAll('.notify-item').length,
+      display: style.display,
+      purposeHeight: purpose ? Math.round(purpose.getBoundingClientRect().height) : -1,
+      purposeWidth: purpose ? Math.round(purpose.getBoundingClientRect().width) : -1,
+      purposeText: purpose ? (purpose.textContent || '').trim().slice(0, 20) : ''
+    }
+  })
+  await record('通知记录在窄屏是卡片', cardState.rows > 0 && cardState.display === 'grid',
+    cardState.rows + ' 行，display=' + cardState.display)
+  await record('用途不被逐字换行', cardState.purposeHeight > 0 && cardState.purposeHeight <= 40 && cardState.purposeWidth > 60,
+    '「' + cardState.purposeText + '」' + cardState.purposeWidth + '×' + cardState.purposeHeight + 'px（单行、有宽度）')
+
+  await page.setViewportSize({ width: 1280, height: 900 })
+  return results
+}
+
 async function main() {
   const fixture = buildFixture()
   const calls = []
@@ -1513,6 +1597,8 @@ async function main() {
     await auditSearch(page, site, failures)
     console.log('')
     await auditIndexPages(page, site, fixture.noteUrl, failures)
+    console.log('')
+    await auditMobileLayout(page, site, fixture.noteUrl, failures)
   } finally {
     await browser.close()
     // 浏览器关掉后可能还有 keep-alive 连接挂在服务器上，close() 会一直等它们；

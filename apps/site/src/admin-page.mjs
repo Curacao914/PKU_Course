@@ -208,6 +208,34 @@ button.item:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
   .split{grid-template-columns:1fr}
   .split .col{max-height:none;border-right:0;border-bottom:1px solid var(--line)}
 }
+
+/* 通知记录：宽屏四列一行，窄屏两行卡片。 */
+.notify-list{list-style:none;margin:8px 0 0;padding:0}
+.notify-item{
+  display:grid;grid-template-columns:minmax(0,1fr) 88px 116px minmax(0,1.4fr);gap:10px;
+  align-items:center;padding:8px 4px;border-bottom:1px solid var(--line);
+}
+.notify-item:last-child{border-bottom:0}
+.notify-purpose{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.notify-when{white-space:nowrap}
+.notify-error{min-width:0;overflow-wrap:anywhere}
+
+/* 窄屏：一行放不下四列，改成"用途+状态"一行、"时间"一行、"说明"一行。
+   关键是拉丁串（course-note / failed / 日期）**不许逐字换行**——手机上那会变成
+   一列竖着的字母；宁可整块换到下一行。 */
+@media (max-width:720px){
+  .notify-item{
+    grid-template-columns:minmax(0,1fr) auto;gap:2px 10px;
+    padding:10px 12px;border:1px solid var(--line);border-radius:12px;margin-bottom:8px;
+  }
+  .notify-purpose{grid-column:1;font-weight:600;white-space:nowrap;overflow:visible;text-overflow:clip}
+  .notify-status{grid-column:2;justify-self:end}
+  .notify-when{grid-column:1 / -1}
+  .notify-error{grid-column:1 / -1}
+  /* 移动端点击区稍大一点 */
+  .act,.item{min-height:40px}
+  .top .menu summary{min-width:40px;min-height:40px;display:inline-flex;align-items:center;justify-content:center}
+}
 </style>
 </head>
 <body>
@@ -807,7 +835,7 @@ function maintenancePane () {
 
 function deliveriesPane (deliveries, rows, failed) {
   return '<h2>通知记录</h2><p class="small muted">最近 ' + Math.min(10, deliveries.length) + ' 条</p>' +
-    (rows ? '<table><tbody>' + rows + '</tbody></table>' : '<p class="muted small">队列为空</p>') +
+    (rows ? '<ul class="notify-list">' + rows + '</ul>' : '<p class="muted small">队列为空</p>') +
     (failed ? '<div class="row" style="margin-top:10px"><button class="act primary" data-act="notify-retry">把 ' + failed + ' 条失败通知放回队列</button></div>' : '')
 }
 
@@ -837,11 +865,19 @@ function renderSettings () {
 
   var deliveries = (state.status.ledger && state.status.ledger.deliveries) || []
   var failed = (state.status.todos && state.status.todos.failedDeliveries) || 0
+  // 每条通知一项。用列表而不是表格：表格在窄屏要把四列塞进手机宽度，
+  // 结果 course-note、failed、日期这些拉丁串被逐字硬换行（一列竖着的字母）。
+  // 列表项在宽屏是四列、窄屏是两行卡片（见 .notify-list 的 ≤720px 规则）。
   var rows = deliveries.slice(0, 10).map(function (x) {
     var cls = x.status === 'sent' ? 'ok' : x.status === 'failed' ? 'bad' : ''
-    return '<tr><td class="small">' + esc(x.purpose) + '</td><td><span class="pill ' + cls + '">' + esc(x.status) + '</span></td>' +
-      '<td class="small muted">' + esc(String(x.sent_at || x.created_at || '').slice(5, 16).replace('T', ' ')) + '</td>' +
-      '<td class="tiny muted">' + esc(String(x.last_error || '').slice(0, 60)) + '</td></tr>'
+    var when = String(x.sent_at || x.created_at || '').slice(5, 16).replace('T', ' ')
+    var error = String(x.last_error || '').slice(0, 60)
+    return '<li class="notify-item">' +
+      '<span class="notify-purpose small">' + esc(x.purpose) + '</span>' +
+      '<span class="notify-status"><span class="pill ' + cls + '">' + esc(x.status) + '</span></span>' +
+      '<span class="notify-when small muted">' + esc(when) + '</span>' +
+      '<span class="notify-error tiny muted">' + esc(error) + '</span>' +
+      '</li>'
   }).join('')
 
   var pane = settingsPane()

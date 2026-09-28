@@ -139,15 +139,32 @@ a:hover { color: var(--accent-ink); }
   font-family: var(--sans); font-size: 14px; cursor: pointer; }
 .resume:hover { border-color: var(--accent); }
 .rail-toggle { display: none; }
+/* 只给读屏软件的文本：视觉上不出现，但输入框/按钮就有了可读的名字 */
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
+  clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 @media (max-width: 980px) {
   .shell { grid-template-columns: minmax(0, 1fr); gap: 18px; padding: 22px 18px 96px; }
-  .rail { position: static; max-height: none; order: -1; }
-  .rail-toggle { display: block; }
+  /**
+   * 手机上把左栏拆开：目录放正文**之前**，课程课次导航放正文**之后**。
+   *
+   * 以前整栏用 order:-1 顶到最前、并且把 rail-extra（上下讲/课次导航）直接 display:none。
+   * 后果是手机读者打开一节长笔记时，第一个能点的"跳到某小节"要往下翻过整篇；
+   * 而"这是哪节课、上一节是什么"反而消失了。
+   * display:contents 让 .rail 的孩子们直接参与 .shell 的网格排序，于是可以：
+   *   目录(1) → 正文(2) → 课次导航(3)。
+   */
+  .shell { display: flex; flex-direction: column; }
+  .rail { display: contents; }
+  .rail-toggle { display: block; order: 1; }
+  .rail nav.toc { order: 1; }
+  .shell > .col { order: 2; }
+  .rail .rail-extra { order: 3; display: block; margin-top: 4px; padding-top: 16px; border-top: 1px solid var(--line); }
   .rail details { background: var(--bg-soft); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 16px; }
-  .rail details summary { cursor: pointer; font-size: 14px; color: var(--accent-ink); font-weight: 600; font-weight: 600; }
+  .rail details summary { cursor: pointer; font-size: 14px; color: var(--accent-ink); font-weight: 600; }
   .rail details nav.toc { margin-top: 12px; }
-  .rail .rail-extra { display: none; }
   body { font-size: 17px; }
+  /* 移动端点击区稍大：目录与课次链接至少 40px 高 */
+  .rail nav.toc a, .rail .rail-extra a { display: block; padding: 10px; min-height: 40px; }
 }
 
 /* ── 正文：这里是唯一用衬线的地方 ── */
@@ -336,14 +353,26 @@ details.note-meta pre { background: var(--bg-soft); border-radius: var(--radius)
 .reading.focus .rail { display: none; }
 .reading.focus .col { max-width: calc(var(--measure) + 8em); margin: 0 auto; }
 
-/* 窄屏：先读正文，本课程课次挪到正文下面，本页目录再往后 */
+/**
+ * 窄屏（≤900px）：**目录在前、正文居中、课次导航在后**。
+ *
+ * 原来的顺序是"正文 → 课次导航 → 本页目录"：手机读者打开一节两万字的笔记，
+ * 想跳到某一小节得先翻过整篇；而"本页目录"这个折叠块偏偏落在最底下。
+ * 现在把右栏拆开（display:contents 让它的孩子直接参与网格排序）：
+ *   本页目录(1) → 正文(2) → 课次导航与其余信息(3)。
+ */
 @media (max-width: 900px) {
   .reading, .reading.focus { grid-template-columns: minmax(0, 1fr); gap: 20px; padding: 20px 16px 84px; }
   .reading .rail { position: static; max-height: none; overflow: visible; }
-  .reading .col { order: 0; }
-  .reading .rail-left { order: 1; }
-  .reading .rail-right { order: 2; }
+  .reading .rail-right { display: contents; }
+  .reading .rail-right .rail-toggle { order: 1; }
+  .reading .rail-right .rail-desktop { display: none; }
+  .reading .col { order: 2; }
+  .reading .rail-left { order: 3; }
+  .reading .rail-right .rail-extra { order: 4; }
   .rail nav.toc ol, .rail ol.lessons { max-height: none; overflow: visible; }
+  /* 手机上手指点的目标：目录与课次链接至少 40px 高 */
+  .rail nav.toc a, .rail ol.lessons a { display: block; padding: 10px; min-height: 40px; }
 }
 
 /* ── 顶栏工具栏：全部是图标，点开一个小窄框 ──
@@ -1501,8 +1530,10 @@ export function renderSearchPage({ siteOrigin = '' } = {}) {
     '<header class="site">',
     '<h1>搜索笔记</h1>',
     '</header>',
-    '<input class="search" id="q" type="search" placeholder="例如：众数、第 25 条、抽样、共犯" autocomplete="off">',
-    '<div class="search-hint" id="hint"></div>',
+    // 无障碍：只靠 placeholder 的输入框对读屏软件等于没有名字；检索状态要能被播报
+    '<label class="sr-only" for="q">检索全部课程笔记</label>',
+    '<input class="search" id="q" type="search" placeholder="例如：众数、第 25 条、抽样、共犯" autocomplete="off" aria-describedby="hint">',
+    '<div class="search-hint" id="hint" role="status" aria-live="polite"></div>',
     '<div id="results"></div>',
     SEARCH_SCRIPT
   ].join('\n')
