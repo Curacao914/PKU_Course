@@ -14,7 +14,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      # 仓库没有任何第三方依赖（zero-dep），所以不需要 npm ci：直接跑测试
+          cache: npm
+      # 仓库的第三方依赖为零，但 **workspace 之间的链接必须装出来**：
+      # npm ci 会在根 node_modules 下建 @course/* 的符号链接，测试才能 import '@course/xxx'。
+      # 跳过这一步的话，fresh runner 上所有 import @course/* 都会直接失败（踩过）。
+      - name: 安装 workspace 链接
+        run: npm ci
       - name: 单元与集成测试
         run: npm test
 

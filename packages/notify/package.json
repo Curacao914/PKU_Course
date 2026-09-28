@@ -6,5 +6,8 @@
   "description": "微信推送：本机账本队列 + OpenClaw 通道发送",
   "exports": {
     ".": "./src/index.mjs"
+  },
+  "dependencies": {
+    "@course/store": "*"
   }
 }

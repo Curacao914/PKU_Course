@@ -11,7 +11,11 @@
     "course-site": "./bin/serve.mjs"
   },
   "dependencies": {
+    "@course/core": "*",
+    "@course/materials": "*",
     "@course/notes-mcp": "*",
-    "@course/publish": "*"
+    "@course/notify": "*",
+    "@course/publish": "*",
+    "@course/store": "*"
   }
 }

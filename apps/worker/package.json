@@ -14,8 +14,10 @@
     "@course/acquisition": "*",
     "@course/asr": "*",
     "@course/core": "*",
+    "@course/materials": "*",
     "@course/notes": "*",
     "@course/notes-mcp": "*",
+    "@course/notify": "*",
     "@course/publish": "*",
     "@course/store": "*"
   }
