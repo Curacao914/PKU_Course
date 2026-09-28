@@ -32,6 +32,28 @@ const assetsDir = process.env.COURSE_ASSETS_DIR || path.join(os.homedir(), '.cou
 // 课件归档目录：管理台上传的课件落到这里，notes 阶段从这里取（只有管理进程需要）
 const materialsRoot = isPublic ? '' : (process.env.COURSE_MATERIALS_DIR || path.join(os.homedir(), '.course-worker', 'materials'))
 
+/**
+ * 公开接口的请求预算：/api/search（站内搜索）与 /mcp（AI 客户端）共用同一本账。
+ *
+ * 可信代理名单**默认是空的**：只有直连方在名单里时才会读 X-Forwarded-For。
+ * 生产上 nginx 就在本机，它的 proxy_add_x_forwarded_for 会把真实客户端地址追加到
+ * XFF 末尾，所以配 COURSE_TRUSTED_PROXIES=127.0.0.1,::1 之后按"最右不可信跳"记账；
+ * 不配就等于所有请求共用一个桶（今天的行为），不会因为一个可以随便伪造的头而失效。
+ * 前面还有 Cloudflare 时，用 COURSE_CLIENT_IP_HEADER=cf-connecting-ip 直接取它设的头。
+ */
+const listOf = value => String(value || '').split(',').map(item => item.trim()).filter(Boolean)
+const positiveOrUndefined = value => {
+  const num = Number(value)
+  return Number.isFinite(num) && num > 0 ? num : undefined
+}
+const trustedProxies = listOf(process.env.COURSE_TRUSTED_PROXIES)
+const clientIpHeader = String(process.env.COURSE_CLIENT_IP_HEADER || '').trim()
+const rateLimitMax = positiveOrUndefined(process.env.COURSE_RATE_LIMIT_MAX)
+const rateLimitWindowMs = positiveOrUndefined(process.env.COURSE_RATE_LIMIT_WINDOW_MS)
+const maxConcurrent = positiveOrUndefined(process.env.COURSE_MAX_CONCURRENT)
+const requestTimeoutMs = positiveOrUndefined(process.env.COURSE_REQUEST_TIMEOUT_MS)
+const maxQueryChars = positiveOrUndefined(process.env.COURSE_MAX_QUERY_CHARS)
+
 const { url } = await startSiteServer({
   root,
   port,
@@ -42,6 +64,14 @@ const { url } = await startSiteServer({
   scratchRoot,
   assetsDir,
   materialsRoot,
+  ...(rateLimitMax || rateLimitWindowMs
+    ? { rateLimit: { ...(rateLimitWindowMs ? { windowMs: rateLimitWindowMs } : {}), ...(rateLimitMax ? { max: rateLimitMax } : {}) } }
+    : {}),
+  ...(maxConcurrent ? { maxConcurrent } : {}),
+  ...(requestTimeoutMs ? { requestTimeoutMs } : {}),
+  ...(maxQueryChars ? { maxQueryChars } : {}),
+  ...(trustedProxies.length ? { trustedProxies } : {}),
+  ...(clientIpHeader ? { clientIpHeader } : {}),
   ...(isPublic
     ? {}
     : {
@@ -51,7 +81,14 @@ const { url } = await startSiteServer({
     })
 })
 
-console.log(`course-site listening on ${url} (role=${role}, root=${root}, admin=${isPublic ? 'not-mounted' : (adminToken ? 'enabled' : 'disabled')})`)
+console.log(
+  `course-site listening on ${url} (role=${role}, root=${root}, ` +
+  `admin=${isPublic ? 'not-mounted' : (adminToken ? 'enabled' : 'disabled')}, ` +
+  // 预算配置打进日志：线上排"为什么 429/503"时要能一眼看出闸门开在哪
+  `budget[max=${rateLimitMax || '默认'}, concurrency=${maxConcurrent || '默认'}, timeoutMs=${requestTimeoutMs || '默认'}, ` +
+  `maxQueryChars=${maxQueryChars || '默认'}, trustedProxies=${trustedProxies.join('|') || '无（不读 XFF）'}` +
+  `${clientIpHeader ? `, clientIpHeader=${clientIpHeader}` : ''}]`
+)
 
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {

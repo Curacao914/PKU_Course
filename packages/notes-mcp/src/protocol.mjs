@@ -1,4 +1,5 @@
-import { ProtocolError, ResourceNotFoundError, ToolError } from './errors.mjs'
+import { DEFAULT_MAX_QUERY_CHARS, queryLengthProblem } from './budget.mjs'
+import { CancelledError, ProtocolError, ResourceNotFoundError, ToolError } from './errors.mjs'
 import { findTool, toolDefinitions } from './tools.mjs'
 import { validateArguments } from './validate.mjs'
 
@@ -11,6 +12,12 @@ import { validateArguments } from './validate.mjs'
  * initialize——这正是规范为老服务器留的路（见 docs/12 §2）。所以不装懂新纪元反而更稳。
  *
  * 事件循环里不做并发：stdio 是单连接，顺序处理既能保证响应顺序，也让测试可复现。
+ *
+ * 两件与"请求预算"有关的事也放在这一层，因为两个传输（stdio / HTTP）都要一致：
+ *   · limits.maxQueryChars —— 查询串长度上限。超长查询（有人拿整篇文章来搜）会炸出
+ *     成千上万个 n-gram，是纯 CPU 成本，入口就该挡住并告诉调用方上限；
+ *   · context.signal —— 取消信号。HTTP 层客户端断开或超时时 abort 它，工具把它透传给
+ *     service，检索在课次之间退出。stdio 没有取消语义，传空对象即可。
  */
 
 export const SERVER_INFO = {
@@ -38,8 +45,9 @@ export const INSTRUCTIONS = [
 
 const NOTIFICATION = Symbol('notification')
 
-export function createProtocolServer({ service, serverInfo = SERVER_INFO, instructions = INSTRUCTIONS, logger = () => {} } = {}) {
+export function createProtocolServer({ service, serverInfo = SERVER_INFO, instructions = INSTRUCTIONS, logger = () => {}, limits = {} } = {}) {
   if (!service) throw new Error('createProtocolServer 需要 service')
+  const maxQueryChars = Number(limits.maxQueryChars) > 0 ? Math.trunc(Number(limits.maxQueryChars)) : DEFAULT_MAX_QUERY_CHARS
 
   const ok = (id, result) => ({ jsonrpc: '2.0', id, result })
   const fail = (id, code, message, data) => ({
@@ -62,7 +70,7 @@ export function createProtocolServer({ service, serverInfo = SERVER_INFO, instru
     }
   }
 
-  async function callTool(params) {
+  async function callTool(params, context = {}) {
     const name = typeof params?.name === 'string' ? params.name.trim() : ''
     if (!name) throw new ProtocolError(-32602, 'tools/call 缺少 name')
     const tool = findTool(name)
@@ -77,8 +85,16 @@ export function createProtocolServer({ service, serverInfo = SERVER_INFO, instru
       // 参数问题走 isError:true：规范希望把这类错误喂给模型，让它改参数重试
       return { content: [{ type: 'text', text: `参数不合法：${checked.errors.join('；')}` }], isError: true }
     }
+    /**
+     * 长度预算：与 /api/search 共用同一个上限（都来自同一个 budget 实例）。
+     * 走 isError:true 而不是协议错误——这是"参数太长"，模型改小就能重试。
+     */
+    if (typeof checked.value.query === 'string') {
+      const problem = queryLengthProblem(checked.value.query, maxQueryChars)
+      if (problem) return { content: [{ type: 'text', text: `参数不合法：${problem}` }], isError: true }
+    }
     try {
-      const result = await tool.run(service, checked.value)
+      const result = await tool.run(service, checked.value, context)
       // 工具可以返回"已经成形的结果"（标准 search/fetch 需要同时给出 content 与
       // structuredContent），其余工具返回纯文本即可。
       if (result && typeof result === 'object' && Array.isArray(result.content)) {
@@ -91,13 +107,13 @@ export function createProtocolServer({ service, serverInfo = SERVER_INFO, instru
     }
   }
 
-  async function readResource(params) {
+  async function readResource(params, context = {}) {
     const uri = typeof params?.uri === 'string' ? params.uri.trim() : ''
     if (!uri) throw new ProtocolError(-32602, 'resources/read 缺少 uri')
-    return { contents: [await service.readResource(uri)] }
+    return { contents: [await service.readResource(uri, context)] }
   }
 
-  async function dispatch(method, params) {
+  async function dispatch(method, params, context = {}) {
     switch (method) {
       case 'initialize':
         return initializeResult(params)
@@ -106,13 +122,13 @@ export function createProtocolServer({ service, serverInfo = SERVER_INFO, instru
       case 'tools/list':
         return { tools: toolDefinitions() }
       case 'tools/call':
-        return callTool(params)
+        return callTool(params, context)
       case 'resources/list':
-        return { resources: await service.listResources() }
+        return { resources: await service.listResources(context) }
       case 'resources/templates/list':
         return { resourceTemplates: service.resourceTemplates() }
       case 'resources/read':
-        return readResource(params)
+        return readResource(params, context)
       default:
         // 通知没有 id，回不了错误：认识的静默处理，不认识的直接忽略（规范如此）
         if (method.startsWith('notifications/')) return NOTIFICATION
@@ -120,7 +136,7 @@ export function createProtocolServer({ service, serverInfo = SERVER_INFO, instru
     }
   }
 
-  async function handleMessage(message) {
+  async function handleMessage(message, context = {}) {
     if (message === null || typeof message !== 'object' || Array.isArray(message)) {
       // MCP 不支持 JSON-RPC 批量（batch）：数组一律按非法请求处理
       return fail(null, -32600, Array.isArray(message) ? 'MCP 不支持批量请求' : '请求必须是 JSON-RPC 对象')
@@ -135,7 +151,7 @@ export function createProtocolServer({ service, serverInfo = SERVER_INFO, instru
     const params = message.params && typeof message.params === 'object' ? message.params : {}
 
     try {
-      const result = await dispatch(method, params)
+      const result = await dispatch(method, params, context)
       if (result === NOTIFICATION) return null
       return hasId ? ok(id, result) : null
     } catch (error) {
@@ -143,6 +159,9 @@ export function createProtocolServer({ service, serverInfo = SERVER_INFO, instru
         logger(`[notes-mcp] 通知 ${method} 处理失败（无 id，无法回报）：${error instanceof Error ? error.message : String(error)}`)
         return null
       }
+      // 取消（客户端断开/超时）走实现定义的服务端错误码 -32001：客户端据此知道
+      // "不是我的请求写错了，也不是服务器崩了"，重试原样发一次即可
+      if (error instanceof CancelledError) return fail(id, -32001, error.message)
       if (error instanceof ProtocolError) return fail(id, error.code, error.message, error.data)
       if (error instanceof ResourceNotFoundError) return fail(id, -32002, error.message, { uri: error.uri })
       if (error instanceof ToolError) return fail(id, -32602, error.message)

@@ -25,6 +25,19 @@ export class ProtocolError extends Error {
   }
 }
 
+/**
+ * 请求被取消（客户端断开，或超出墙钟预算）。
+ *
+ * 单独一类的原因：它既不是"参数写错了"（ToolError，模型能改），也不是"服务崩了"
+ * （-32603）。HTTP 层用它决定回什么码（超时回 504），以及"客户端已经走了就别再写响应"。
+ */
+export class CancelledError extends Error {
+  constructor(message = '请求已取消（客户端断开或超出时间预算）。') {
+    super(message)
+    this.name = 'CancelledError'
+  }
+}
+
 export class ResourceNotFoundError extends Error {
   constructor(uri, message) {
     super(message || `找不到资源：${uri}`)

@@ -7,6 +7,10 @@ import { renderCourse, renderCourses, renderNote, renderSearch, renderTerms } fr
  * 模型选工具靠的就是这句话。返回一律是紧凑文本（见 render.mjs）。
  *
  * inputSchema 都会放进 tools/list，客户端可能拿它做校验，所以字段说明也要当文档写。
+ *
+ * run(service, args, context) 的第三个参数是**这一次请求的上下文**（目前只有取消信号
+ * signal）：HTTP 层客户端断开或超出时间预算时它会 abort，工具把它透传给 service，
+ * 检索在课次之间检查并退出。stdio 没有取消语义，传进来的就是空对象。
  */
 
 const READ_ONLY = Object.freeze({
@@ -37,7 +41,7 @@ export const TOOL_DEFINITIONS = [
         limit: { type: 'integer', minimum: 1, maximum: 200, default: 50, description: '最多返回多少门课程，默认 50' }
       }
     },
-    run: (service, args) => service.listCourses(args).then(renderCourses)
+    run: (service, args, context) => service.listCourses(args, context).then(renderCourses)
   },
   {
     name: 'get_course',
@@ -57,7 +61,7 @@ export const TOOL_DEFINITIONS = [
       },
       required: ['course']
     },
-    run: (service, args) => service.getCourse(args).then(renderCourse)
+    run: (service, args, context) => service.getCourse(args, context).then(renderCourse)
   },
   {
     name: 'search_notes',
@@ -82,7 +86,7 @@ export const TOOL_DEFINITIONS = [
       },
       required: ['query']
     },
-    run: (service, args) => service.searchNotes(args).then(renderSearch)
+    run: (service, args, context) => service.searchNotes(args, context).then(renderSearch)
   },
   {
     name: 'get_note',
@@ -103,7 +107,7 @@ export const TOOL_DEFINITIONS = [
         maxChars: { type: 'integer', minimum: 200, maximum: 60000, description: '返回正文的字符上限，默认 12000' }
       }
     },
-    run: (service, args) => service.getNote(args).then(renderNote)
+    run: (service, args, context) => service.getNote(args, context).then(renderNote)
   },
   {
     name: 'list_terms',
@@ -122,7 +126,7 @@ export const TOOL_DEFINITIONS = [
       },
       required: ['course']
     },
-    run: (service, args) => service.listTerms(args).then(renderTerms)
+    run: (service, args, context) => service.listTerms(args, context).then(renderTerms)
   },
   {
     name: 'search',
@@ -160,7 +164,7 @@ export const TOOL_DEFINITIONS = [
       }
     },
     // OpenAI 规范要求：**恰好一个** type=text 的 content，其 text 是 JSON 字符串
-    run: (service, args) => service.searchKnowledge({ query: args.query, limit: args.limit }).then(payload => ({
+    run: (service, args, context) => service.searchKnowledge({ query: args.query, limit: args.limit }, context).then(payload => ({
       content: [{ type: 'text', text: JSON.stringify({ results: payload.results }) }],
       structuredContent: { results: payload.results }
     }))
@@ -191,7 +195,7 @@ export const TOOL_DEFINITIONS = [
         metadata: { type: 'object' }
       }
     },
-    run: (service, args) => service.fetchDocument({ id: args.id }).then(document => ({
+    run: (service, args, context) => service.fetchDocument({ id: args.id }, context).then(document => ({
       content: [{ type: 'text', text: JSON.stringify(document) }],
       structuredContent: document
     }))

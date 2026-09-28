@@ -107,10 +107,14 @@ export function createRemoteSiteSource({
   let indexCache = null
   const markdownCache = new Map()
 
-  async function fetchChecked(url, what) {
+  async function fetchChecked(url, what, { signal } = {}) {
     let response
     try {
-      response = await fetchImpl(url, { headers: { accept: what === 'json' ? 'application/json' : 'text/markdown, text/plain, */*' } })
+      response = await fetchImpl(url, {
+        headers: { accept: what === 'json' ? 'application/json' : 'text/markdown, text/plain, */*' },
+        // 取消（客户端断开/超时）要真的断掉正在飞的请求，而不是等它自己传完
+        ...(signal ? { signal } : {})
+      })
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error)
       throw new ToolError(`访问 ${url} 失败：${reason}。离线时用 COURSE_LIBRARY 指向本地 library.json。`)
@@ -119,9 +123,9 @@ export function createRemoteSiteSource({
     return response
   }
 
-  async function loadIndex() {
+  async function loadIndex({ signal } = {}) {
     if (indexCache && now() - indexCache.at < ttl) return indexCache.records
-    const response = await fetchChecked(`${base}/api/notes`, 'json')
+    const response = await fetchChecked(`${base}/api/notes`, 'json', { signal })
     let payload
     try {
       payload = await response.json()
@@ -138,14 +142,14 @@ export function createRemoteSiteSource({
   return {
     kind: 'remote',
     describe: () => ({ kind: 'remote', label: '远程站点', location: base, live: true, ttlSeconds: Math.round(ttl / 1000) }),
-    listNotes: loadIndex,
-    readMarkdown: async slug => {
+    listNotes: (options = {}) => loadIndex(options),
+    readMarkdown: async (slug, { signal } = {}) => {
       const key = String(slug)
       const cached = markdownCache.get(key)
       if (cached && now() - cached.at < ttl) return cached.text
       // 路径与站点写出的文件同源（publish 的 markdown-path.mjs / 上面的 markdownPathOf）
       const url = `${base}${markdownPathOf(key)}`
-      const response = await fetchChecked(url, 'markdown')
+      const response = await fetchChecked(url, 'markdown', { signal })
       const text = await response.text()
       markdownCache.set(key, { at: now(), text })
       return text

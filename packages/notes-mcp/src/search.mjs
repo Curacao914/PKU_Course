@@ -1,3 +1,4 @@
+import { CancelledError } from './errors.mjs'
 import { lessonDateOf, splitSections } from './records.mjs'
 import { corpusTerms, fuzzyTerms, normalizeText, queryTerms, requiredUnits } from './query.mjs'
 
@@ -24,6 +25,29 @@ export const FIELD_SPECS = [
 const BODY_WEIGHT = 2
 const MAX_SNIPPETS = 3
 const SNIPPET_RADIUS = 56
+
+/**
+ * 取消检查点。
+ *
+ * 为什么要有：客户端断开（浏览器取消、代理超时）或超出时间预算时，调用方已经不要结果了，
+ * 但检索还会把剩下的课次（远程数据源下还要逐篇下载正文）算完——那是白烧 CPU 与带宽。
+ * 同步打分本身不可抢占，所以检查点放在"课次之间"与"远程读取前后"：单条记录的打分有界，
+ * 最坏情况是当前这一条算完就退出（search_notes 的耗时因此可预期）。
+ */
+export function throwIfAborted(signal) {
+  if (signal?.aborted) throw new CancelledError()
+}
+
+/**
+ * 每处理这么多条记录让出一次事件循环。
+ *
+ * 为什么必须让：本地发布库的全文检索是**纯同步**循环（markdown 就在记录里，没有 await），
+ * 不让出的话它会把整个进程卡住——站点上"一个人搜索"就等于"所有人的页面都慢"，
+ * 而且 setTimeout 排不上队，超时预算与取消信号都永远不会生效。让出一次的开销是微秒级，
+ * 换来的是：取消/超时真的能打断检索，静态页面也不再被检索堵住。
+ */
+const YIELD_EVERY = 25
+const yieldToEventLoop = () => new Promise(resolve => setImmediate(resolve))
 
 /** 元数据侧的全部文字（不含正文）：IDF 与"是否命中"都以它为底。 */
 export function metadataHaystack(record = {}) {
@@ -205,7 +229,8 @@ export function isConfidentHit({ matchedTerms = new Set(), metadataTerms, sectio
  *   · 一条都没命中时，用语料里真实出现过的词做编辑距离 1 的回退（主义↔主意），
  *     并把 fuzzy 与替换后的词一起返回——模型应当知道这次是"猜着匹配"的。
  */
-export async function searchRecords({ records = [], query = '', includeBody = false, readMarkdown, limit = 8 } = {}) {
+export async function searchRecords({ records = [], query = '', includeBody = false, readMarkdown, limit = 8, signal } = {}) {
+  throwIfAborted(signal)
   const terms = queryTerms(query)
   if (!terms.length) return { terms: [], fuzzy: [], fuzzyTerms: [], bodyScanned: false, bodySkipped: 0, scanned: records.length, total: 0, hits: [] }
 
@@ -238,14 +263,23 @@ export async function searchRecords({ records = [], query = '', includeBody = fa
   const run = async (activeTerms, { scanBody }) => {
     const hits = []
     let bodySkipped = 0
+    let processed = 0
     for (const record of records) {
+      throwIfAborted(signal)
+      if (processed > 0 && processed % YIELD_EVERY === 0) {
+        await yieldToEventLoop()
+        throwIfAborted(signal)
+      }
+      processed += 1
       let markdown = ''
       if (scanBody) {
         markdown = record.markdown === undefined ? '' : record.markdown
         if (record.markdown === undefined && readMarkdown) {
           try {
-            markdown = await readMarkdown(record.slug)
-          } catch {
+            markdown = await readMarkdown(record.slug, { signal })
+          } catch (error) {
+            // 取消要往上抛（那是"调用方不要了"），只有"这一篇读不到"才降级跳过
+            if (error instanceof CancelledError) throw error
             bodySkipped += 1
             markdown = ''
           }
@@ -287,11 +321,13 @@ export async function searchRecords({ records = [], query = '', includeBody = fa
   let fuzzyUsed = []
   let bodyScanned = includeBody
   let result = await run(active, { scanBody: includeBody })
+  throwIfAborted(signal)
   if (!result.hits.length && !includeBody) {
     bodyScanned = true
     result = await run(active, { scanBody: true })
   }
   if (!result.hits.length) {
+    throwIfAborted(signal)
     // 错别字回退：只用语料里出现过的词做替换，绝不凭空造词
     const replaced = new Map()
     for (const item of terms) {

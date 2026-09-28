@@ -246,11 +246,62 @@ MCP 的 stdio 服务器是**由客户端在本地拉起**的，所以「在服�
 `LogLevel=ERROR` 压掉 ssh 横幅；命令用 `exec` 让 node 取代 shell，`SIGTERM`/stdin EOF 才传得到。
 缺点是每次会话都要过一遍 ssh 握手，且远端笔记更新即时可见的前提是 ssh 命令每次都重新启动进程。
 
-### 7.3 想要 HTTP 端点（多客户端 / 浏览器 / GUI 不能 spawn 进程）
+### 7.3 HTTP 端点（已内置：站点进程上的 `POST /mcp`）
 
-本项目**暂未内置** Streamable HTTP 传输，两条现成的路：
+站点进程（`course-site`，公开角色监听 3100）已经把**同一个协议服务器**挂在 `POST /mcp` 上
+（`packages/notes-mcp/src/http.mjs`）：无状态——每次 POST 自带完整 JSON-RPC，不返回
+`Mcp-Session-Id`，客户端重连、多实例、重启都不需要重新握手；响应一律 `application/json`
+（不用 SSE：CDN / nginx / Cloudflare 对 SSE 的缓冲更难伺候，而我们的工具都是请求-响应式，
+没有服务端推送）。
 
-**A. 用现成的 stdio→HTTP 网桥**（改动最小，今天就能用；代价是多一个第三方依赖）。
+```bash
+curl -sS https://course.law-tech.dev/mcp -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+规范边界（都有测试钉住）：`GET` → 405（不提供服务端 SSE 流）、`DELETE` → 204（无状态，
+没有会话可终止）、通知（无 `id`）→ 202 无响应体、坏 JSON → `-32700`、未知工具 →
+`-32602`、请求体超限 → 413、不支持的 `MCP-Protocol-Version` → 400。支持的版本：
+2025-11-25 / 2025-06-18 / 2025-03-26 / 2024-11-05。
+
+安全边界（默认开启，都是"存在才校验"，不打断 CLI 客户端）：Origin 与 Host 白名单——
+浏览器带来的 Origin 必须在本站域名内，Host 必须是本站域名或本机（防 DNS rebinding），
+用 `mcpOrigins` / `mcpHosts` 增补。
+
+#### 7.3.1 请求预算：`/mcp` 与站内搜索共用一本账
+
+限流 / 并发 / 墙钟时间 / 查询长度都实现在 `packages/notes-mcp/src/budget.mjs`，而
+`POST /mcp` 与站内搜索 `GET /api/search` 用的是**同一个 budget 实例**——
+只给 MCP 加闸门等于留了后门：同一台机器，绕开 MCP 直接刷搜索一样能把它打满。
+
+| 预算 | 默认 | 超了会怎样 |
+|---|---|---|
+| 每 IP 每窗口请求数 | 300 次 / 60 秒 | 429 + `retry-after` |
+| 全局并发 | 8 | 503 + `retry-after: 1` |
+| 单次墙钟时间 | 20 秒 | 504（JSON-RPC `-32001`），并中止后台检索 |
+| 查询串长度 | 200 字符 | `/api/search` → 400；MCP → `isError: true`（模型改短即可重试） |
+
+站点进程的环境变量：`COURSE_RATE_LIMIT_MAX`、`COURSE_RATE_LIMIT_WINDOW_MS`、
+`COURSE_MAX_CONCURRENT`、`COURSE_REQUEST_TIMEOUT_MS`、`COURSE_MAX_QUERY_CHARS`。
+
+**客户端地址怎么算**：默认**不读任何转发头**，只认 TCP 对端地址。只有直连方在
+`COURSE_TRUSTED_PROXIES`（生产：`127.0.0.1,::1`——nginx 在本机）里时，才读
+X-Forwarded-For，并且取的是**最右不可信跳**：nginx 的 `proxy_add_x_forwarded_for` 会把
+真实客户端追加到末尾，所以客户端自己伪造的前缀换不掉身份。前面还有 Cloudflare 时用
+`COURSE_CLIENT_IP_HEADER=cf-connecting-ip` 取它设的那个头（同样只在直连方可信时生效）。
+两个都不配时所有请求共用一个桶——宁可粗一点，也不认一个随手就能伪造的头。
+
+**取消与泄漏**：每个请求带一个 AbortSignal。客户端中途断开（浏览器取消、代理超时）或
+超出时间预算时 abort 它，信号一路传到检索层（在课次之间、远程取正文处检查，抛
+`CancelledError` 退出）——不是"把计数减回去然后继续烧 CPU"。并发槽位的归还是**幂等**的：
+正常结束（`finish`）与异常断开（`close`）都会归还；以前只挂 `finish`，漏满 8 个之后
+所有请求 503，只能重启进程。另外全文检索每 25 条记录让出一次事件循环：本地库的检索是
+纯同步循环，不让出的话"一个人搜索"就等于"整站（含静态页面）都卡住"，超时与取消也永远
+不会生效。
+
+#### 7.3.2 备选：stdio → HTTP 网桥（不想动站点进程时）
+
+**A. 用现成的 stdio→HTTP 网桥**（改动最小；代价是多一个第三方依赖）。
 
 ```bash
 npx -y supergateway \
@@ -294,9 +345,10 @@ journalctl --user -u course-notes-mcp -f      # 看日志（协议日志都在 s
 等于把整库笔记和服务器状态交出去）；要跨机访问就复用现有的 Cloudflare Tunnel
 （`course.law-tech.dev` 已经在用）并加访问控制。
 
-**B. 后续在包里补一个内置 HTTP 传输**（要做的事：`POST /mcp` 接受单条 JSON-RPC、
-返回 JSON 或请求级 SSE、`MCP-Protocol-Version` 头校验、会话 id 管理、以及 `--http <addr>`）。
-在没做之前，用 A 就够了。
+**B. 独立进程**：想让 MCP 完全脱离站点进程单独跑时，用
+`packages/notes-mcp/bin/notes-mcp.mjs` 配一条 systemd unit（stdio 型不必常驻），数据源给
+`COURSE_LIBRARY=<站点目录>/library.json`。站点进程上的 `/mcp` 已经覆盖绝大多数场景，
+单独起进程只在"需要独立的发布节奏或端口"时才值得。
 
 ## 8. 排错
 
@@ -323,7 +375,7 @@ printf '%s\n' \
 ## 9. 测试
 
 ```bash
-node --test packages/notes-mcp/src/*.test.mjs     # 包本身，46 个用例
+node --test packages/notes-mcp/src/*.test.mjs     # 包本身，90 个用例
 node --test apps/worker/src/mcp.test.mjs          # course mcp 接线，3 个用例
 npm test                                          # 全仓（含上面两处）
 ```
@@ -333,8 +385,13 @@ npm test                                          # 全仓（含上面两处）
 可操作报错、两种数据源（本地 mtime 刷新、远程 TTL 缓存与 404/断网报错、本地优先）、
 JSON-RPC（`initialize` 版本协商、`tools/list`、`tools/call` 未知工具/坏参数/内部错误、
 `resources/*` 与 `-32002`、`ping`、坏消息、批量数组）、stdio（顺序回应、坏 JSON `-32700`、
-子进程真实握手与 stdin 关闭退出）。全部离线：远程测试用 `127.0.0.1` 上的假站点，
-夹具是 `packages/notes-mcp/src/fixtures/library.json`。
+子进程真实握手与 stdin 关闭退出）、HTTP 传输（七个工具、通知 202、GET 405、坏 JSON、
+超大请求体）、**请求预算**（`budget.test.mjs` + `http-budget.test.mjs`：中途断开与请求体
+读到一半断开后名额立刻归还且后台被 abort、超时回 504 并中止检索、并发满员 503 后能立刻恢复、
+finish/close 双触发只归还一次、坏 JSON/超限/未知工具/内部错误都不漏槽位、不可信直连方
+伪造 XFF 换不掉身份、可信代理下按最右不可信跳记账、超长查询在解析前被挡住）。
+全部离线：远程测试用 `127.0.0.1` 上的假站点，夹具是
+`packages/notes-mcp/src/fixtures/library.json`。
 
 ## 10. 取舍与后续
 

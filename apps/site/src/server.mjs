@@ -136,8 +136,29 @@ export function createRequestHandler({
   // 额外域名/端口用下面两个选项加，不要为了省事把名单清空——那等于把接口交给任意站点调用。
   mcpOrigins = [],
   mcpHosts = [],
-  mcpRateLimit = { windowMs: 60_000, max: 120 },
-  mcpMaxConcurrent = 8
+  /**
+   * 公开接口共用的请求预算（限流 / 并发 / 墙钟时间 / 查询长度）。
+   *
+   * /api/search（站内搜索）与 /mcp（AI 客户端）用**同一个实例**：两个入口的账合在一起算。
+   * 以前只有 MCP 有闸门，站内搜索一个都没有——同一台机器，绕开 MCP 打搜索一样能打满。
+   *
+   *   rateLimit        每 IP 每窗口的请求数（超了回 429）
+   *   maxConcurrent    全局同时在处理的请求数（超了回 503）
+   *   requestTimeoutMs 单次请求的墙钟预算（超了回 504，并中止后台检索）
+   *   maxQueryChars    查询串长度上限（超了回 400）
+   *   trustedProxies   可信代理名单：只有直连方在名单里时才读 X-Forwarded-For
+   *   clientIpHeader   额外信任的单值头（Cloudflare 的 CF-Connecting-IP 这类）
+   *
+   * mcpRateLimit / mcpMaxConcurrent 是这两个开关的旧名字，给了就覆盖前两项。
+   */
+  rateLimit = { windowMs: 60_000, max: 300 },
+  maxConcurrent = 8,
+  requestTimeoutMs = 20_000,
+  maxQueryChars,
+  trustedProxies = [],
+  clientIpHeader = '',
+  mcpRateLimit = null,
+  mcpMaxConcurrent = null
 } = {}) {
   const normalizedRoot = path.resolve(root)
   const normalizedAssets = assetsDir ? path.resolve(assetsDir) : ''
@@ -214,6 +235,37 @@ export function createRequestHandler({
     }
   }
 
+  /**
+   * 请求预算实例：/api/search 与 /mcp 共用同一个。
+   *
+   * 懒加载的理由与 notesService 相同：没装 @course/notes-mcp 时站点照常工作
+   * （只是没有站内检索与 MCP），而不是整个进程起不来。
+   */
+  let requestBudget = null
+  let budgetFailed = ''
+  // 归还/取消的生命周期接线也来自同一个包：这套语义只有一份实现（budget.mjs）
+  let bindRequestLifecycle = null
+  const ensureBudget = async () => {
+    if (requestBudget || budgetFailed) return requestBudget
+    try {
+      const { createRequestBudget, bindRequestLifecycle: bind } = await import('@course/notes-mcp')
+      bindRequestLifecycle = bind
+      requestBudget = createRequestBudget({
+        windowMs: (mcpRateLimit || rateLimit)?.windowMs,
+        max: (mcpRateLimit || rateLimit)?.max,
+        maxConcurrent: mcpMaxConcurrent || maxConcurrent,
+        timeoutMs: requestTimeoutMs,
+        maxQueryChars,
+        trustedProxies,
+        clientIpHeader
+      })
+    } catch (error) {
+      budgetFailed = error instanceof Error ? error.message : String(error)
+      process.stderr.write(`[site] 请求预算不可用：${budgetFailed}\n`)
+    }
+    return requestBudget
+  }
+
   let mcpHandler = null
   let mcpFailed = ''
   const mcpPath = '/mcp'
@@ -225,6 +277,11 @@ export function createRequestHandler({
       return null
     }
     try {
+      const budget = await ensureBudget()
+      if (!budget) {
+        mcpFailed = budgetFailed || '请求预算不可用'
+        return null
+      }
       const { createMcpHttpHandler } = await import('@course/notes-mcp')
       const siteHost = (() => {
         try {
@@ -238,8 +295,8 @@ export function createRequestHandler({
         log: line => process.stderr.write(`${line}\n`),
         allowedOrigins: [siteOrigin, 'https://admin.' + siteHost, ...mcpOrigins].filter(Boolean),
         allowedHosts: [siteHost, 'localhost', '127.0.0.1', ...mcpHosts].filter(Boolean),
-        rateLimit: mcpRateLimit,
-        maxConcurrent: mcpMaxConcurrent
+        // 与 /api/search 共用同一个预算实例：账只有一本
+        budget
       })
     } catch (error) {
       mcpFailed = error instanceof Error ? error.message : String(error)
@@ -330,11 +387,11 @@ export function createRequestHandler({
     }
 
     /**
-     * 站内搜索：与 MCP 用**同一套检索**（同一服务实例、同一打分）。
+     * 站内搜索：与 MCP 用**同一套检索**（同一服务实例、同一打分）与**同一本预算**。
      *
      * 以前搜索页在浏览器里自己算 bigram 覆盖度：没有 IDF，泛词会把专名压下去，
      * 多词查询与整句问句也处理不了。现在页面只负责展示，检索在服务端做——
-     * 同时也就能搜正文（浏览器里没有正文）。
+     * 同时也就能搜正文（浏览器里没有正文），并与其他入口共用限流/并发/超时预算。
      */
     if (pathname === '/api/search') {
       const query = String(url.searchParams.get('q') || '').trim()
@@ -349,8 +406,40 @@ export function createRequestHandler({
         sendJson(res, 503, { ok: false, error: 'search_unavailable', message: failed || '检索服务不可用' })
         return
       }
+      const budget = await ensureBudget()
+      if (!budget || !bindRequestLifecycle) {
+        sendJson(res, 503, { ok: false, error: 'search_unavailable', message: budgetFailed || '请求预算不可用' })
+        return
+      }
+      // 长度预算：超长查询既不是有效查询，也会炸出成千上万个 n-gram（纯 CPU 成本）。
+      // 放在取槽位之前：这种请求不该占用限流额度。
+      const tooLong = budget.queryProblem(query)
+      if (tooLong) {
+        sendJson(res, 400, { ok: false, error: 'query_too_long', message: tooLong })
+        return
+      }
+      // 与 /mcp 同一本账：绕开 MCP 直接刷搜索一样能把这台 1.2G 的机器打满
+      const slot = budget.acquire({ key: budget.addressOf(req), label: 'search' })
+      if (!slot.ok) {
+        sendJson(res, slot.status, { ok: false, error: slot.code, message: slot.message }, { 'retry-after': String(slot.retryAfter) })
+        return
+      }
+      const lifecycle = bindRequestLifecycle(req, res, slot)
       try {
-        const found = await service.searchNotes({ query, includeBody: true, limit })
+        // 超时 / 客户端断开都会中止检索本身（signal 一路传到检索的记录循环）
+        const outcome = await lifecycle.race(service.searchNotes({ query, includeBody: true, limit }, { signal: slot.signal }))
+        if (outcome.kind === 'gone') return
+        if (outcome.kind === 'timeout') {
+          if (lifecycle.canWrite()) {
+            sendJson(res, 504, {
+              ok: false,
+              error: 'search_timeout',
+              message: `检索超时（超过 ${budget.limits.timeoutMs}ms）：已中止本次检索，请换更具体的词或缩小范围后重试。`
+            }, { 'retry-after': '1' })
+          }
+          return
+        }
+        const found = outcome.result
         sendJson(res, 200, {
           ok: true,
           query: found.query,
@@ -373,6 +462,14 @@ export function createRequestHandler({
         })
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
+        // 取消（客户端走了 / 预算到点）不是"查询写错了"，单独回 504
+        if (error?.name === 'CancelledError') {
+          if (lifecycle.canWrite()) {
+            sendJson(res, 504, { ok: false, error: 'search_timeout', message: '检索已中止（超时或客户端断开）。' }, { 'retry-after': '1' })
+          }
+          return
+        }
+        if (!lifecycle.canWrite()) return
         // 区分"查询本身没词/不合法"与"发布库读不到"：前者是调用方的问题（400），
         // 后者是站点的问题（503）——都报 400 会让人去改查询，白费功夫。
         const serverSide = /读不到发布库|发布库不是合法 JSON|发布库格式不对/.test(message)
@@ -489,12 +586,23 @@ export function startSiteServer({
   // 角色相关的三项必须透传下去：否则"公开进程"照样会挂上管理台（实测踩到：以为设了
   // admin:false，结果 /api/admin 仍然按"未配置令牌"回 503，而不是根本不存在的 404）。
   admin = true, adminOrigin = '',
-  mcp = true, mcpOrigins = [], mcpHosts = [], mcpRateLimit = undefined, mcpMaxConcurrent = undefined,
+  mcp = true, mcpOrigins = [], mcpHosts = [],
+  // 公开接口共用的预算（/api/search 与 /mcp 同一本账）：整块透传，避免只改了一半
+  rateLimit = undefined, maxConcurrent = undefined, requestTimeoutMs = undefined, maxQueryChars = undefined,
+  trustedProxies = undefined, clientIpHeader = undefined,
+  mcpRateLimit = undefined, mcpMaxConcurrent = undefined,
   siteOrigin = 'https://course.law-tech.dev',
   scratchRoot = '', workerPath = '', workerEnv = {}, assetsDir = '', materialsRoot = '', runCommand
 } = {}) {
   const server = createSiteServer({
     root, adminToken, admin, adminOrigin, mcp, mcpOrigins, mcpHosts, siteOrigin,
+    ...(rateLimit ? { rateLimit } : {}),
+    ...(maxConcurrent ? { maxConcurrent } : {}),
+    ...(requestTimeoutMs ? { requestTimeoutMs } : {}),
+    ...(maxQueryChars ? { maxQueryChars } : {}),
+    ...(trustedProxies ? { trustedProxies } : {}),
+    ...(clientIpHeader ? { clientIpHeader } : {}),
+    // 旧名字：仍然接受，语义不变（只是现在两边共用同一个上限）
     ...(mcpRateLimit ? { mcpRateLimit } : {}),
     ...(mcpMaxConcurrent ? { mcpMaxConcurrent } : {}),
     scratchRoot, workerPath, workerEnv, assetsDir, materialsRoot, runCommand

@@ -65,10 +65,15 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
   const origin = String(siteOrigin || 'https://course.law-tech.dev').replace(/\/+$/, '')
   const noteUrl = slug => `${origin}/${String(slug).replace(/^\/+/, '')}.html`
   const onePageUrl = slug => `${origin}/${String(slug).replace(/^notes\//, 'onepage/')}.html`
+  /**
+   * 取记录列表。context.signal 来自 HTTP 层的请求预算：客户端断开或超出时间预算时会 abort，
+   * 远程数据源据此断掉正在飞的请求（本地库是读一次文件，不受影响）。
+   */
+  const listNotes = context => source.listNotes({ signal: context?.signal })
 
   /** 第一层：课程总览。 */
-  async function listCourses({ query = '', limit = 50 } = {}) {
-    const records = await source.listNotes()
+  async function listCourses({ query = '', limit = 50 } = {}, context = {}) {
+    const records = await listNotes(context)
     const groups = new Map()
     for (const record of records) {
       if (!record.courseName) continue
@@ -111,8 +116,8 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
   }
 
   /** 第二层：一门课的课次清单（不含正文）。 */
-  async function getCourse({ course = '', limit = 100, order = 'asc', includeOutline = false } = {}) {
-    const records = await source.listNotes()
+  async function getCourse({ course = '', limit = 100, order = 'asc', includeOutline = false } = {}, context = {}) {
+    const records = await listNotes(context)
     const courseName = resolveCourse(records, course)
     const list = records.filter(record => record.courseName === courseName).sort(byLessonAsc)
     const teacher = [...list].reverse().find(record => record.teacher)?.teacher || ''
@@ -139,16 +144,18 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
    * 查询解析（多词、自然语言、错别字）与打分（字段权重 × IDF）都在 search.mjs，
    * 这里只负责：取数据、限定范围、把结果按 limit 收口。
    */
-  async function searchNotes({ query = '', course = '', includeBody = false, limit = 8 } = {}) {
+  async function searchNotes({ query = '', course = '', includeBody = false, limit = 8 } = {}, context = {}) {
     const text = String(query || '').trim()
     if (!text) throw new ToolError('search_notes 需要非空的 query。')
-    const records = await source.listNotes()
+    const records = await listNotes(context)
     const scoped = course ? records.filter(record => record.courseName === resolveCourse(records, course)) : records
     const found = await searchRecords({
       records: scoped,
       query: text,
       includeBody: Boolean(includeBody),
-      readMarkdown: slug => source.readMarkdown(slug)
+      readMarkdown: (slug, options) => source.readMarkdown(slug, options),
+      // 取消信号：客户端断开或超时后，检索在下一个检查点就退出，不再白算
+      signal: context?.signal
     })
     // 全是疑问词与虚词的查询（"为什么是这样的呢"）解析后一个词都不剩：
     // 与其把整库都当命中，不如让调用方知道这条查询本身没带信息
@@ -166,8 +173,8 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
   }
 
   /** 第三层：取正文；section 截一节，maxChars 限长度（默认只给 12000 字，够读一节）。 */
-  async function getNote({ slug = '', course = '', lesson = '', section = '', maxChars } = {}) {
-    const records = await source.listNotes()
+  async function getNote({ slug = '', course = '', lesson = '', section = '', maxChars } = {}, context = {}) {
+    const records = await listNotes(context)
     let record = null
     const wantedSlug = String(slug || '').trim().replace(/^\/+|\/+$/g, '')
     if (wantedSlug) {
@@ -191,7 +198,7 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
       throw new ToolError('get_note 需要 slug，或者同时给 course 与 lesson。')
     }
 
-    const full = await source.readMarkdown(record.slug)
+    const full = await source.readMarkdown(record.slug, { signal: context?.signal })
     const headings = extractHeadings(full)
     let body = full
     let sectionInfo = null
@@ -239,12 +246,12 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
    *
    * id 用 slug（命中到小节时给 slug#小节），稳定且能直接喂给 fetch。
    */
-  async function searchKnowledge({ query = '', limit = 8 } = {}) {
+  async function searchKnowledge({ query = '', limit = 8 } = {}, context = {}) {
     const text = String(query || '').trim()
     if (!text) throw new ToolError('search 需要 query。')
-    const records = await source.listNotes()
+    const records = await listNotes(context)
     const bySlug = new Map(records.map(record => [record.slug, record]))
-    const found = await searchNotes({ query: text, limit: Math.max(limit * 2, 8) })
+    const found = await searchNotes({ query: text, limit: Math.max(limit * 2, 8) }, context)
     const hits = found.hits || []
     const results = hits.slice(0, limit).map(hit => {
       const record = bySlug.get(hit.slug)
@@ -268,12 +275,12 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
    * id 支持两种：笔记 slug（整篇），或 slug#小节标题/标题 id（只取那一节）——
    * 后者让调用方能在不读整篇的前提下拿到相关段落。
    */
-  async function fetchDocument({ id = '' } = {}) {
+  async function fetchDocument({ id = '' } = {}, context = {}) {
     const raw = String(id || '').trim()
     if (!raw) throw new ToolError('fetch 需要 id（来自 search 的 results[].id）。')
     const [slugPart, sectionPart = ''] = raw.split('#')
     const section = sectionPart ? decodeURIComponent(sectionPart) : ''
-    const note = await getNote({ slug: slugPart, section, maxChars: NOTE_MAX_CHARS_LIMIT })
+    const note = await getNote({ slug: slugPart, section, maxChars: NOTE_MAX_CHARS_LIMIT }, context)
     const text = note.markdown || ''
     return {
       id: raw,
@@ -298,8 +305,8 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
   }
 
   /** 加分项：一门课的概念 / 法条 / 案例清单，带出现次数与落点。 */
-  async function listTerms({ course = '', kind = 'all', limit = 50 } = {}) {
-    const records = await source.listNotes()
+  async function listTerms({ course = '', kind = 'all', limit = 50 } = {}, context = {}) {
+    const records = await listNotes(context)
     const courseName = resolveCourse(records, course)
     const scoped = records.filter(record => record.courseName === courseName).sort(byLessonAsc)
     const buckets = {}
@@ -335,8 +342,8 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
   }
 
   /** 支持 resources 的客户端直接读：把上面几层包成资源。 */
-  async function listResources() {
-    const records = await source.listNotes()
+  async function listResources(context = {}) {
+    const records = await listNotes(context)
     const groups = new Map()
     for (const record of records) {
       if (!record.courseName) continue
@@ -390,7 +397,7 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
     return resources
   }
 
-  async function readResource(uri) {
+  async function readResource(uri, context = {}) {
     const target = parseResourceUri(uri)
     if (!target) throw new ResourceNotFoundError(uri)
     const json = value => `${JSON.stringify(value, null, 2)}\n`

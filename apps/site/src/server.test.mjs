@@ -266,3 +266,141 @@ test('the request handler is usable directly without a socket', () => {
   const handler = createRequestHandler({ root: siteDir() })
   assert.equal(typeof handler, 'function')
 })
+
+/** 大一点的发布库：用来把"检索确实要花时间"变成可测的事实（384 篇 × 约 7KB 正文）。 */
+function budgetSiteDir({ count = 120, repeat = 400 } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-budget-'))
+  const records = []
+  for (let index = 0; index < count; index += 1) {
+    records.push(buildNoteRecord({
+      courseName: '刑法分论',
+      teacher: '车浩',
+      lessonTitle: `第${index + 1}节`,
+      markdown: [`# 第${index + 1}节`, '', '## 课程概览', '', '这一节讲共同故意与共同行为的认定。'.repeat(repeat)].join('\n'),
+      publishedAt: '2026-09-25T00:00:00.000Z'
+    }))
+  }
+  fs.writeFileSync(path.join(dir, 'library.json'), JSON.stringify(records))
+  return dir
+}
+
+const jsonPost = (url, body) => fetch(url, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify(body)
+})
+const toolsList = url => jsonPost(url, { jsonrpc: '2.0', id: 1, method: 'tools/list' })
+
+test('站内搜索与 /mcp 共用同一本预算：一个入口用掉的额度，另一个入口同样算数', async () => {
+  // 以前只有 MCP 有闸门，/api/search 一个都没有：同一台机器，绕开 MCP 打搜索一样能打满。
+  const root = budgetSiteDir({ count: 3, repeat: 10 })
+  const site = await startSiteServer({ root, port: 0, rateLimit: { windowMs: 60_000, max: 2 } })
+  try {
+    const query = encodeURIComponent('共同行为')
+    assert.equal((await fetch(`${site.url}/api/search?q=${query}`)).status, 200)
+    assert.equal((await toolsList(`${site.url}/mcp`)).status, 200)
+
+    // 两个入口各一次 = 用掉两次，第三次不管走哪个入口都该被挡
+    const blocked = await fetch(`${site.url}/api/search?q=${query}`)
+    assert.equal(blocked.status, 429)
+    assert.equal(blocked.headers.get('retry-after'), '60')
+    const payload = await blocked.json()
+    assert.equal(payload.ok, false)
+    assert.equal(payload.error, 'rate_limited')
+
+    const mcpBlocked = await toolsList(`${site.url}/mcp`)
+    assert.equal(mcpBlocked.status, 429, 'MCP 入口同样是同一本账')
+    assert.match((await mcpBlocked.json()).error.message, /请求过于频繁/)
+  } finally {
+    await site.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('查询长度预算两个入口一致：/api/search 回 400，MCP 回可改参数的 isError', async () => {
+  const root = budgetSiteDir({ count: 3, repeat: 10 })
+  const site = await startSiteServer({ root, port: 0, maxQueryChars: 20 })
+  try {
+    const long = '法'.repeat(21)
+    const search = await fetch(`${site.url}/api/search?q=${encodeURIComponent(long)}`)
+    assert.equal(search.status, 400)
+    const payload = await search.json()
+    assert.equal(payload.error, 'query_too_long')
+    assert.match(payload.message, /21 字，上限 20 字/)
+
+    // MCP 这边走 isError:true 的文本结果：模型读了知道"把查询改短就能重试"
+    const mcp = await jsonPost(`${site.url}/mcp`, {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name: 'search_notes', arguments: { query: long } }
+    })
+    const result = await mcp.json()
+    assert.equal(result.result.isError, true)
+    assert.match(result.result.content[0].text, /查询过长：21 字，上限 20 字/)
+
+    // 正好到上限：放行（上限是"允许的长度"，不是"必须小于"）
+    const atLimit = await fetch(`${site.url}/api/search?q=${encodeURIComponent('法'.repeat(20))}`)
+    assert.equal(atLimit.status, 200)
+  } finally {
+    await site.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('时间预算：慢检索回 504 并归还名额（连发两次是 504 而不是 503）', async () => {
+  const root = budgetSiteDir()
+  // 先证明这份库正常能搜：否则 504 说不清是"预算"还是"库坏了"
+  const normal = await startSiteServer({ root, port: 0 })
+  try {
+    const ok = await fetch(`${normal.url}/api/search?q=${encodeURIComponent('共同行为')}&limit=3`)
+    assert.equal(ok.status, 200)
+    assert.equal((await ok.json()).ok, true)
+  } finally {
+    await normal.close()
+  }
+
+  // 1ms 预算 + 1 个并发名额：慢检索必然超时；第二次如果还是 504（而不是 503 busy），
+  // 就说明第一次虽然超时了，名额确实已经归还——这正是"异常路径不漏槽位"的验收点。
+  const site = await startSiteServer({ root, port: 0, requestTimeoutMs: 1, maxConcurrent: 1 })
+  try {
+    const first = await fetch(`${site.url}/api/search?q=${encodeURIComponent('共同行为')}`)
+    assert.equal(first.status, 504)
+    assert.equal(first.headers.get('retry-after'), '1')
+    const payload = await first.json()
+    assert.equal(payload.error, 'search_timeout')
+    assert.match(payload.message, /检索超时/)
+
+    const second = await fetch(`${site.url}/api/search?q=${encodeURIComponent('共同行为')}`)
+    assert.equal(second.status, 504, '第二次该是超时（504）；若变成 503 说明名额泄漏了')
+
+    // 进程照常服务别的请求
+    assert.equal((await fetch(`${site.url}/healthz`)).status, 200)
+  } finally {
+    await site.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('站内搜索中途断开：并发名额立刻归还（下一个请求不会是 503）', async () => {
+  const root = budgetSiteDir()
+  const site = await startSiteServer({ root, port: 0, maxConcurrent: 1 })
+  try {
+    const controller = new AbortController()
+    const pending = fetch(`${site.url}/api/search?q=${encodeURIComponent('共同行为')}`, { signal: controller.signal })
+      .catch(error => error)
+    // 等检索真的跑起来再断开（这份库的检索要几十毫秒，20ms 足够进到处理中）
+    await new Promise(resolve => setTimeout(resolve, 20))
+    controller.abort()
+    await pending
+    // 服务端收到 close 有一个网络往返的延迟，给它一点点时间
+    await new Promise(resolve => setTimeout(resolve, 50))
+
+    // 只有一个并发名额：若断开时没归还，这里必然是 503
+    const after = await toolsList(`${site.url}/mcp`)
+    assert.equal(after.status, 200)
+  } finally {
+    await site.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})

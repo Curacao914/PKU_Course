@@ -1,4 +1,13 @@
-export { ProtocolError, ResourceNotFoundError, ToolError } from './errors.mjs'
+export { CancelledError, ProtocolError, ResourceNotFoundError, ToolError } from './errors.mjs'
+export {
+  DEFAULT_BUDGET,
+  DEFAULT_MAX_QUERY_CHARS,
+  bindRequestLifecycle,
+  clientAddress,
+  createRequestBudget,
+  normalizeIp,
+  queryLengthProblem
+} from './budget.mjs'
 export { clip, extractHeadings, findSection, noteFileName, normalizeRecord, slugify, splitSections } from './records.mjs'
 export { validateArguments } from './validate.mjs'
 export { COURSES_URI, courseUri, noteUri, parseResourceUri, termsUri } from './uris.mjs'
