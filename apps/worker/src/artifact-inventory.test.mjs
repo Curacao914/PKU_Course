@@ -34,7 +34,7 @@ test('简报与一页纸：新鲜、失效、未绑定、孤立四类都能分�
     { slug: 'notes/刑法分论/第2节', courseName: '刑法分论', lessonTitle: '第2节', checksum: 'bbb999' },
     { slug: 'notes/刑法分论/第3节', courseName: '刑法分论', lessonTitle: '第3节', checksum: 'ddd444' }
   ]
-  const inventory = scanArtifactInventory({ dirs: [fresh, stale, unbound, orphan], records })
+  const inventory = scanArtifactInventory({ dirs: [fresh, stale, unbound, orphan], records, checksumOf: record => record.checksum })
   assert.equal(inventory.total, 5)
   assert.deepEqual(inventory.counts, { fresh: 2, stale: 1, unbound: 1, orphan: 1 })
 
@@ -88,3 +88,18 @@ test('空仓库也有话说（不报错）', () => {
   assert.match(formatInventory(inventory), /还没发现任何派生视图/)
   fs.rmSync(root, { recursive: true, force: true })
 })
+test('指纹口径：简报的 sourceChecksum 是**规范化**指纹，不能拿发布库里的原始字节 checksum 比', () => {
+  // 这是我自己踩过的坑：拿 record.checksum（原始字节）去比 brief.sourceChecksum（规范化），
+  // 结果所有简报都被报成"失效"——而发布时的判定（checkBriefBinding）比的正是规范化那一个。
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-artifacts-'))
+  fs.writeFileSync(path.join(dir, 'brief.json'), JSON.stringify({ course: '刑法分论', lesson: '第1节', sourceChecksum: 'normalized-1' }))
+  const records = [{ slug: 'notes/刑法分论/第1节', courseName: '刑法分论', lessonTitle: '第1节', checksum: 'raw-bytes-9', markdown: '正文' }]
+
+  const wrongPair = scanArtifactInventory({ dirs: [dir], records })
+  assert.equal(wrongPair.items[0].status, 'stale', '比错了对就会误报失效（记录下这个形状）')
+
+  const rightPair = scanArtifactInventory({ dirs: [dir], records, checksumOf: () => 'normalized-1' })
+  assert.equal(rightPair.items[0].status, 'fresh', '与发布时同一个口径 —— 才是真的同源')
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+

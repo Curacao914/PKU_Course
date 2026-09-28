@@ -1000,7 +1000,13 @@ export function createCommands(context) {
       if (hasArtifact) dirs.push(dir)
     }
     walk(path.resolve(config.scratchRoot), 0)
-    const artifacts = scanArtifactInventory({ dirs, records, integrationDir: path.join(config.scratchRoot, 'integrations') })
+    // 期望值用**规范化**指纹（与发布时的 checkBriefBinding / verifyDerived 同一套）
+    const artifacts = scanArtifactInventory({
+      dirs,
+      records,
+      integrationDir: path.join(config.scratchRoot, 'integrations'),
+      checksumOf: record => markdownChecksum(record.markdown || '')
+    })
 
     let missingMaterials = []
     try { missingMaterials = collectMissingMaterials({ courses: [], limit: 20 }) || [] } catch { missingMaterials = [] }
@@ -1066,7 +1072,7 @@ export function createCommands(context) {
     walk(path.resolve(config.scratchRoot), 0)
 
     const integrationDir = path.resolve(options.options['integrations'] || path.join(config.scratchRoot, 'integrations'))
-    const inventory = scanArtifactInventory({ dirs, records, integrationDir })
+    const inventory = scanArtifactInventory({ dirs, records, integrationDir, checksumOf: record => markdownChecksum(record.markdown || '') })
     const report = formatInventory(inventory)
     stderr(report)
     emit({

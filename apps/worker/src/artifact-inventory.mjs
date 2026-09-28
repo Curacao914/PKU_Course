@@ -41,7 +41,20 @@ function readJson (file) {
  * dirs 是"可能放产物的目录"（笔记输出目录、scratch 根下的各个课次目录…）；
  * records 是发布库（含每节课的 checksum）。两者都传进来，函数本身不猜路径。
  */
-export function scanArtifactInventory ({ dirs = [], records = [], integrationDir = '' } = {}) {
+export function scanArtifactInventory ({
+  dirs = [],
+  records = [],
+  integrationDir = '',
+  /**
+   * 简报/一页纸的绑定指纹**不是**发布库里的 checksum：
+   *   checksum（library.json）    = 原始字节的 SHA-256（markdownBytesChecksum）
+   *   sourceChecksum（brief/onepage）= 规范化后（CRLF→LF、去尾空白）的 SHA-256（markdownChecksum）
+   * 发布时的判定（checkBriefBinding / verifyDerived）比的也是规范化那一个。
+   * 所以这里必须由调用方传入"怎么算期望值"——直接用 record.checksum 比会**全部误报失效**
+   *（这个假警报我自己发出去过：3 件"过期简报"里没有一件真的过期）。
+   */
+  checksumOf = record => record?.checksum || ''
+} = {}) {
   const bySlug = new Map(records.map(record => [record.slug, record]))
   const byLesson = new Map()
   for (const record of records) {
@@ -50,7 +63,7 @@ export function scanArtifactInventory ({ dirs = [], records = [], integrationDir
   const items = []
 
   const push = (kind, file, artifact, match) => {
-    const current = match ? str(match.checksum) : ''
+    const current = match ? str(checksumOf(match)) : ''
     const bound = str(artifact?.sourceChecksum || artifact?.checksum || '')
     let status = 'fresh'
     if (!match) status = 'orphan'
