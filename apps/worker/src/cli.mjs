@@ -113,6 +113,8 @@ export async function runCli(argv = [], deps = {}) {
     sender: deps.sender,
     // 邮件发送器同样可注入：测试用假 sender，绝不真发邮件
     emailSender: deps.emailSender,
+    // 出网请求也可注入：清 CDN 缓存这类调用在测试里不该真的打到 Cloudflare
+    fetchImpl: deps.fetchImpl,
     sleep: deps.sleep,
     stdout,
     stderr

@@ -36,12 +36,41 @@ const CONTENT_TYPES = {
   '.xml': 'application/xml; charset=utf-8'
 }
 
+/**
+ * 每个响应都带上的安全头。
+ *
+ * CSP 里的 'unsafe-inline' 是**刻意**的：站点的阅读脚本、工具栏、管理台都是内联脚本
+ * （全站零依赖、没有构建步骤，这是这个项目的取舍）。它挡不住内联注入，但仍然
+ * 挡住了"从外部域加载一段脚本"这类最常见的注入路径，而且不改变站点行为。
+ * 真要收紧到 nonce，得让 publish 的每个页面生成器都带一个 nonce——那是另一件事。
+ */
+export const SECURITY_HEADERS = {
+  'x-content-type-options': 'nosniff',
+  'referrer-policy': 'strict-origin-when-cross-origin',
+  'x-frame-options': 'DENY',
+  'permissions-policy': 'geolocation=(), microphone=(), camera=(), payment=()',
+  'strict-transport-security': 'max-age=31536000; includeSubDomains',
+  'content-security-policy': [
+    "default-src 'self'",
+    "img-src 'self' data:",
+    "style-src 'self' 'unsafe-inline'",
+    "script-src 'self' 'unsafe-inline'",
+    "font-src 'self' data:",
+    // 站内搜索与阅读进度都走本站接口；不放开任何外部连接
+    "connect-src 'self'",
+    "frame-ancestors 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "object-src 'none'"
+  ].join('; ')
+}
+
 function send(res, status, body, headers = {}) {
   const payload = Buffer.isBuffer(body) ? body : Buffer.from(String(body ?? ''))
   res.writeHead(status, {
     'content-type': 'text/plain; charset=utf-8',
     'content-length': payload.length,
-    'x-content-type-options': 'nosniff',
+    ...SECURITY_HEADERS,
     ...headers
   })
   res.end(payload)
@@ -50,7 +79,9 @@ function send(res, status, body, headers = {}) {
 function sendJson(res, status, value, headers = {}) {
   send(res, status, `${JSON.stringify(value, null, 2)}\n`, {
     'content-type': 'application/json; charset=utf-8',
+    // 接口一律不进缓存、不进搜索引擎：里面的东西是给程序与本人看的
     'cache-control': 'no-store',
+    'x-robots-tag': 'noindex',
     ...headers
   })
 }

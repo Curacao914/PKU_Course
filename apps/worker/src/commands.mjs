@@ -9,7 +9,7 @@ import { checkFreeSpace, createValidatedAcquisitionRuntime, formatBytes } from '
 import {
   addMaterial, guessMaterialIdentity, listMaterials, ocrMaterial, parseInboxName, pendingOcrMaterials, readDecks, unassignedDir
 } from '@course/materials'
-import { purgeCloudflareCache } from '@course/publish'
+import { cacheUrlsFor, purgeCloudflareCache } from '@course/publish'
 
 import { hashPassword, validatePassword } from '@course/core'
 
@@ -203,6 +203,8 @@ export function createCommands(context) {
     env = process.env, now,
     // MCP 服务器可以被注入：测试不该真的挂起等 stdin；生产走 @course/notes-mcp 的实现
     mcpServer: injectedMcpServer,
+    // 出网请求可注入：清 CDN 缓存这类调用在测试里不该真的打到 Cloudflare
+    fetchImpl: injectedFetch = globalThis.fetch,
     stdout, stderr
   } = context
   const clockNow = () => (typeof now === 'function' ? now() : new Date())
@@ -868,11 +870,24 @@ export function createCommands(context) {
    * 边缘缓存是这个站点的命脉（读者在国内，一天 TTL 让页面快得多），但"改完要等一天"
    * 不能接受。清不掉也只是晚一点生效：这里永远返回结果，不抛错。
    */
-  async function purgeCache(options, { reason }) {
+  async function purgeCache(options, { reason, files = [] }) {
     if (options.flags?.has('no-purge')) return { ok: false, skipped: 'flag' }
-    const result = await purgeCloudflareCache({ env: process.env })
-    if (result.ok) stderr(`已清除 CDN 缓存（${reason}）`)
-    else if (result.skipped === 'no_token') stderr('没有 CLOUDFLARE_PURGE_TOKEN，跳过清缓存（改版后可能要等边缘 TTL 到期）')
+    const origin = options.options.origin || 'https://course.law-tech.dev'
+    /**
+     * 定向清理：只清这次真的写过的那些页面（含"干净链接"与 .html 两种缓存键）。
+     * law-tech.dev 这个 zone 上还有别的服务，purge_everything 会把它们的缓存一起踢掉——
+     * 为发一篇笔记顺手清空整个 zone 是不礼貌的。真要全清时用 --purge-all。
+     */
+    const everything = Boolean(options.flags?.has('purge-all'))
+    const urls = everything ? [] : cacheUrlsFor(files, origin)
+    // 用注入的 env（而不是 process.env）：测试与"从 env 文件读到的配置"都走同一条路径
+    const result = await purgeCloudflareCache({ urls, everything, env, fetchImpl: injectedFetch })
+    if (result.ok) {
+      stderr(everything
+        ? `已清空整个 CDN 缓存（${reason}）`
+        : `已定向清除 ${result.purged} 个缓存 URL（${reason}，${result.batches} 批）`)
+    } else if (result.skipped === 'no_token') stderr('没有 CLOUDFLARE_PURGE_TOKEN，跳过清缓存（改版后可能要等边缘 TTL 到期）')
+    else if (result.skipped === 'no_urls') stderr(`没有可清的 URL（${reason}）——本次没有写出文件？`)
     else stderr(`清缓存失败（${reason}）：${result.error || result.status || '原因不明'}——页面本身已经写好，只是边缘要等 TTL 到期`)
     return result
   }
@@ -1039,7 +1054,7 @@ export function createCommands(context) {
         docs: readPublicDocs()
       })
       const index = readSiteIndex(siteRoot)
-      const purge = await purgeCache(options, { reason: '重建站点' })
+      const purge = await purgeCache(options, { reason: '重建站点', files: site.written || [] })
       emit({
         rebuilt: true,
         notes: index.count ?? library.length,
@@ -1254,7 +1269,7 @@ export function createCommands(context) {
     // 页面写完才动发布库（提交点，见上面的说明）：tmp + fsync + rename 原子替换
     writeJsonAtomic(libraryForRebuild, nextLibrary)
     const index = readSiteIndex(siteRoot)
-    const purge = purgeCache(options, { reason: `发布 ${record.slug}` })
+    const purge = purgeCache(options, { reason: `发布 ${record.slug}`, files: site.written || [] })
 
     // 同一条笔记只通知一次；内容变化时才重新通知
     let delivery = null

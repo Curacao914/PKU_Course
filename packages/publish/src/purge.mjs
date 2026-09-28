@@ -17,9 +17,43 @@ export function cdnTokenFrom(env = process.env) {
   return String(env.CLOUDFLARE_PURGE_TOKEN || '').trim()
 }
 
+/** Cloudflare 单次 purge 最多 30 个 URL（超过会被拒），所以按批发。 */
+export const PURGE_BATCH_SIZE = 30
+
+/**
+ * 站点文件 → 需要清的缓存 URL。
+ *
+ * 两个容易漏的点：
+ *   1. **同一条路径有几种写法，边缘按 URL 分别缓存**。干净链接 /notes/课程/课次 与
+ *      /notes/课程/课次.html 是两个键；/search/ 与 /search/index.html 也是。
+ *      只清一种，读者换个写法进来还是旧页面。
+ *   2. 只清**这次真的写过**的文件：purge_everything 会把整个 zone 清空，
+ *      而 law-tech.dev 上还有别的服务——为了发一篇笔记把别人的缓存也踢掉是不礼貌的。
+ */
+export function cacheUrlsFor(files = [], origin = '') {
+  const base = String(origin || '').replace(/\/+$/, '')
+  const urls = new Set()
+  for (const raw of files) {
+    const file = String(raw || '').replace(/^\/+/, '')
+    if (!file) continue
+    if (file.endsWith('index.html')) {
+      const dir = file.slice(0, -'index.html'.length) // '' | 'search/'
+      urls.add(`${base}/${dir}`)
+      urls.add(`${base}/${file}`)
+      continue
+    }
+    urls.add(`${base}/${file}`)
+    if (file.endsWith('.html')) urls.add(`${base}/${file.slice(0, -'.html'.length)}`)
+  }
+  return [...urls]
+}
+
 export async function purgeCloudflareCache({
   token,
   zoneId,
+  urls = null,
+  // 只有"我就是要清空整个 zone"时才用它：默认按 URL 定向清
+  everything = false,
   fetchImpl = globalThis.fetch,
   timeoutMs = 15_000,
   env = process.env
@@ -27,28 +61,43 @@ export async function purgeCloudflareCache({
   const key = String(token || cdnTokenFrom(env)).trim()
   if (!key) return { ok: false, skipped: 'no_token' }
   if (typeof fetchImpl !== 'function') return { ok: false, skipped: 'no_fetch' }
+  const list = Array.isArray(urls) ? urls.filter(Boolean) : []
+  if (!everything && !list.length) return { ok: false, skipped: 'no_urls' }
 
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  // zone id 是固定值：不按名字去查，就不必给令牌额外开 Zone:Read 权限
+  const id = String(zoneId || env.CLOUDFLARE_ZONE_ID || DEFAULT_ZONE_ID).trim()
+  if (!id) return { ok: false, skipped: 'no_zone' }
+
   const headers = { authorization: `Bearer ${key}`, 'content-type': 'application/json' }
-  try {
-    // zone id 是固定值：不按名字去查，就不必给令牌额外开 Zone:Read 权限
-    const id = String(zoneId || env.CLOUDFLARE_ZONE_ID || DEFAULT_ZONE_ID).trim()
-    if (!id) return { ok: false, skipped: 'no_zone' }
-    const response = await fetchImpl(`https://api.cloudflare.com/client/v4/zones/${id}/purge_cache`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ purge_everything: true }),
-      signal: controller.signal
-    })
-    const payload = await response.json().catch(() => ({}))
-    if (!response.ok || payload.success === false) {
-      return { ok: false, zoneId: id, status: response.status, errors: payload.errors || [] }
+  const endpoint = `https://api.cloudflare.com/client/v4/zones/${id}/purge_cache`
+  const batches = everything ? [{ purge_everything: true }] : []
+  if (!everything) {
+    for (let index = 0; index < list.length; index += PURGE_BATCH_SIZE) {
+      batches.push({ files: list.slice(index, index + PURGE_BATCH_SIZE) })
     }
-    return { ok: true, zoneId: id }
-  } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) }
-  } finally {
-    clearTimeout(timer)
   }
+
+  let purged = 0
+  for (const body of batches) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      const response = await fetchImpl(endpoint, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: controller.signal
+      })
+      const payload = await response.json().catch(() => ({}))
+      if (!response.ok || payload.success === false) {
+        return { ok: false, zoneId: id, status: response.status, errors: payload.errors || [], purged }
+      }
+      purged += body.files ? body.files.length : 0
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error), purged }
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+  return { ok: true, zoneId: id, purged, batches: batches.length, everything }
 }

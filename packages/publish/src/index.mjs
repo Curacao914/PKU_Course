@@ -10,6 +10,7 @@ export {
 export {
   DEFAULT_ZONE_ID,
   cdnTokenFrom,
+  cacheUrlsFor,
   purgeCloudflareCache
 } from './purge.mjs'
 

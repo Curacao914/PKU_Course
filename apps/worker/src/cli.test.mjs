@@ -1041,6 +1041,34 @@ test('课次标题改了（slug 跟着变）时，旧记录按 replayKey 换掉�
   assert.equal(library[0].firstPublishedAt, '2026-09-16T00:00:00.000Z', '改名不重置首次进站时间')
 })
 
+test('发布只定向清理这次写过的页面（law-tech.dev 上还有别的服务，不能全清）', async () => {
+  // purge_everything 会把整个 zone 的缓存清空：为发一篇笔记把别的服务缓存一起踢掉是不礼貌的。
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-purge-'))
+  const notesDir = path.join(dir, 'notes')
+  fs.mkdirSync(notesDir, { recursive: true })
+  fs.writeFileSync(path.join(notesDir, 'notes-run-summary.json'), JSON.stringify({ course: '刑法分论', lesson: '第10-12节', status: 'completed' }))
+  fs.writeFileSync(path.join(notesDir, '第10-12节.md'), ['# 第10-12节', '', '## 一、共犯', '', '正文。'].join('\n'))
+
+  const purgeCalls = []
+  const { deps } = harness({
+    fetchImpl: async (url, options = {}) => {
+      if (String(url).includes('purge_cache')) {
+        purgeCalls.push({ url, body: JSON.parse(options.body || '{}') })
+        return { ok: true, status: 200, json: async () => ({ success: true, result: {} }) }
+      }
+      return { ok: false, status: 404, json: async () => ({ success: false }) }
+    }
+  })
+  const env = { ...deps.env, CLOUDFLARE_PURGE_TOKEN: 'cfut_test' }
+  const code = await runCli(['publish', '--from', notesDir, '--out', path.join(dir, 'site'), '--no-notify'], { ...deps, env })
+  assert.equal(code, 0)
+  assert.ok(purgeCalls.length >= 1, '发布后要通知边缘清缓存')
+  assert.equal(purgeCalls.some(call => 'purge_everything' in call.body), false, '不得使用 purge_everything')
+  const files = purgeCalls.flatMap(call => call.body.files || [])
+  assert.ok(files.some(url => url.includes('/notes/刑法分论/第10-12节.html')), '要清这一节的页面')
+  assert.ok(files.some(url => url.includes('/index.html') || url.endsWith('/')), '首页也在这次写过的文件里')
+})
+
 test('publish --rebuild rewrites the site from the library without touching the ledger', async () => {
   // 换模板、改样式之后要重生成 HTML，但这些跟笔记内容无关：不该为了它们再跑一遍模型，
   // 也不该因为"重新生成"而再推一次微信。

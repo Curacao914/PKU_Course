@@ -152,6 +152,35 @@ test('旧的平铺 md 链接 302 到规范路径；库里没有的不猜', async
   }
 })
 
+test('每个响应都带安全头：CSP 只允许本站与内联，框架禁止嵌入', async () => {
+  // 站点全站零依赖、阅读脚本是内联的（没有构建步骤），所以 CSP 里的 'unsafe-inline' 是刻意的；
+  // 但它仍然挡住"从外部域加载脚本"这条最常见的注入路径。
+  const root = siteDir()
+  const site = await startSiteServer({ root, port: 0 })
+  try {
+    for (const path of ['/', '/notes/刑法分论/第10-12节.html', '/md/刑法分论/第10-12节.md']) {
+      const response = await fetch(site.url + path)
+      assert.equal(response.status, 200)
+      assert.equal(response.headers.get('x-content-type-options'), 'nosniff')
+      assert.equal(response.headers.get('x-frame-options'), 'DENY')
+      assert.match(response.headers.get('referrer-policy'), /strict-origin/)
+      assert.match(response.headers.get('strict-transport-security'), /max-age=\d+/)
+      const csp = response.headers.get('content-security-policy')
+      assert.match(csp, /default-src 'self'/)
+      assert.match(csp, /frame-ancestors 'none'/, '不允许被别的站点嵌进 iframe')
+      assert.match(csp, /object-src 'none'/)
+      assert.ok(!/https?:\/\//.test(csp), '不放开任何外部来源')
+    }
+    // 接口与站内检索：不进缓存、不进搜索引擎
+    const api = await fetch(site.url + '/api/notes')
+    assert.equal(api.headers.get('cache-control'), 'no-store')
+    assert.equal(api.headers.get('x-robots-tag'), 'noindex')
+  } finally {
+    await site.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('admin endpoints fail closed when no token is configured', async () => {
   const site = await startSiteServer({ root: siteDir(), port: 0 })
   try {
