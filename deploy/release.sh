@@ -65,6 +65,16 @@ mkdir -p "$TARGET"
 rsync -a --delete --exclude '.git' --exclude 'node_modules' \
   ${LINK_DEST:+--link-dest="$LINK_DEST"} "$SRC/" "$TARGET/"
 
+# Python 虚拟环境不在 release 里：它装在 ~/venvs/course（稳定路径），
+# 每个 release 里放一个符号链接指过去。**踩过这个坑**：第一次改造发布式部署时，
+# .venv 跟着旧目录变成了 legacy-*，新 release 里没有它，doctor 立刻报 python missing——
+# ASR 会在下一轮 cycle 直接失败。凡是"跨 release 共享的东西"都要放在 release 之外。
+VENV="${HOME_DIR}/venvs/course"
+if [ -d "$VENV" ] && [ ! -e "$TARGET/.venv" ]; then
+  ln -s "$VENV" "$TARGET/.venv"
+  log "   · 链接 Python 环境：$TARGET/.venv → $VENV"
+fi
+
 # 依赖：从上一个 release 硬链接过来（同一块盘、几乎不占空间），没有就借现有的。
 if [ ! -e "$TARGET/node_modules" ]; then
   if [ -n "$LINK_DEST" ] && [ -d "$LINK_DEST/node_modules" ]; then
