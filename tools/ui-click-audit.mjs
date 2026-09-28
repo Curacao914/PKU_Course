@@ -1546,6 +1546,17 @@ async function auditSearch(page, site, failures) {
     await record('课程筛选收窄结果并写进地址栏', false, '页面里没有课程筛选项')
   }
 
+  // ── 空数据：字面没有、语义入口又没开，页面要说清是两回事 ──
+  await page.fill('#q', '量子纠缠与公司法')
+  await page.waitForTimeout(700)
+  const emptyState = await page.evaluate(() => ({
+    hint: document.getElementById('hint').textContent.trim(),
+    cards: document.querySelectorAll('#results .card.group').length
+  }))
+  await record('无结果时分别表达（不都说"知识库没有"）',
+    emptyState.cards === 0 && /字面没有找到/.test(emptyState.hint) && /未启用语义检索/.test(emptyState.hint),
+    '提示「' + emptyState.hint + '」')
+
   // ── 返回搜索：query、筛选、滚动位置都要还在 ──
   await page.fill('#q', '执行措施')
   await page.waitForTimeout(600)
