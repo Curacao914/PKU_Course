@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      # 仓库没有任何第三方依赖（zero-dep），所以不需要 npm ci：直接跑测试
+      - name: 单元与集成测试
+        run: npm test
+
+# 说明：npm run test:ui 打开的是真浏览器（Playwright 驱动本机 Chrome），
+# 需要额外装浏览器与依赖，本地与服务器上跑更合适，不放进 CI。
