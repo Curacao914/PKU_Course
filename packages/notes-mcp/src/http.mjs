@@ -1,4 +1,4 @@
-import { createProtocolServer } from './protocol.mjs'
+import { SUPPORTED_PROTOCOL_VERSIONS, createProtocolServer } from './protocol.mjs'
 
 /**
  * Streamable HTTP 传输：把同一个协议服务器挂到 `POST /mcp` 上。
@@ -64,6 +64,30 @@ export function createMcpHttpHandler({
     if (method !== 'POST') {
       res.writeHead(405, { ...common, allow: 'POST, DELETE, OPTIONS' })
       res.end()
+      return true
+    }
+
+    /**
+     * 协议版本头：2025-06-18 起，客户端在 initialize 之后的每个请求都要带
+     * mcp-protocol-version；服务器收到**不支持**的版本必须回 400，而不是硬着头皮解析。
+     * 不带这个头时按规范当 2025-03-26 处理（老客户端没有这个头），继续走。
+     */
+    const declaredVersion = String(req.headers['mcp-protocol-version'] || '').trim()
+    if (declaredVersion && !SUPPORTED_PROTOCOL_VERSIONS.includes(declaredVersion)) {
+      const payload = JSON.stringify({
+        jsonrpc: '2.0',
+        id: null,
+        error: {
+          code: -32600,
+          message: `不支持的协议版本 ${declaredVersion}；本服务器支持：${SUPPORTED_PROTOCOL_VERSIONS.join(' / ')}`
+        }
+      })
+      res.writeHead(400, {
+        ...common,
+        'content-type': 'application/json; charset=utf-8',
+        'content-length': Buffer.byteLength(payload)
+      })
+      res.end(payload)
       return true
     }
 

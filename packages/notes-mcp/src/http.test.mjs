@@ -73,6 +73,43 @@ function rpc(url, body, options = {}) {
   })
 }
 
+test('MCP-Protocol-Version：不支持的版本回 400，支持的与不带的都照常', async () => {
+  // 2025-06-18 起客户端要在每个请求上带这个头；规范要求服务器收到不支持的版本时回 400，
+  // 而不是硬着头皮解析（那会让客户端看到一个语法正确、语义却对不上的响应）。
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-mcp-http-'))
+  const library = path.join(dir, 'library.json')
+  fs.writeFileSync(library, JSON.stringify(LIBRARY))
+  const server = http.createServer(createMcpHttpHandler({
+    service: createNotesService({ source: createLocalLibrarySource({ file: library }) }),
+    log: () => {}
+  }))
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  const url = `http://127.0.0.1:${server.address().port}/mcp`
+  const call = (headers, body) => fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json', ...headers },
+    body: JSON.stringify(body)
+  })
+
+  try {
+    const unsupported = await call({ 'mcp-protocol-version': '1999-01-01' }, { jsonrpc: '2.0', id: 1, method: 'tools/list' })
+    assert.equal(unsupported.status, 400)
+    const payload = await unsupported.json()
+    assert.match(payload.error.message, /不支持的协议版本/)
+
+    const supported = await call({ 'mcp-protocol-version': '2025-06-18' }, { jsonrpc: '2.0', id: 2, method: 'tools/list' })
+    assert.equal(supported.status, 200)
+    assert.equal((await supported.json()).result.tools.length > 0, true)
+
+    // 不带这个头：按规范当老客户端（2025-03-26）处理，不影响使用
+    const legacy = await call({}, { jsonrpc: '2.0', id: 3, method: 'tools/list' })
+    assert.equal(legacy.status, 200)
+  } finally {
+    await new Promise(resolve => server.close(resolve))
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('Remote MCP：一次 HTTP 往返就能 initialize 并列出七个工具', async () => {
   const site = await startServer()
   try {
