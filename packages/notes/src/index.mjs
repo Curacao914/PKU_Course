@@ -129,6 +129,13 @@ export {
 } from './task-runner.mjs'
 
 export {
+  buildIntegrationPlan,
+  checkIntegrationSources,
+  renderIntegrationMarkdown,
+  selectLessons
+} from './integration.mjs'
+
+export {
   checkMarkerPropagation,
   checkMetadata,
   checkNoteQuality,

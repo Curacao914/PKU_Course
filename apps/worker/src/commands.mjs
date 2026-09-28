@@ -9,7 +9,7 @@ import { checkFreeSpace, createValidatedAcquisitionRuntime, formatBytes } from '
 import {
   addMaterial, guessMaterialIdentity, listMaterials, ocrMaterial, parseInboxName, pendingOcrMaterials, readDecks, unassignedDir
 } from '@course/materials'
-import { checkNoteQuality, formatQualityReport } from '@course/notes'
+import { buildIntegrationPlan, checkNoteQuality, formatQualityReport, renderIntegrationMarkdown } from '@course/notes'
 import { cacheUrlsFor, extractNoteMetadata, purgeCloudflareCache } from '@course/publish'
 
 import { NOTIFY_POLICY, clearPending, pendingNotifications, planNotification, resolveNotifyPolicy } from './notify-outbox.mjs'
@@ -59,6 +59,7 @@ import {
   migrateRecordTime,
   noteSlug,
   readSiteIndex,
+  slugify,
   verifyDerived,
   writeJsonAtomic,
   writeSite
@@ -930,6 +931,55 @@ export function createCommands(context) {
    * 与 course brief 一样是「只重跑一步」的入口：笔记已经跑完、只想补一页纸时用它，
    * 不必把整条流水线再走一遍。输出 onepage.json，发布时会被带进站点。
    */
+  /**
+   * 章级整合（Phase 5.2 B2 原型）。
+   *
+   * 读**发布库**（不碰账本、不发通知、不花钱）：跨课次的概念对照、反复出现的问题、
+   * 论证推进、待核继承、以及每一行的出处。默认只做确定性抽取（可复现、可单测）；
+   * --live（让模型补连接性文字）还没接——那需要预算与一次单独的评审，别让它悄悄花钱。
+   */
+  async function integrateRun(options) {
+    const siteRoot = path.resolve(options.options['site-root'] || path.join(config.scratchRoot, 'site'))
+    const libraryFile = path.resolve(options.options.library || path.join(siteRoot, 'library.json'))
+    if (!fs.existsSync(libraryFile)) throw new Error(`找不到发布库 ${libraryFile}（先 course publish，或用 --library 指一份）`)
+    const records = JSON.parse(fs.readFileSync(libraryFile, 'utf8'))
+    const course = requireOption(options.options, 'course', 'integrate')
+    const lessons = String(options.options.lessons || '').split(',').map(item => item.trim()).filter(Boolean)
+    if (options.flags?.has('live')) {
+      throw new Error('--live 还没接：章级整合目前只做确定性抽取（结构 + 出处）；让模型补写正文需要单独评审与预算，见 docs/14')
+    }
+    const plan = buildIntegrationPlan({
+      records,
+      course,
+      lessons,
+      topic: options.options.topic || '',
+      generatedAt: clockNow().toISOString()
+    })
+    const outputDir = path.resolve(options.options['out-dir'] || path.join(config.scratchRoot, 'integrations'))
+    fs.mkdirSync(outputDir, { recursive: true })
+    const base = `${slugify(plan.course, 'course')}-${slugify(plan.topic, 'topic')}`
+    const markdownFile = path.join(outputDir, `${base}.md`)
+    const planFile = path.join(outputDir, `${base}.json`)
+    writeJsonAtomic(planFile, plan)
+    fs.writeFileSync(markdownFile, renderIntegrationMarkdown(plan))
+
+    const problems = plan.findings || []
+    const errors = problems.filter(item => item.level === 'error')
+    if (errors.length) stderr(`出处检查：${errors.length} 行没有出处（应当为 0）——${errors[0].message}`)
+    emit({
+      course: plan.course,
+      topic: plan.topic,
+      lessons: plan.lessons.map(item => ({ lessonTitle: item.lessonTitle, lessonDate: item.lessonDate, contentFingerprint: item.contentFingerprint })),
+      concepts: { total: plan.concepts.length, crossLesson: plan.concepts.filter(item => item.rows.length >= 2).length },
+      issues: plan.issues.length,
+      openMarkers: plan.openMarkers.length,
+      sourceProblems: problems.length,
+      markdownFile,
+      planFile
+    }, options)
+    return errors.length ? 1 : 0
+  }
+
   async function onepageRun(options) {
     const from = path.resolve(requireOption(options.options, 'from', 'onepage'))
     const course = requireOption(options.options, 'course', 'onepage')
@@ -2948,7 +2998,7 @@ export function createCommands(context) {
   return {
     doctor, discover, download, transcribe, notes, materials, balance, publish,
     notify, cycle, verify, status, retry, prune, backup, digest, 'ppt-reminder': pptReminder,
-    brief: briefRun, onepage: onepageRun,
+    brief: briefRun, onepage: onepageRun, integrate: integrateRun,
     'admin-passwd': adminPassword, mcp
   }
 }
@@ -2999,6 +3049,11 @@ export const USAGE = `用法：course <命令> [选项]
   balance    [--threshold <元>]                   查两个付费 API 的余额（DeepSeek 官方接口；
                                            阿里云余额需账号 AK/SK，见 docs/07）
   onepage    --from <笔记.md 或所在目录> --course <名称> --lesson <课次> [--out <目录>]
+                                           生成一页纸摘要（A4 一张，模型写，输出 onepage.json）
+  integrate  --course <名称> [--lessons <课次,课次>] [--topic <主题>]
+             [--library <library.json>] [--out-dir <目录>]
+                                           章级整合（跨课次的概念对照 / 反复出现的问题 / 论证推进 /
+                                           待核继承），只做确定性抽取，每一行都带出处；不花钱、不发通知
              [--replay-key <键>]
                                            只重跑一页纸摘要：把一节笔记压进一张 A4（复习只看这一页）
                                            产物带 sourceChecksum（所依据正文的 SHA-256），发布时校验

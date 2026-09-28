@@ -5,7 +5,7 @@ export class UsageError extends Error {
   }
 }
 
-export const COMMANDS = ['doctor', 'discover', 'download', 'transcribe', 'notes', 'materials', 'balance', 'publish', 'notify', 'cycle', 'verify', 'status', 'retry', 'prune', 'backup', 'digest', 'ppt-reminder', 'brief', 'onepage', 'admin-passwd', 'mcp', 'help']
+export const COMMANDS = ['doctor', 'discover', 'download', 'transcribe', 'notes', 'materials', 'balance', 'publish', 'notify', 'cycle', 'verify', 'status', 'retry', 'prune', 'backup', 'digest', 'ppt-reminder', 'brief', 'onepage', 'integrate', 'admin-passwd', 'mcp', 'help']
 
 /**
  * 解析命令行。
