@@ -50,7 +50,13 @@ export function renderCourse(data) {
     if (lesson.theme) lines.push(`  theme：${lesson.theme}`)
     if (lesson.keywords.length) lines.push(`  keywords：${lesson.keywords.join('、')}`)
     if (lesson.summary) lines.push(`  摘要：${lesson.summary}`)
-    if (lesson.outline?.length) lines.push(`  小节：${lesson.outline.map(head => head.text).join(' / ')}`)
+    // outline 可以是数组（老形状）或分页对象 { items, total, truncated, ... }（新形状）。
+    // 被截断时必须说出来：否则模型以为"这篇就这么多小节"，后面那些永远读不到。
+    const outline = Array.isArray(lesson.outline) ? { items: lesson.outline, total: lesson.outline.length, truncated: false } : lesson.outline
+    if (outline?.items?.length) {
+      lines.push(`  小节（${outline.returned ?? outline.items.length}/${outline.total ?? outline.items.length}）：${outline.items.map(head => head.text).join(' / ')}`)
+      if (outline.truncated) lines.push(`  （还有 ${outline.total - (outline.offset || 0) - outline.items.length} 节没显示：用 outlineOffset 继续翻）`)
+    }
   }
   if (!data.lessons.length) lines.push('（这门课还没有已发布的课次）')
   if (data.lessonCount > data.lessons.length) lines.push(`（还有 ${data.lessonCount - data.lessons.length} 节未显示，用 limit 调整）`)

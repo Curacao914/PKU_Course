@@ -74,7 +74,12 @@ test('get_course：课次清单含 theme/keywords/摘要，不含正文', async 
   assert.equal(desc.returned, 1)
 
   const withOutline = await service.getCourse({ course: '刑法总论', includeOutline: true })
-  assert.ok(withOutline.lessons[0].outline.some(head => head.text === '一、法律主义'))
+  // outline 现在是分页对象：不静默截断，总数/返回数/是否截断都报出来
+  const outline = withOutline.lessons[0].outline
+  assert.ok(outline.items.some(head => head.text === '一、法律主义'))
+  assert.equal(outline.total, outline.items.length)
+  assert.equal(outline.truncated, false)
+  assert.ok(outline.items[0].id, '目录项要带锚点 id，模型才能按 section 去取正文')
 })
 
 test('get_course：课程名部分匹配、歧义与找不到都给候选', async () => {
@@ -124,9 +129,15 @@ test('search_notes：元数据没命中时自动扫正文（并说明扫过）�
   assert.equal(withBody.total, 1)
   assert.equal(withBody.hits[0].slug, NOTE_ONE)
 
-  // 元数据命中时不必扫正文：省一次正文读取
+  // 元数据命中时**不必下沉**（escalated=false）：正文就在本地库里，auto 会顺带用上，
+  // 所以 bodyScanned 是 true；"索引答不上来才去翻正文"这件事由 escalated 表达。
   const metadata = await service.searchNotes({ query: '归因' })
-  assert.equal(metadata.bodyScanned, false)
+  assert.equal(metadata.escalated, false)
+  assert.equal(metadata.coverage, 'body')
+  // 显式只查索引：不碰正文
+  const indexOnly = await service.searchNotes({ query: '归因', coverage: 'index' })
+  assert.equal(indexOnly.bodyScanned, false)
+  assert.equal(indexOnly.coverage, 'index')
 })
 
 test('search_notes：空查询报错，limit 截断但保留 total', async () => {

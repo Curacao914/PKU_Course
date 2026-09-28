@@ -93,6 +93,10 @@ export function renderMarkdown(markdown) {
   const lines = String(markdown ?? '').replace(/\r\n?/g, '\n').split('\n')
   const blocks = []
   let index = 0
+  // 同名标题在页面上必须各有各的 id，否则锚点只能落在第一处：检索说"在第二节"、
+  // 点进去跳到第一节。第一处保持原 id（已有链接不断），重复的加 -2/-3。
+  // 规则与 extractHeadings 里的完全一致——不一致就会出现"目录指向的 id 页面上没有"。
+  const usedIds = new Map()
 
   while (index < lines.length) {
     const line = lines[index]
@@ -160,8 +164,11 @@ export function renderMarkdown(markdown) {
       // 标题要带 id：目录链接、滚动高亮、锚点跳转全靠它。
       // 此前只渲染 <h2>文本</h2>，目录里的 #锚点 实际是死链——点了不动，
       // 而且"当前小节高亮"无从实现。
-      const text = heading[2].trim()
-      const id = slugify(text)
+      const text = heading[2].trim().replace(/\s+#+\s*$/, '').trim()
+      const base = slugify(text)
+      const seen = (usedIds.get(base) || 0) + 1
+      usedIds.set(base, seen)
+      const id = seen === 1 ? base : `${base}-${seen}`
       const idAttribute = id ? ` id="${escapeHtml(id)}"` : ''
       blocks.push(`<h${level}${idAttribute}>${renderInline(text)}</h${level}>`)
       index += 1
@@ -249,14 +256,80 @@ export function summarizeMarkdown(markdown, limit = 150) {
  * 收到 h4：模块分节是 h3，模块内部的小节是 h4——目录要显示到这一级才有"分级"，
  * 否则读者看到的是几十个平铺的标题。
  */
-export function extractHeadings(markdown) {
-  const headings = []
-  for (const line of String(markdown ?? '').split('\n')) {
-    const match = line.match(/^(#{2,4})\s+(.*)$/)
-    if (match) headings.push({ level: match[1].length, text: match[2].trim(), id: slugify(match[2]) })
+/**
+ * 扫标题行：**渲染器、目录、小节索引共用这一份**（三处的 id 必须完全一致，
+ * 否则会出现"目录指向的 id 页面上没有""索引说在第二节、点进去跳到第一节"）。
+ *
+ * 两条规则：
+ *   · 代码围栏里的 "# 注释" 不是标题；
+ *   · 同名标题按出现顺序加 -2/-3，第一处保持原 id。
+ */
+function scanHeadings(markdown) {
+  const heads = []
+  const usedIds = new Map()
+  let fence = ''
+  const lines = String(markdown ?? '').replace(/\r\n?/g, '\n').split('\n')
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const line = lines[lineIndex]
+    const fenceMatch = line.match(/^\s{0,3}(```+|~~~+)/)
+    if (fenceMatch) {
+      const marker = fenceMatch[1][0]
+      if (!fence) fence = marker
+      else if (fence === marker) fence = ''
+      continue
+    }
+    if (fence) continue
+    const match = line.match(/^(#{1,6})\s+(.*)$/)
+    if (!match) continue
+    const text = match[2].trim().replace(/\s+#+\s*$/, '').trim()
+    if (!text) continue
+    const base = slugify(text)
+    const seen = (usedIds.get(base) || 0) + 1
+    usedIds.set(base, seen)
+    heads.push({ level: match[1].length, text, id: seen === 1 ? base : `${base}-${seen}`, line: lineIndex })
   }
-  return headings
+  return heads
 }
+
+/** 内容指纹：FNV-1a 32 位 → 8 位十六进制（判断"这一段正文还是不是那一段"）。 */
+export function fingerprintOf(text) {
+  const value = String(text ?? '')
+  let hash = 0x811c9dc5
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return hash.toString(16).padStart(8, '0')
+}
+
+/**
+ * 全量小节索引：id / 标题 / 层级 / 字数 / **内容指纹**，不含正文。
+ *
+ * 进公开索引（notes.json 与 /api/notes）就是要让检索与"取正文"指到同一处：
+ * 命中落在哪一节、点进去锚点到哪、这一节是不是索引里那一节（指纹对不上就重新定位）。
+ * 正文本身不进索引，索引体积仍是可控的。
+ */
+export function sectionIndex(markdown) {
+  const lines = String(markdown ?? '').replace(/\r\n?/g, '\n').split('\n')
+  const heads = scanHeadings(markdown)
+  return heads.map((head, index) => {
+    let end = lines.length
+    for (let next = index + 1; next < heads.length; next += 1) {
+      if (heads[next].level <= head.level) { end = heads[next].line; break }
+    }
+    const child = heads.slice(index + 1).find(item => item.line < end)
+    const ownEnd = child ? child.line : end
+    const own = lines.slice(head.line + 1, ownEnd).join('\n').trim()
+    return { id: head.id, title: head.text, level: head.level, chars: own.length, fingerprint: fingerprintOf(own) }
+  })
+}
+
+export function extractHeadings(markdown) {
+  return scanHeadings(markdown)
+    .filter(head => head.level >= 2 && head.level <= 4)
+    .map(head => ({ level: head.level, text: head.text, id: head.id }))
+}
+
 
 export function slugify(value, fallback = 'section') {
   const slug = String(value ?? '')

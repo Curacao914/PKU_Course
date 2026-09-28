@@ -17,14 +17,53 @@ export function slugify(value, fallback = 'section') {
   return slug || fallback
 }
 
+/**
+ * 扫一遍 Markdown 的标题行。**extractHeadings 与 splitSections 共用这一份实现**——
+ * 以前两处各写一遍正则，改一处忘一处就会让"目录里的小节"与"能取到正文的小节"对不上。
+ *
+ * 两个必须处理的坑：
+ *   1. **代码围栏里的不算标题**。笔记里有大量 ```bash / ``` 块，块里的 "# 注释"
+ *      会被当成一级标题：小节凭空多出几个、锚点被假节点抢走、按 section 取正文取到半截。
+ *   2. **id 必须唯一**。两节同名（每个模块下都有"课程概览"）时旧实现给出同一个 id，
+ *      页面上的锚点只能落到第一处——检索说"在第二节"、点进去跳到第一节。
+ *      重复的加 -2/-3；同时把原始 slug 与标题记进 aliases，findSection 仍然按标题找得到。
+ *      （第一处的 id 不变，所以线上已有的锚点不会被这次改动打断。）
+ */
+function scanHeadings(lines) {
+  const heads = []
+  const used = new Map()
+  let fence = ''
+  lines.forEach((line, index) => {
+    const fenceMatch = line.match(/^\s{0,3}(```+|~~~+)/)
+    if (fenceMatch) {
+      const marker = fenceMatch[1][0]
+      if (!fence) fence = marker
+      else if (fence === marker) fence = ''
+      return
+    }
+    if (fence) return
+    const match = line.match(/^(#{1,6})\s+(.+?)\s*$/)
+    if (!match) return
+    // 闭合式 ATX（"## 标题 ##"）要去掉尾部的井号
+    const title = match[2].trim().replace(/\s+#+\s*$/, '').trim()
+    if (!title) return
+    const base = slugify(title)
+    const seen = (used.get(base) || 0) + 1
+    used.set(base, seen)
+    heads.push({
+      level: match[1].length,
+      title,
+      id: seen === 1 ? base : `${base}-${seen}`,
+      aliases: seen === 1 ? [base, title] : [base, title, `${base}-${seen}`],
+      line: index
+    })
+  })
+  return heads
+}
+
 /** 从 Markdown 抽标题（1—6 级；publish 的目录只用 2—4 级，这里要能按任意小节截取）。 */
 export function extractHeadings(markdown = '') {
-  const headings = []
-  for (const line of String(markdown ?? '').split('\n')) {
-    const match = line.match(/^(#{1,6})\s+(.+?)\s*$/)
-    if (match) headings.push({ level: match[1].length, text: match[2].trim(), id: slugify(match[2]) })
-  }
-  return headings
+  return scanHeadings(String(markdown ?? '').split('\n')).map(({ level, title, id }) => ({ level, text: title, id }))
 }
 
 /**
@@ -36,11 +75,7 @@ export function extractHeadings(markdown = '') {
  */
 export function splitSections(markdown = '') {
   const lines = String(markdown ?? '').split('\n')
-  const heads = []
-  lines.forEach((line, index) => {
-    const match = line.match(/^(#{1,6})\s+(.+?)\s*$/)
-    if (match) heads.push({ level: match[1].length, title: match[2].trim(), id: slugify(match[2]), line: index })
-  })
+  const heads = scanHeadings(lines)
   return heads.map((head, index) => {
     let end = lines.length
     for (let next = index + 1; next < heads.length; next += 1) {
@@ -70,11 +105,48 @@ export function findSection(markdown = '', needle = '') {
   if (!target) return null
   const sections = splitSections(markdown).filter(section => section.title)
   const key = target.normalize('NFKC').toLowerCase()
+  // 先按 id（含重复标题的 -2/-3 后缀），再按别名（原始 slug 与标题）——
+  // 别名让"课程概览"这种重复标题仍然能找到第一节，而 `课程概览-2` 精确命中第二节。
   const byId = sections.find(section => section.id === target || section.id === key)
   if (byId) return byId
+  const byAlias = sections.find(section =>
+    (section.aliases || []).some(alias => String(alias).normalize('NFKC').toLowerCase() === key))
+  if (byAlias) return byAlias
   const exact = sections.find(section => section.title.normalize('NFKC').toLowerCase() === key)
   if (exact) return exact
   return sections.find(section => section.title.normalize('NFKC').toLowerCase().includes(key)) || null
+}
+
+/** 内容指纹：FNV-1a 32 位 → 8 位十六进制（够短、够稳，用来判断"这段正文还是不是那段"）。 */
+export function fingerprintOf(text = '') {
+  const value = String(text ?? '')
+  let hash = 0x811c9dc5
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return hash.toString(16).padStart(8, '0')
+}
+
+/**
+ * 全量小节索引：每一节的 id / 标题 / 层级 / 字数 / **内容指纹**。
+ *
+ * 为什么要有它：检索与"取正文"必须指到同一处。索引里带指纹，就能在拿到正文后确认
+ * "这一节还是索引里那一节"（发布后小节被改过、或索引过期时，指纹对不上就重新定位），
+ * 而不是拿一个过期的 id 去锚定读者。索引不含正文，所以放进公开索引也不会把整库正文
+ * 塞进 /api/notes。
+ */
+export function sectionIndex(markdown = '') {
+  return splitSections(markdown).filter(section => section.title).map(section => ({
+    id: section.id,
+    title: section.title,
+    level: section.level,
+    aliases: section.aliases || [],
+    // trim 后计算：publish 侧（sectionIndex）也是这么算的，两边必须给出同一个指纹，
+    // 否则"索引里的这一节"与"正文里的这一节"永远对不上。
+    chars: String(section.ownBody || '').trim().length,
+    fingerprint: fingerprintOf(String(section.ownBody || '').trim())
+  }))
 }
 
 /** 截断到 limit 字，尾巴加省略号（给模型看的摘要用）。 */

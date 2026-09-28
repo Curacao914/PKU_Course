@@ -116,7 +116,15 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
   }
 
   /** 第二层：一门课的课次清单（不含正文）。 */
-  async function getCourse({ course = '', limit = 100, order = 'asc', includeOutline = false } = {}, context = {}) {
+  async function getCourse({
+    course = '',
+    limit = 100,
+    order = 'asc',
+    includeOutline = false,
+    // 目录分页：**不再静默截断**——截断了就报总数与被截断这件事，调用方自己决定要不要翻页
+    outlineLimit = 60,
+    outlineOffset = 0
+  } = {}, context = {}) {
     const records = await listNotes(context)
     const courseName = resolveCourse(records, course)
     const list = records.filter(record => record.courseName === courseName).sort(byLessonAsc)
@@ -130,9 +138,7 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
       theme: record.theme,
       keywords: record.keywords.slice(0, 6),
       summary: clip(record.summary || record.brief?.briefing || '', 180),
-      ...(includeOutline
-        ? { outline: record.headings.slice(0, 16).map(head => ({ level: head.level, text: head.text, id: head.id })) }
-        : {})
+      ...(includeOutline ? { outline: outlineOf(record, outlineLimit, outlineOffset) } : {})
     }))
     return { courseName, teacher, lessonCount: list.length, returned: lessons.length, order, limit, lessons }
   }
@@ -144,7 +150,14 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
    * 查询解析（多词、自然语言、错别字）与打分（字段权重 × IDF）都在 search.mjs，
    * 这里只负责：取数据、限定范围、把结果按 limit 收口。
    */
-  async function searchNotes({ query = '', course = '', includeBody = false, limit = 8 } = {}, context = {}) {
+  /**
+   * 跨课次/跨课程检索。
+   *
+   * 覆盖策略只有一处默认（search.mjs 的 coverage='auto'）：**站点搜索、MCP 专用检索、
+   * OpenAI 标准 search 三个入口共用它**，所以同一句话在哪里问都得到同一批结果。
+   * includeBody 仍然保留（true = coverage:'body'），老调用方不受影响。
+   */
+  async function searchNotes({ query = '', course = '', includeBody, coverage, perNoteSections = 2, limit = 8 } = {}, context = {}) {
     const text = String(query || '').trim()
     if (!text) throw new ToolError('search_notes 需要非空的 query。')
     const records = await listNotes(context)
@@ -152,7 +165,9 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
     const found = await searchRecords({
       records: scoped,
       query: text,
-      includeBody: Boolean(includeBody),
+      includeBody: includeBody === undefined ? undefined : Boolean(includeBody),
+      ...(coverage ? { coverage } : {}),
+      perNoteSections,
       readMarkdown: (slug, options) => source.readMarkdown(slug, options),
       // 取消信号：客户端断开或超时后，检索在下一个检查点就退出，不再白算
       signal: context?.signal
@@ -165,6 +180,8 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
     return {
       query: text,
       course: course ? scoped[0]?.courseName || String(course) : '',
+      // includeBody = "调用方有没有要求连正文一起查"（保持原语义，不随覆盖策略漂移）；
+      // 实际用到哪一层看 coverage / escalated
       includeBody: Boolean(includeBody),
       ...found,
       limit,
@@ -173,7 +190,16 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
   }
 
   /** 第三层：取正文；section 截一节，maxChars 限长度（默认只给 12000 字，够读一节）。 */
-  async function getNote({ slug = '', course = '', lesson = '', section = '', maxChars } = {}, context = {}) {
+  async function getNote({
+    slug = '',
+    course = '',
+    lesson = '',
+    section = '',
+    maxChars,
+    // 小节清单也分页：以前固定只给前 40 条，之后的模型就再也看不到（也就读不到）
+    sectionsLimit = 200,
+    sectionsOffset = 0
+  } = {}, context = {}) {
     const records = await listNotes(context)
     let record = null
     const wantedSlug = String(slug || '').trim().replace(/^\/+|\/+$/g, '')
@@ -230,7 +256,7 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
       returnedChars: Math.min(body.length, limit),
       maxChars: limit,
       truncated,
-      sections: headings.map(head => ({ level: head.level, text: head.text, id: head.id })).slice(0, 40)
+      ...sectionsOf(headings, sectionsLimit, sectionsOffset)
     }
   }
 
@@ -257,11 +283,15 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
       const record = bySlug.get(hit.slug)
       const course = hit.courseName || record?.courseName || ''
       const lesson = hit.lessonTitle || record?.lessonTitle || ''
-      // 命中落在某一节时，id 直接给到那一节（slug#小节）：调用方不必先读整篇再自己找，
+      // 命中落在某一节时，id 直接给到那一节（slug#锚点 id）：调用方不必先读整篇再自己找，
       // fetch 本来就支持这种 id；没定位到小节时退回整篇 slug。
+      //
+      // 这里用**页面上的锚点 id**而不是小节标题：站点 /api/search 返回的 anchor 也是它，
+      // 三个入口给出的是同一处（标题只作展示，改标题不该让 id 失效——id 由 findSection 兜底解析）。
       const section = hit.location?.title || ''
+      const anchorId = hit.location?.id || ''
       return {
-        id: section ? `${hit.slug}#${encodeURIComponent(section)}` : hit.slug,
+        id: anchorId ? `${hit.slug}#${encodeURIComponent(anchorId)}` : hit.slug,
         title: [course, lesson, section].filter(Boolean).join(' · '),
         url: noteUrl(hit.slug)
       }
@@ -458,6 +488,50 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
     listResources,
     readResource,
     resourceTemplates
+  }
+}
+
+const pageLimit = (value, fallback, max) => {
+  const num = Number(value)
+  if (!Number.isFinite(num) || num <= 0) return fallback
+  return Math.max(1, Math.min(Math.trunc(num), max))
+}
+
+/**
+ * 一节的目录项：优先用发布库里的**全量小节索引**（含内容指纹与字数），
+ * 老库没有它时退回 headings。分页参数生效，并明确报告"总数 / 返回几项 / 是否被截断"——
+ * 静默截断会让调用方以为"这篇就这么多小节"，然后就永远读不到后面的。
+ */
+function outlineOf(record = {}, limit = 60, offset = 0) {
+  const source = (Array.isArray(record.sections) && record.sections.length ? record.sections : record.headings) || []
+  const size = pageLimit(limit, 60, 500)
+  const from = Math.max(0, Math.trunc(Number(offset) || 0))
+  const items = source.slice(from, from + size).map(head => ({
+    level: head.level,
+    text: head.title || head.text || '',
+    id: head.id,
+    ...(head.chars === undefined ? {} : { chars: head.chars }),
+    ...(head.fingerprint ? { fingerprint: head.fingerprint } : {})
+  }))
+  return {
+    items,
+    total: source.length,
+    returned: items.length,
+    offset: from,
+    limit: size,
+    truncated: from + items.length < source.length
+  }
+}
+
+/** get_note 里的小节清单（兼容旧字段名 text）。 */
+function sectionsOf(headings = [], limit = 200, offset = 0) {
+  const size = pageLimit(limit, 200, 1000)
+  const from = Math.max(0, Math.trunc(Number(offset) || 0))
+  const items = headings.slice(from, from + size).map(head => ({ level: head.level, text: head.text, id: head.id }))
+  return {
+    sections: items,
+    sectionsTotal: headings.length,
+    sectionsTruncated: from + items.length < headings.length
   }
 }
 

@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
-import { escapeHtml, extractHeadings, renderMarkdown, slugify, summarizeMarkdown } from './markdown.mjs'
+import { escapeHtml, extractHeadings, renderMarkdown, sectionIndex, slugify, summarizeMarkdown } from './markdown.mjs'
 import { PREF_MENU_SCRIPT, READER_SCRIPT, courseNav, settingsMenu, svgIcon, toolBar } from './reader.mjs'
 import { ONEPAGE_CSS, renderOnepagePage } from './onepage.mjs'
 import { renderDocPage, renderLlmsTxt, usePageShell } from './docs.mjs'
@@ -705,6 +705,9 @@ export function buildNoteRecord({
       : null,
     summary: briefing ? summarizeMarkdown(briefing) : summarizeMarkdown(body),
     headings: extractHeadings(body),
+    // 全量小节索引（id/标题/层级/字数/内容指纹，不含正文）：检索定位、锚点、与"取正文"
+    // 三者指到同一处的依据。进公开索引，所以远程 MCP 不必下载正文也能说清"在哪一节"。
+    sections: sectionIndex(body),
     // 阅读时长与结构化元数据都进索引：前者显示在页面上，后者供索引页与站内搜索使用
     readMinutes: estimateReadMinutes(body),
     metadata: extractNoteMetadata(body),
@@ -1518,6 +1521,7 @@ export function publicIndexFields(record = {}) {
     readMinutes: record.readMinutes || 0,
     chars: String(record.markdown || '').length,
     headings: record.headings || [],
+    sections: record.sections || [],
     metadata: record.metadata || { concepts: [], statutes: [], cases: [], keywords: [] },
     anchors: record.anchors || {},
     onepage: record.onepage ? { title: record.onepage.title || '', chars: record.onepage.chars || 0 } : null
@@ -1609,7 +1613,11 @@ const SEARCH_SCRIPT = `<script>
         if (data.fuzzy && data.fuzzy.length) {
           notes.push('按近似词检索：' + data.fuzzy.map(function (item) { return item.from + '→' + item.to }).join('、'));
         }
-        if (data.bodyScanned) notes.push('本次连正文一起检索');
+        // 用 escalated（索引答不上来才翻正文）而不是 bodyScanned：本地库的正文就在内存里，
+        // auto 每句都会顺带用它，用 bodyScanned 会让每句话都提示"连正文一起检索"。
+        if (data.escalated || (data.escalated === undefined && data.bodyScanned)) notes.push('本次连正文一起检索');
+        var multi = hits.filter(function (hit) { return (hit.sections || []).length > 1 }).length;
+        if (multi) notes.push(multi + ' 篇在多个小节命中');
         show(hits.length + ' 条命中' + (notes.length ? '（' + notes.join('；') + '）' : ''));
         results.innerHTML = hits.map(card).join('');
       })
@@ -1803,6 +1811,7 @@ export function refreshRecord(record = {}) {
   return {
     ...withTime,
     headings: extractHeadings(markdown),
+    sections: sectionIndex(markdown),
     onepage: record.onepage || null,
     readMinutes: record.readMinutes || estimateReadMinutes(markdown),
     metadata: extractNoteMetadata(markdown),

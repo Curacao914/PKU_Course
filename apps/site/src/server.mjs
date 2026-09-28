@@ -427,7 +427,9 @@ export function createRequestHandler({
       const lifecycle = bindRequestLifecycle(req, res, slot)
       try {
         // 超时 / 客户端断开都会中止检索本身（signal 一路传到检索的记录循环）
-        const outcome = await lifecycle.race(service.searchNotes({ query, includeBody: true, limit }, { signal: slot.signal }))
+        // 不再写死 includeBody:true：覆盖策略由检索层统一决定（coverage='auto'），
+        // 站点搜索与 MCP 所以及标准 search 三个入口因此拿到**同一批结果**。
+        const outcome = await lifecycle.race(service.searchNotes({ query, limit }, { signal: slot.signal }))
         if (outcome.kind === 'gone') return
         if (outcome.kind === 'timeout') {
           if (lifecycle.canWrite()) {
@@ -444,6 +446,10 @@ export function createRequestHandler({
           ok: true,
           query: found.query,
           total: found.total,
+          // coverage/escalated 分开报：前者说"用没用正文"，后者说"索引答不上来才翻的正文"，
+          // 页面上那行提示说的是后者（本地库正文就在内存里，auto 每句都会用到它）
+          coverage: found.coverage,
+          escalated: found.escalated,
           bodyScanned: found.bodyScanned,
           fuzzy: found.fuzzy,
           terms: found.terms,
@@ -457,6 +463,9 @@ export function createRequestHandler({
             theme: hit.theme || '',
             keywords: (hit.keywords || []).slice(0, 6),
             section: hit.location?.title || '',
+            sectionId: hit.location?.id || '',
+            // 一篇里命中的多个小节（去重、配额）：页面可以显示"本文命中 2 处"
+            sections: (hit.sections || []).map(item => ({ id: item.id, title: item.title, score: item.score })),
             snippets: hit.snippets
           }))
         })

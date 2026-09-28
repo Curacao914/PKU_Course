@@ -86,9 +86,18 @@ test('元数据没命中时自动扫正文，并标出 bodyScanned', async () =>
   assert.equal(metadataOnly.hits[0].slug, 'notes/商法/第2讲')
   const explicit = await searchRecords({ records: RECORDS, query: '命令替代协商', includeBody: true })
   assert.equal(explicit.hits[0].slug, 'notes/商法/第2讲')
-  // 元数据就能答上来时不该去读正文
+  // 元数据就能答上来时**不必下沉**（escalated=false）。注意 bodyScanned 是另一件事：
+  // 本地发布库的正文就在记录里，auto 第一遍就会顺带用它，所以 bodyScanned=true 是对的；
+  // 站点上那行提示说的是"索引答不上来才去翻正文"，用的是 escalated。
   const byKeyword = await searchRecords({ records: RECORDS, query: '代理成本' })
-  assert.equal(byKeyword.bodyScanned, false)
+  assert.equal(byKeyword.escalated, false)
+  assert.equal(byKeyword.bodyScanned, true, '正文在内存里，auto 会顺带用上（不额外下载）')
+  // 只查索引时才是干净的 index 覆盖：一条都不碰正文
+  const indexOnly = await searchRecords({ records: RECORDS, query: '代理成本', coverage: 'index' })
+  assert.equal(indexOnly.coverage, 'index')
+  assert.equal(indexOnly.bodyScanned, false)
+  assert.ok(indexOnly.hits.length > 0, '元数据命中不需要正文')
+  assert.equal(indexOnly.escalated, false)
 })
 
 test('错别字回退：零命中时才启用，并且只用语料里出现过的词替换', async () => {
