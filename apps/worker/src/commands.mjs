@@ -10,6 +10,8 @@ import {
   addMaterial, guessMaterialIdentity, listMaterials, ocrMaterial, parseInboxName, pendingOcrMaterials, readDecks, unassignedDir
 } from '@course/materials'
 import { buildIntegrationPlan, checkNoteQuality, formatQualityReport, renderIntegrationMarkdown } from '@course/notes'
+
+import { formatInventory, scanArtifactInventory } from './artifact-inventory.mjs'
 import { cacheUrlsFor, extractNoteMetadata, purgeCloudflareCache } from '@course/publish'
 
 import { NOTIFY_POLICY, clearPending, pendingNotifications, planNotification, resolveNotifyPolicy } from './notify-outbox.mjs'
@@ -931,6 +933,51 @@ export function createCommands(context) {
    * 与 course brief 一样是「只重跑一步」的入口：笔记已经跑完、只想补一页纸时用它，
    * 不必把整条流水线再走一遍。输出 onepage.json，发布时会被带进站点。
    */
+  /**
+   * 工件依赖失效记录（Phase 5.2 C1）。
+   *
+   * 把 scratch 目录下所有派生产物（brief.json / onepage.json / 章级整合）与**当前发布库**
+   * 比一遍：新鲜 / 失效 / 未绑定 / 孤立。只报告不改写——重做要么花钱（模型）、要么要人定范围。
+   */
+  async function artifactsRun(options) {
+    const siteRoot = path.resolve(options.options['site-root'] || path.join(config.scratchRoot, 'site'))
+    const libraryFile = path.resolve(options.options.library || path.join(siteRoot, 'library.json'))
+    if (!fs.existsSync(libraryFile)) throw new Error(`找不到发布库 ${libraryFile}（先 course publish，或用 --library 指一份）`)
+    const records = JSON.parse(fs.readFileSync(libraryFile, 'utf8'))
+
+    // 产物散在各课次的输出目录里（course notes --output-dir 的产物），所以按名字找、不猜路径
+    const dirs = []
+    const walk = (dir, depth) => {
+      if (depth > 3 || !fs.existsSync(dir)) return
+      let entries = []
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+      let hasArtifact = false
+      for (const entry of entries) {
+        if (!entry.isDirectory()) {
+          if (entry.name === 'brief.json' || entry.name === 'onepage.json') hasArtifact = true
+          continue
+        }
+        walk(path.join(dir, entry.name), depth + 1)
+      }
+      if (hasArtifact) dirs.push(dir)
+    }
+    walk(path.resolve(config.scratchRoot), 0)
+
+    const integrationDir = path.resolve(options.options['integrations'] || path.join(config.scratchRoot, 'integrations'))
+    const inventory = scanArtifactInventory({ dirs, records, integrationDir })
+    const report = formatInventory(inventory)
+    stderr(report)
+    emit({
+      dirs: dirs.length,
+      integrationDir,
+      total: inventory.total,
+      counts: inventory.counts,
+      stale: inventory.items.filter(item => item.status === 'stale').map(item => ({ kind: item.kind, courseName: item.courseName, lessonTitle: item.lessonTitle, staleLessons: item.staleLessons || [] })),
+      orphan: inventory.items.filter(item => item.status === 'orphan').map(item => ({ kind: item.kind, lessonTitle: item.lessonTitle }))
+    }, options)
+    return 0
+  }
+
   /**
    * 章级整合（Phase 5.2 B2 原型）。
    *
@@ -2998,7 +3045,7 @@ export function createCommands(context) {
   return {
     doctor, discover, download, transcribe, notes, materials, balance, publish,
     notify, cycle, verify, status, retry, prune, backup, digest, 'ppt-reminder': pptReminder,
-    brief: briefRun, onepage: onepageRun, integrate: integrateRun,
+    brief: briefRun, onepage: onepageRun, integrate: integrateRun, artifacts: artifactsRun,
     'admin-passwd': adminPassword, mcp
   }
 }
@@ -3050,6 +3097,9 @@ export const USAGE = `用法：course <命令> [选项]
                                            阿里云余额需账号 AK/SK，见 docs/07）
   onepage    --from <笔记.md 或所在目录> --course <名称> --lesson <课次> [--out <目录>]
                                            生成一页纸摘要（A4 一张，模型写，输出 onepage.json）
+  artifacts  [--site-root <站点目录>] [--library <library.json>] [--integrations <目录>]
+                                           列出所有派生产物（简报/一页纸/章级整合）与当前正文的同源情况：
+                                           新鲜 / 失效 / 未绑定 / 孤立。只报告，不自动重做
   integrate  --course <名称> [--lessons <课次,课次>] [--topic <主题>]
              [--library <library.json>] [--out-dir <目录>]
                                            章级整合（跨课次的概念对照 / 反复出现的问题 / 论证推进 /
