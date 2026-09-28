@@ -228,3 +228,50 @@ test('接线：字面零命中才走语义回退，且带标注；字面命中�
   assert.equal(degraded.semantic.used, false)
 })
 
+test('端到端：服务 → 真实语义回退（桩 fetch）能召回，且标注齐全', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-semantic-e2e-'))
+  const { createNotesService } = await import('./service.mjs')
+  const { normalizeRecord, extractHeadings, sectionIndex } = await import('./records.mjs')
+  const { createSemanticFallback } = await import('./semantic.mjs')
+
+  const markdown = ['## 一、轻微犯罪记录封存', '', '轻罪前科的记录可以封存，不影响就业。'].join('\n')
+  const sections = sectionIndex(markdown)
+  const records = [normalizeRecord({
+    slug: 'notes/刑事执行法/第1节',
+    courseName: '刑事执行法',
+    lessonTitle: '第1节',
+    keywords: ['封存'],
+    markdown,
+    headings: extractHeadings(markdown),
+    sections,
+    publishedAt: '2026-01-01T00:00:00.000Z'
+  })]
+  // 这条断言是这次真踩的坑：normalizeRecord 丢掉 sections 之后，语义回退永远召不回任何东西
+  assert.equal(records[0].sections.length, 1, 'normalizeRecord 必须把小节索引带出来')
+  assert.ok(records[0].sections[0].fingerprint)
+
+  const indexFile = path.join(dir, 'embeddings.json')
+  fs.writeFileSync(indexFile, JSON.stringify({
+    version: 1, provider: 'dashscope', model: 'text-embedding-v3', dim: 3,
+    items: { ['notes/刑事执行法/第1节#一-轻微犯罪记录封存']: { fingerprint: sections[0].fingerprint, vector: [0, 1, 0] } }
+  }))
+
+  const semantic = createSemanticFallback({
+    indexFile,
+    apiKey: 'k',
+    fetchImpl: async () => ({ ok: true, json: async () => ({ output: { embeddings: [{ embedding: [0, 1, 0] }] } }) })
+  })
+  const service = createNotesService({
+    source: { kind: 'test', describe: () => ({ kind: 'test' }), listNotes: async () => records, readMarkdown: async () => markdown },
+    semantic
+  })
+  const found = await service.searchNotes({ query: '轻罪前科怎么处理' })
+  assert.equal(found.semantic.used, true)
+  assert.equal(found.hits.length, 1, '端到端必须真的召回（这条用例就是为"启用了却召回不到"写的）')
+  assert.equal(found.hits[0].semantic, true)
+  assert.equal(found.hits[0].location.id, '一-轻微犯罪记录封存')
+  assert.ok(found.hits[0].similarity > 0.99)
+  assert.ok(found.hits[0].snippets[0].includes('封存'), '片段从正文现取，读者不必点进去才知道是什么')
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+

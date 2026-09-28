@@ -219,6 +219,22 @@ export function normalizeRecord(raw = {}) {
     keywords: strings(raw.keywords),
     keywordsSource: str(raw.keywordsSource),
     headings,
+    /**
+     * 全量小节索引（发布时算好的：id/标题/层级/字数/**内容指纹**）。
+     *
+     * 必须在这里带出来——本地/远程数据源都会过 normalizeRecord，落一项就丢一项：
+     * 语义回退要靠"指纹对得上"决定用不用旧向量，丢了 sections 它会把每条向量都判成过期，
+     * 表现是"回退能力已启用、却一条也召不回"（这个坑真踩过：探针读原始 JSON 正常、
+     * 服务进程里永远 0 条）。
+     */
+    sections: (Array.isArray(raw.sections) ? raw.sections : []).map(section => ({
+      id: str(section?.id),
+      title: str(section?.title),
+      level: Number(section?.level) || 2,
+      aliases: strings(section?.aliases),
+      chars: Number(section?.chars) || 0,
+      fingerprint: str(section?.fingerprint)
+    })).filter(section => section.id),
     metadata: {
       concepts: strings(metadata.concepts),
       statutes: strings(metadata.statutes),
