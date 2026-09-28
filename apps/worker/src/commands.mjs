@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -2228,12 +2229,17 @@ export function createCommands(context) {
   }
 
   /**
-   * 账本与站点库的每日备份。
+   * 账本与站点库的备份：**写完要验、验完要送出这台机器**。
    *
-   * 账本是整条流水线的记忆：课次阶段、尝试次数、事件流、投递队列，以及"哪些课次已经
-   * 处理过"的判断依据。丢了不会让机器坏掉，但会让人重新付一遍钱和时间。
-   * 用 SQLite 自己的 VACUUM INTO 做一致性快照（数据库正在被写也能安全复制），
-   * 只保留最近 N 份。
+   * 账本是整条流水线的记忆（阶段、尝试次数、事件流、投递队列），丢了不会让机器坏掉，
+   * 但会让人重新付一遍钱和时间。三件事缺一不可：
+   *   1. 一致性快照：用 SQLite 的 VACUUM INTO（数据库正在被写也能安全复制）；
+   *   2. **验证**：快照写完立刻打开它跑 integrity_check 并清点记录数，再记一份 sha256 清单——
+   *      没有验证的备份只是一种错觉：磁盘满或中断时会安静地产出一个坏文件；
+   *   3. **异地**：同一块盘上的备份挡不住盘坏、误删、机器被回收。
+   *      用 COURSE_BACKUP_OFFSITE 给一条命令模板（{} 会被替换成文件路径），例如
+   *      rclone copy {} r2:course-backups/ 或 scp {} backup-host:/srv/course/。
+   *      命令失败会如实报出来并让退出码非 0，交给 systemd/cron 报警，而不是悄悄吞掉。
    */
   async function backup(options) {
     const keep = Math.max(2, Number(options.options.keep || 7))
@@ -2242,35 +2248,117 @@ export function createCommands(context) {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-')
     const written = []
 
+    const describe = (target, extra = {}) => {
+      const bytes = fs.statSync(target).size
+      const sha256 = createHash('sha256').update(fs.readFileSync(target)).digest('hex')
+      return { file: path.basename(target), bytes, sha256, ...extra }
+    }
+
+    // 1) 账本快照 + 立刻验证（能不能打开、完整不完整、有多少条记录）
     const ledgerTarget = path.join(dir, `ledger-${stamp}.sqlite`)
     const store = openStore(config.ledgerPath)
+    let sourceCounts = null
     try {
       store.db.exec(`VACUUM INTO '${ledgerTarget.replace(/'/g, "''")}'`)
+      sourceCounts = {
+        tasks: Number(store.db.prepare('SELECT COUNT(*) AS n FROM tasks').get()?.n || 0),
+        deliveries: Number(store.db.prepare('SELECT COUNT(*) AS n FROM deliveries').get()?.n || 0)
+      }
     } finally {
       store.close()
     }
-    written.push({ file: path.basename(ledgerTarget), bytes: fs.statSync(ledgerTarget).size })
+    const ledgerCheck = verifyLedgerSnapshot(ledgerTarget)
+    written.push(describe(ledgerTarget, { kind: 'ledger', verified: ledgerCheck.ok, detail: ledgerCheck.detail, source: sourceCounts }))
 
-    // 站点发布库（笔记是从笔记文件全量重写的，但"发过哪些、内容指纹是什么"记在这里）
+    // 2) 站点发布库（发过哪些课次、内容指纹是什么，都在这里）
     const libraryPath = path.join(config.scratchRoot, 'site', 'library.json')
     if (fs.existsSync(libraryPath)) {
       const target = path.join(dir, `library-${stamp}.json`)
       fs.copyFileSync(libraryPath, target)
-      written.push({ file: path.basename(target), bytes: fs.statSync(target).size })
+      const check = verifyLibrarySnapshot(target)
+      written.push(describe(target, { kind: 'library', verified: check.ok, detail: check.detail }))
     }
 
-    // 只留最近 keep 份（按文件名里的时间戳排序即按时间排序）
+    // 3) 清单：有了它，日后任意时刻都能回答这份备份还是不是好的
+    const manifestPath = path.join(dir, `manifest-${stamp}.json`)
+    const manifest = { generatedAt: new Date().toISOString(), host: os.hostname(), files: written }
+    fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
+
+    // 4) 异地：没配就明说（本地备份不叫备份），配了就必须成功
+    const offsiteTemplate = String(env.COURSE_BACKUP_OFFSITE || '').trim()
+    const offsite = { configured: Boolean(offsiteTemplate), command: offsiteTemplate, copied: [], failed: [] }
+    if (offsiteTemplate) {
+      for (const entry of [...written.map(item => path.join(dir, item.file)), manifestPath]) {
+        const result = runOffsiteCopy(offsiteTemplate, entry)
+        if (result.ok) offsite.copied.push(path.basename(entry))
+        else offsite.failed.push({ file: path.basename(entry), detail: result.detail })
+      }
+    }
+
+    // 5) 本地轮转：只留最近 keep 份（按文件名里的时间戳排序即按时间排序）
     const all = fs.readdirSync(dir)
-      .filter(name => /^(ledger|library)-/.test(name))
+      .filter(name => /^(ledger|library|manifest)-/.test(name))
       .sort()
     const removed = []
-    for (const name of all.slice(0, Math.max(0, all.length - keep * 2))) {
-      fs.rmSync(path.join(dir, name), { force: true })
-      removed.push(name)
+    const stamps = [...new Set(all.map(name => name.replace(/^(ledger|library|manifest)-/, '').replace(/\.(sqlite|json)$/, '')))].sort()
+    for (const old of stamps.slice(0, Math.max(0, stamps.length - keep))) {
+      for (const name of all.filter(item => item.includes(old))) {
+        fs.rmSync(path.join(dir, name), { force: true })
+        removed.push(name)
+      }
     }
 
-    emit({ dir, keep, written, removed, total: fs.readdirSync(dir).length }, options)
-    return 0
+    const broken = written.filter(entry => entry.verified !== true)
+    emit({
+      dir,
+      keep,
+      written,
+      removed,
+      offsite: { ...offsite, hint: offsite.configured ? '' : '本地备份挡不住磁盘故障与误删：用 COURSE_BACKUP_OFFSITE 指向异地（rclone / scp / 对象存储）' },
+      ok: broken.length === 0 && offsite.failed.length === 0
+    }, options)
+    return broken.length === 0 && offsite.failed.length === 0 ? 0 : 1
+  }
+
+  /** 打开快照验证它真的可用：完整性 + 能不能读出记录数。 */
+  function verifyLedgerSnapshot(file) {
+    try {
+      const snapshot = openStore(file)
+      try {
+        const integrity = String(snapshot.db.prepare('PRAGMA integrity_check').get()?.integrity_check || '')
+        const tasks = Number(snapshot.db.prepare('SELECT COUNT(*) AS n FROM tasks').get()?.n || 0)
+        const deliveries = Number(snapshot.db.prepare('SELECT COUNT(*) AS n FROM deliveries').get()?.n || 0)
+        return { ok: integrity === 'ok', detail: `integrity=${integrity} tasks=${tasks} deliveries=${deliveries}` }
+      } finally {
+        snapshot.close()
+      }
+    } catch (error) {
+      return { ok: false, detail: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  /** 发布库快照：能解析成数组、且每条记录都有 slug。 */
+  function verifyLibrarySnapshot(file) {
+    try {
+      const records = JSON.parse(fs.readFileSync(file, 'utf8'))
+      if (!Array.isArray(records)) return { ok: false, detail: '不是记录数组' }
+      const withSlug = records.filter(record => record && record.slug).length
+      return { ok: withSlug === records.length, detail: `${withSlug}/${records.length} 条带 slug` }
+    } catch (error) {
+      return { ok: false, detail: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  /** 把一份文件送到异地：模板里的 {} 替换成文件路径；超时或非零退出都算失败。 */
+  function runOffsiteCopy(template, file) {
+    const quoted = `'${file.replace(/'/g, "'\\''")}'`
+    const command = template.split('{}').join(quoted)
+    const result = spawnSync('/bin/sh', ['-c', command], { timeout: 120_000, encoding: 'utf8' })
+    if (result.error) return { ok: false, detail: result.error.message }
+    if (result.status !== 0) {
+      return { ok: false, detail: `退出码 ${result.status}：${String(result.stderr || '').trim().slice(0, 200)}` }
+    }
+    return { ok: true, detail: '' }
   }
 
   /**
@@ -2795,7 +2883,9 @@ export const USAGE = `用法：course <命令> [选项]
                                            缺课件提醒：列出所有还没有课件的课次
                                            （课程 · 课次 · 状态 · 管理台链接），每天 20:00 发。
                                            **一节都不缺就不发**。与 07:00 日报同一套邮件样式
-  backup     [--keep <份数>]                     把账本与站点库做一致性快照（默认留 7 份）
+  backup     [--keep <份数>]                     账本与站点库的一致性快照：写完即验证（integrity
+                                           + sha256 清单）；配 COURSE_BACKUP_OFFSITE 时同步送异地
+                                           （模板里的 {} 会替换成文件路径，失败则退出码非 0）
   prune      [--apply] [--keep-originals]         清理原件：纯文本（转录稿/课件文字/笔记）
                                            永久保留；视频、音频、PPT 原文件只在转换成功
                                            且校验通过之后才删。默认只报告不删除

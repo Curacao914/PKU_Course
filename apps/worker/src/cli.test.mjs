@@ -1421,6 +1421,56 @@ test('verify reports every unmet prerequisite instead of pretending to run', asy
   assert.ok(report.hint, '应给出下一步提示')
 })
 
+test('备份：快照写完立刻验证、记 sha256 清单；配了异地就必须送到且失败要报错', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-backup-'))
+  const siteDir = path.join(dir, 'site')
+  fs.mkdirSync(siteDir, { recursive: true })
+  fs.writeFileSync(path.join(siteDir, 'library.json'), JSON.stringify([{ slug: 'notes/刑法分论/第1讲', markdown: '# 第1讲' }]))
+  const offsite = path.join(dir, 'offsite')
+  fs.mkdirSync(offsite, { recursive: true })
+
+  // 账本要落在真实文件上，备份才有东西可快照
+  const ledgerFile = path.join(dir, 'ledger.sqlite')
+  const realLedger = openLedger(ledgerFile)
+  realLedger.discoverReplays([{ replay_key: 'replay-1', course_key: 'course-abc' }])
+  realLedger.close()
+
+  const { deps, lines } = harness()
+  const env = { ...deps.env, COURSE_WORKER_SCRATCH_DIR: dir, COURSE_BACKUP_OFFSITE: `cp {} '${offsite}/'` }
+  const configOverrides = { scratchRoot: dir, ledgerPath: ledgerFile }
+
+  assert.equal(await runCli(['backup'], { ...deps, env, configOverrides }), 0)
+  const payload = parse(lines.at(-1))
+  assert.equal(payload.ok, true)
+  const ledgerEntry = payload.written.find(entry => entry.kind === 'ledger')
+  assert.equal(ledgerEntry.verified, true, '账本快照必须打开验证通过')
+  assert.match(ledgerEntry.detail, /integrity=ok/, 'detail 里要写明 integrity 结果')
+  assert.match(ledgerEntry.sha256, /^[0-9a-f]{64}$/, '清单里要有 sha256')
+  assert.equal(payload.written.find(entry => entry.kind === 'library').verified, true)
+  assert.equal(payload.offsite.failed.length, 0)
+  assert.ok(payload.offsite.copied.length >= 3, '账本、发布库、清单都要送到异地')
+
+  // 异地目录里真的有这些文件，而不是只报告成功
+  const copiedNames = fs.readdirSync(offsite).sort()
+  assert.ok(copiedNames.some(name => name.startsWith('ledger-')), '账本快照要在异地出现')
+  assert.ok(copiedNames.some(name => name.startsWith('manifest-')), '清单也要在异地出现')
+  const manifestName = copiedNames.find(name => name.startsWith('manifest-'))
+  const manifest = JSON.parse(fs.readFileSync(path.join(offsite, manifestName), 'utf8'))
+  assert.equal(manifest.files.length, 2)
+
+  // 异地命令失败：不吞掉，退出码非 0，并给出失败明细
+  lines.length = 0
+  const failing = await runCli(['backup'], {
+    ...deps,
+    env: { ...deps.env, COURSE_WORKER_SCRATCH_DIR: dir, COURSE_BACKUP_OFFSITE: 'exit 3' },
+    configOverrides
+  })
+  assert.equal(failing, 1, '异地失败要让任务失败，交给 systemd/cron 报警')
+  const failurePayload = parse(lines.at(-1))
+  assert.equal(failurePayload.ok, false)
+  assert.ok(failurePayload.offsite.failed.length >= 1)
+})
+
 test('verify 不加 --yes 只做前置检查：绝不下载、不转写、不发推送', async () => {
   // 真实教训：排查问题时顺手敲了一下 verify，它真跑了一整轮——下载 1.3G、开始转写
   // （按小时计费），跑下去还会写笔记并可能给读者推一条。这个闸门就是为此加的。
