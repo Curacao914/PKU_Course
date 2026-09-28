@@ -62,6 +62,7 @@ import {
   migrateRecordTime,
   noteSlug,
   readSiteIndex,
+  refreshRecord,
   slugify,
   verifyDerived,
   writeJsonAtomic,

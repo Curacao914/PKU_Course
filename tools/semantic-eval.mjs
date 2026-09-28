@@ -199,7 +199,11 @@ export async function runExperiment ({ records = [], queries = [], provider = 'l
   const units = buildUnits(records)
   const embedder = makeEmbedder(provider, { capCny, cacheFile })
   const vectors = await embedder.embed(units.map(unit => unit.text), { type: 'document' })
+  // 查询侧也计时：决策标准里有一条"每查询 <300ms"，光看命中率不够
+  const queryStartedAt = Date.now()
   const queryVectors = await embedder.embed(queries.map(query => query.query), { type: 'query' })
+  const queryEmbedMs = Date.now() - queryStartedAt
+  const searchStartedAt = Date.now()
   const results = []
   for (const [index, query] of queries.entries()) {
     const scored = units
@@ -225,6 +229,7 @@ export async function runExperiment ({ records = [], queries = [], provider = 'l
       hit3: top.some(item => expected.some(expect => item.unit.slug.includes(expect)))
     })
   }
+  const searchMs = Date.now() - searchStartedAt
   const scored = results.filter(item => !item.report)
   const reported = results.filter(item => item.report)
   const tokens = units.reduce((sum, unit) => sum + estimateTokens(unit.text), 0)
@@ -242,6 +247,13 @@ export async function runExperiment ({ records = [], queries = [], provider = 'l
     queryCostCny: queryTokens * price.cnyPerMTok / 1_000_000,
     // 实际花了多少：以接口返回的 usage 为准（预算是估的，账单是真的）
     usage: embedder.stats(),
+    latency: {
+      // 查询向量化是网络往返，检索本身是纯计算：两者要分开看，不然不知道该优化谁
+      embedQueriesMs: queryEmbedMs,
+      embedPerQueryMs: Math.round(queryEmbedMs / Math.max(1, queries.length)),
+      searchAllMs: searchMs,
+      searchPerQueryMs: Math.round(searchMs / Math.max(1, queries.length))
+    },
     development: {
       total: scored.length,
       top1: scored.filter(item => item.hit1).length,
@@ -291,6 +303,7 @@ async function main () {
   if (report.provider === 'local-stub') {
     console.log('  提醒：local-stub 是词面近似，只验证管道；要判断语义效果必须换成真模型（docs/13 §4）。')
   } else {
+    console.log(`  延迟：查询向量化 ${report.latency.embedPerQueryMs}ms/次（网络往返）、本地检索 ${report.latency.searchPerQueryMs}ms/次`)
     console.log(`  实际用量：${report.usage.tokens} token / ${report.usage.calls} 次调用 / 缓存命中 ${report.usage.hits}（缓存 ${report.usage.cacheSize} 条）→ 实际花费 ¥${report.usage.costCny.toFixed(4)}（上限 ¥${capCny}）`)
   }
 }
