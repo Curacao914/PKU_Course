@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite'
 import test from 'node:test'
 
 import { openLedger } from './ledger.mjs'
+import { MIGRATIONS } from './schema.mjs'
 
 const REPLAY = {
   replay_key: 'replay-abc',
@@ -409,12 +410,15 @@ test('账本迁移：老库打开时自动补上投递租约列，且可重复�
 
   const migrated = openLedger(file)
   const columns = migrated.db.prepare('PRAGMA table_info(deliveries)').all().map(row => row.name)
-  assert.ok(columns.includes('lease_expires_at'), '打开老库时补列')
-  assert.equal(Number(migrated.db.prepare('PRAGMA user_version').get().user_version), 1)
+  assert.ok(columns.includes('lease_expires_at'), '打开老库时补列：投递租约')
+  assert.ok(columns.includes('claim_token'), '打开老库时补列：认领令牌')
+  // 版本号必须等于**最后一条**迁移的版本（每加一条迁移就 +1，migrate 用 version > user_version 判断）
+  const version = Number(migrated.db.prepare('PRAGMA user_version').get().user_version)
+  assert.equal(version, MIGRATIONS.at(-1).version)
   migrated.close()
 
   const reopened = openLedger(file)
-  assert.equal(Number(reopened.db.prepare('PRAGMA user_version').get().user_version), 1, '重复打开是幂等的')
+  assert.equal(Number(reopened.db.prepare('PRAGMA user_version').get().user_version), version, '重复打开是幂等的')
   reopened.close()
 })
 
@@ -438,3 +442,56 @@ test('a file-backed ledger survives reopen', () => {
   assert.equal(second.events(task.id).length, 1)
   second.close()
 })
+test('投递认领令牌：租约过期被重新领取后，旧领取者的 ack/retry 不再生效', () => {
+  const ledger = openLedger(':memory:')
+  const { delivery } = ledger.enqueueDelivery({
+    dedupeKey: 'course-note:x:1', purpose: 'course-note', bodyText: '正文', objectUrl: 'https://x/1.html',
+    now: '2026-09-25T00:00:00.000Z'
+  })
+
+  // A 领取（租约 60 秒）
+  const a = ledger.claimDelivery({ workerId: 'A', leaseSeconds: 60, now: '2026-09-25T00:00:10.000Z' })
+  assert.ok(a.claim_token, '领取时必须给出认领令牌')
+
+  // 租约过期后 B 重新领取 → 令牌换人
+  const b = ledger.claimDelivery({ workerId: 'B', leaseSeconds: 60, now: '2026-09-25T00:05:00.000Z' })
+  assert.equal(b.id, a.id)
+  assert.notEqual(b.claim_token, a.claim_token, '重新领取必须换令牌')
+
+  // A 醒过来 ack：令牌已过期 → 不写、返回 false（否则会把 B 的结果覆盖掉）
+  assert.equal(ledger.ackDelivery({ id: a.id, status: 'sent', externalId: 'A 的', now: '2026-09-25T00:05:01.000Z', token: a.claim_token }), false)
+  assert.equal(ledger.findDelivery('course-note:x:1').status, 'claimed', 'A 的 ack 不该改状态')
+  assert.equal(ledger.retryDelivery({ id: a.id, error: 'A 的失败', now: '2026-09-25T00:05:02.000Z', token: a.claim_token }), false)
+
+  // B 用当前令牌 ack：成功
+  assert.equal(ledger.ackDelivery({ id: b.id, status: 'sent', externalId: 'B 的', now: '2026-09-25T00:05:03.000Z', token: b.claim_token }), true)
+  const final = ledger.findDelivery('course-note:x:1')
+  assert.equal(final.status, 'sent')
+  assert.equal(final.external_id, 'B 的')
+  ledger.close()
+})
+
+test('长任务续租：阶段上报顺手续租，且只续自己领的那条', () => {
+  const db = ledger()
+  db.discoverReplays([REPLAY])
+  const claimed = db.claimNext({ workerId: 'W', leaseSeconds: 600, now: '2026-09-25T00:00:00.000Z' })
+  const before = claimed.lease_expires_at
+
+  // 跑了半小时之后续租：期限必须往后推（否则长任务会被别人抢走重跑，模型调两次、钱付两次）
+  assert.equal(db.renewTaskLease({ id: claimed.id, workerId: 'W', leaseSeconds: 1800, now: '2026-09-25T00:30:00.000Z' }), true)
+  const after = db.getTask(claimed.replay_key).lease_expires_at
+  assert.ok(new Date(after) > new Date(before), `租约要往后推：${before} → ${after}`)
+
+  // 别人来续：不许替别人延长期限
+  assert.equal(db.renewTaskLease({ id: claimed.id, workerId: 'X', leaseSeconds: 99999, now: '2026-09-25T02:00:00.000Z' }), false)
+  assert.equal(db.getTask(claimed.replay_key).lease_expires_at, after, '不是自己的任务就不续租')
+
+  // 没传 workerId 也不续（避免"谁都能延长"）
+  assert.equal(db.renewTaskLease({ id: claimed.id, now: '2026-09-25T03:00:00.000Z' }), false)
+
+  // 阶段上报即交还租约（既有语义，别在这里偷偷续租——那会让下一个阶段领不到）
+  db.reportStage({ id: claimed.id, stage: 'notes_ready', message: '写完', now: '2026-09-25T04:00:00.000Z' })
+  assert.equal(db.getTask(claimed.replay_key).lease_expires_at, null)
+  db.close()
+})
+

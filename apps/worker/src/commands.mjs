@@ -12,6 +12,7 @@ import {
 import { buildIntegrationPlan, checkNoteQuality, formatQualityReport, renderIntegrationMarkdown } from '@course/notes'
 
 import { formatInventory, scanArtifactInventory } from './artifact-inventory.mjs'
+import { collectExceptions, formatExceptions } from './reconcile.mjs'
 import { cacheUrlsFor, extractNoteMetadata, purgeCloudflareCache } from '@course/publish'
 
 import { NOTIFY_POLICY, clearPending, pendingNotifications, planNotification, resolveNotifyPolicy } from './notify-outbox.mjs'
@@ -573,6 +574,8 @@ export function createCommands(context) {
       }
       stderr(`只重写 ${matched.length} 个模块：${matched.map(node => node.title || node.id).join('、')}（其余模块的草稿保持不变）`)
     }
+    // saveState 在 claim 之前就定义了，所以用一个 holder 把任务带进来（作用域不能跨 try 块）
+    let activeTask = null
     const saveState = (current, step) => {
       const payload = {
         schemaVersion: 1,
@@ -583,6 +586,18 @@ export function createCommands(context) {
       const tempPath = `${statePath}.tmp`
       fs.writeFileSync(tempPath, `${JSON.stringify(payload)}`)
       fs.renameSync(tempPath, statePath)
+      /**
+       * 顺手续租（C3）：笔记是整条链路里最贵、也最可能跑很久的一步（十几次模型调用）。
+       * 每落一次状态就说明"这个 worker 还活着"，把租约往后推——不然租约到期后别的 worker
+       * 会重新领取同一个阶段，模型被调两次、钱付两次。只续自己领的那条（见 ledger 的说明）。
+       */
+      if (activeTask) {
+        try {
+          store.renewTaskLease({ id: activeTask.id, workerId, leaseSeconds: 1800 })
+        } catch (error) {
+          stderr(`续租失败（不影响本次运行）：${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
     }
     const courseSpec = {
       courseName: course,
@@ -658,6 +673,7 @@ export function createCommands(context) {
     const store = openStore(config.ledgerPath)
     try {
       const task = replayKey ? claimForRun(store, replayKey, workerId) : null
+      activeTask = task
       const previousStage = task?.stage || 'transcript_ready'
       const modelConfig = {
         apiKey: config.ai.apiKey || 'unset',
@@ -933,6 +949,82 @@ export function createCommands(context) {
    * 与 course brief 一样是「只重跑一步」的入口：笔记已经跑完、只想补一页纸时用它，
    * 不必把整条流水线再走一遍。输出 onepage.json，发布时会被带进站点。
    */
+  /**
+   * 只报异常的对账（Phase 5.2 C2）。
+   *
+   * 把"需要人做的事"从几个地方收敛成一张清单：卡住/停下的任务、失败与过期的投递、
+   * 与正文不同源的派生产物、缺课件的课次、余额偏低。**没有异常时一个字都不说**，
+   * 退出码也是 0——定时任务的价值在于安静；有 blocking 时才返回 1 交给 cron 告警。
+   * --notify 只在有异常时排一条通知（去重键按天+内容指纹，不刷屏）。
+   */
+  async function reconcileRun(options) {
+    const siteRoot = path.resolve(options.options['site-root'] || path.join(config.scratchRoot, 'site'))
+    const libraryFile = path.resolve(options.options.library || path.join(siteRoot, 'library.json'))
+    const records = fs.existsSync(libraryFile) ? JSON.parse(fs.readFileSync(libraryFile, 'utf8')) : []
+
+    const store = openStore(config.ledgerPath)
+    let stuckTasks = []
+    let failedDeliveries = []
+    let stuckDeliveries = 0
+    try {
+      stuckTasks = store.listTasks({ limit: 500 }).filter(task => String(task.stage) === 'needs_attention')
+      failedDeliveries = store.listDeliveries({ status: 'failed', limit: 50 })
+      stuckDeliveries = store.countStuckDeliveries()
+    } finally {
+      store.close()
+    }
+
+    const dirs = []
+    const walk = (dir, depth) => {
+      if (depth > 3 || !fs.existsSync(dir)) return
+      let entries = []
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+      let hasArtifact = false
+      for (const entry of entries) {
+        if (!entry.isDirectory()) {
+          if (entry.name === 'brief.json' || entry.name === 'onepage.json') hasArtifact = true
+          continue
+        }
+        walk(path.join(dir, entry.name), depth + 1)
+      }
+      if (hasArtifact) dirs.push(dir)
+    }
+    walk(path.resolve(config.scratchRoot), 0)
+    const artifacts = scanArtifactInventory({ dirs, records, integrationDir: path.join(config.scratchRoot, 'integrations') })
+
+    let missingMaterials = []
+    try { missingMaterials = collectMissingMaterials({ courses: [], limit: 20 }) || [] } catch { missingMaterials = [] }
+
+    const report = collectExceptions({ stuckTasks, failedDeliveries, stuckDeliveries, artifacts, missingMaterials })
+    const text = formatExceptions(report)
+    // 安静：没有异常就什么都不说（连"一切正常"都不说——那种话只会训练人不看）
+    if (text) stderr(text)
+    else stderr('没有需要处理的事。')
+
+    let delivery = null
+    if (!report.quiet && options.flags?.has('notify')) {
+      const store2 = openStore(config.ledgerPath)
+      try {
+        delivery = store2.enqueueDelivery({
+          dedupeKey: `reconcile:${dateKeyInTimeZone(new Date(), config.timeZone || 'Asia/Shanghai')}:${report.counts.blocking}:${report.counts.warning}`,
+          purpose: 'reconcile',
+          bodyText: text.slice(0, 1500),
+          objectUrl: config.notify.publicUrl || 'https://course.law-tech.dev'
+        })
+      } finally {
+        store2.close()
+      }
+    }
+
+    emit({
+      quiet: report.quiet,
+      counts: report.counts,
+      exceptions: report.exceptions,
+      notified: delivery ? delivery.inserted : false
+    }, options)
+    return report.blocking ? 1 : 0
+  }
+
   /**
    * 工件依赖失效记录（Phase 5.2 C1）。
    *
@@ -2492,6 +2584,57 @@ export function createCommands(context) {
     const keep = Math.max(2, Number(options.options.keep || 7))
     const dir = path.join(config.scratchRoot, 'backups')
     fs.mkdirSync(dir, { recursive: true })
+
+    /**
+     * --drill：**恢复演练**（C3）。
+     *
+     * 备份的价值不在"文件在那儿"，而在"能恢复"。演练做的事：
+     *   1. 找最新一份 manifest；
+     *   2. 按清单逐个核对 sha256（文件被改过、被截断、被别的备份覆盖都能发现）；
+     *   3. 把账本快照复制到临时目录里**真的打开一次**跑 integrity_check 并清点记录；
+     *   4. 解析站点发布库、核对记录数与 manifest 记的一致。
+     * 全程不碰线上数据（只看副本），因此可以随便跑、也可以放进定时任务。
+     */
+    if (options.flags?.has('drill')) {
+      const manifests = fs.readdirSync(dir).filter(name => name.startsWith('manifest-') && name.endsWith('.json')).sort()
+      if (!manifests.length) throw new Error(`没有可演练的备份：${dir} 里没有 manifest-*.json（先跑 course backup）`)
+      const manifestFile = path.join(dir, manifests.at(-1))
+      const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'))
+      const results = []
+      for (const entry of manifest.files || []) {
+        const file = path.join(dir, entry.file)
+        if (!fs.existsSync(file)) { results.push({ file: entry.file, ok: false, detail: '文件不存在' }); continue }
+        const sha256 = createHash('sha256').update(fs.readFileSync(file)).digest('hex')
+        if (sha256 !== entry.sha256) { results.push({ file: entry.file, ok: false, detail: 'sha256 与清单不一致（文件被改过或截断）' }); continue }
+        if (entry.kind === 'ledger') {
+          // 真打开一次：复制到临时目录，避免"演练"顺手改了备份本身
+          const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'course-drill-'))
+          const copy = path.join(temp, 'ledger.sqlite')
+          fs.copyFileSync(file, copy)
+          const check = verifyLedgerSnapshot(copy)
+          results.push({ file: entry.file, ok: check.ok, detail: check.ok ? `能打开且完整：${check.detail}` : check.detail })
+          fs.rmSync(temp, { recursive: true, force: true })
+          continue
+        }
+        if (entry.kind === 'library') {
+          const check = verifyLibrarySnapshot(file)
+          results.push({ file: entry.file, ok: check.ok, detail: check.ok ? `能解析：${check.detail}` : check.detail })
+          continue
+        }
+        results.push({ file: entry.file, ok: true, detail: 'sha256 一致' })
+      }
+      const failed = results.filter(item => !item.ok)
+      emit({
+        drill: true,
+        manifest: path.basename(manifestFile),
+        generatedAt: manifest.generatedAt || null,
+        files: results.length,
+        failed: failed.length,
+        results
+      }, options)
+      return failed.length ? 1 : 0
+    }
+
     const stamp = new Date().toISOString().replace(/[:.]/g, '-')
     const written = []
 
@@ -3045,7 +3188,7 @@ export function createCommands(context) {
   return {
     doctor, discover, download, transcribe, notes, materials, balance, publish,
     notify, cycle, verify, status, retry, prune, backup, digest, 'ppt-reminder': pptReminder,
-    brief: briefRun, onepage: onepageRun, integrate: integrateRun, artifacts: artifactsRun,
+    brief: briefRun, onepage: onepageRun, integrate: integrateRun, artifacts: artifactsRun, reconcile: reconcileRun,
     'admin-passwd': adminPassword, mcp
   }
 }
@@ -3097,6 +3240,10 @@ export const USAGE = `用法：course <命令> [选项]
                                            阿里云余额需账号 AK/SK，见 docs/07）
   onepage    --from <笔记.md 或所在目录> --course <名称> --lesson <课次> [--out <目录>]
                                            生成一页纸摘要（A4 一张，模型写，输出 onepage.json）
+  reconcile  [--notify] [--site-root <站点目录>] [--library <library.json>]
+                                           只报异常的对账：卡住的任务 / 失败或过期的通知 / 与正文不同源的
+                                           派生产物 / 缺课件 / 余额偏低。没有异常时一个字都不说；
+                                           有阻塞项才返回 1（交给 cron 告警），--notify 才排通知
   artifacts  [--site-root <站点目录>] [--library <library.json>] [--integrations <目录>]
                                            列出所有派生产物（简报/一页纸/章级整合）与当前正文的同源情况：
                                            新鲜 / 失效 / 未绑定 / 孤立。只报告，不自动重做

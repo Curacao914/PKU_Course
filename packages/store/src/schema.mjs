@@ -98,6 +98,10 @@ CREATE TABLE IF NOT EXISTS deliveries (
   scheduled_for TEXT    NOT NULL,
   claimed_at    TEXT,
   claimed_by    TEXT    NOT NULL DEFAULT '',
+  -- 认领令牌：领取时生成，ack/retry 必须带上同一个令牌。
+  -- 防的是这件真事：发送者 A 领了投递、卡住超过租约，B 重新领走并发出去了；
+  -- 这时 A 醒过来 ack/retry 一次，会把 B 的结果覆盖成"失败"（或者反过来把已重排的又标成已发）。
+  claim_token   TEXT    NOT NULL DEFAULT '',
   -- 投递也有租约：发送进程崩了、整机重启了，这条投递不能永远卡在 claimed 状态
   --（那等于通知静默消失）。过期之后可以被重新领取。
   lease_expires_at TEXT,
@@ -128,6 +132,17 @@ export const MIGRATIONS = [
       const columns = db.prepare('PRAGMA table_info(deliveries)').all().map(row => row.name)
       if (!columns.includes('lease_expires_at')) db.exec('ALTER TABLE deliveries ADD COLUMN lease_expires_at TEXT')
       db.exec('CREATE INDEX IF NOT EXISTS idx_deliveries_lease ON deliveries (status, lease_expires_at)')
+    }
+  },
+  {
+    // 版本号必须**递增**：migrate() 用 version > user_version 判断要不要跑。
+    // （这条踩过：新加的迁移插在前面并把 version 顶掉了，结果老库那一步永远不执行，
+    //  而且 user_version 被写成 NaN——迁移数组里每一项都必须有自己的 version。）
+    version: 2,
+    name: 'deliveries.claim_token（认领令牌）',
+    up (db) {
+      const columns = db.prepare('PRAGMA table_info(deliveries)').all().map(column => column.name)
+      if (!columns.includes('claim_token')) db.exec("ALTER TABLE deliveries ADD COLUMN claim_token TEXT NOT NULL DEFAULT ''")
     }
   }
 ]

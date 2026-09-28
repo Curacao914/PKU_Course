@@ -3,6 +3,8 @@ import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
 
+import { randomUUID } from 'node:crypto'
+
 import { ACTIONABLE_STAGES, SCHEMA_SQL, assertStage, migrate } from './schema.mjs'
 
 function nowIso(now) {
@@ -109,6 +111,8 @@ export function openLedger(databasePath = ':memory:', options = {}) {
       ON CONFLICT (dedupe_key) DO NOTHING
     `),
     findDelivery: db.prepare('SELECT * FROM deliveries WHERE dedupe_key = ?'),
+    findDeliveryById: db.prepare('SELECT * FROM deliveries WHERE id = ?'),
+    renewTaskLease: db.prepare('UPDATE tasks SET lease_expires_at = ?, updated_at = ? WHERE id = ?'),
     /**
      * 可领取的投递 = 到点的 pending，**加上租约已过期的 claimed**。
      *
@@ -125,7 +129,7 @@ export function openLedger(databasePath = ':memory:', options = {}) {
     `),
     claimDelivery: db.prepare(`
       UPDATE deliveries
-      SET status = 'claimed', claimed_at = ?, claimed_by = ?, attempts = attempts + 1,
+      SET status = 'claimed', claimed_at = ?, claimed_by = ?, claim_token = ?, attempts = attempts + 1,
           lease_expires_at = ?, updated_at = ?
       WHERE id = ?
         AND (status = 'pending'
@@ -326,6 +330,13 @@ export function openLedger(databasePath = ':memory:', options = {}) {
      * 之后正常转录成功的课，attempts 仍停在 6，于是"连续失败到上限就停下"的闸门
      * 会立刻把它误判成"停下等你"——明明已经跑过去了。
      */
+    /**
+     * 上报阶段。
+     *
+     * 注意语义：上报即**交还租约**（updateStage 会清掉 claimed_by 与 lease_expires_at）。
+     * 这是刻意的——每个阶段是一次独立的 CLI 进程，跑完就该让下一个阶段/下一轮来领。
+     * 也正因如此，长任务不能靠"上报"续租，要用下面的 renewTaskLease。
+     */
     reportStage({ id, stage, message = '', data = {}, error = '', nextAttemptAt = null, now } = {}) {
       assertStage(stage)
       const at = nowIso(now)
@@ -390,16 +401,44 @@ export function openLedger(databasePath = ':memory:', options = {}) {
      * 过期后这条投递会被重新领取（见 selectDelivery 的说明），attempts 也会继续累加，
      * 因此"崩一次"不会变成无限重发。
      */
-    claimDelivery({ workerId, leaseSeconds = 600, now } = {}) {
+    /**
+     * 领取一条投递。
+     *
+     * 每次领取都生成一个 claim_token 并写回行里：ack/retry 必须带上同一个令牌。
+     * 防的是这件事——发送者 A 领了投递但卡住超过租约，B 重新领走并发出去了；A 醒过来再 ack/retry
+     * 一次，会把 B 的结果覆盖掉（通知发过了却被记成失败，或者反过来）。
+     */
+    claimDelivery({ workerId, leaseSeconds = 600, now, token } = {}) {
       const at = nowIso(now)
       const leaseUntil = new Date(new Date(at).getTime() + leaseSeconds * 1000).toISOString()
       return transaction(() => {
         const candidate = statements.selectDelivery.get(at, at)
         if (!candidate) return null
-        const result = statements.claimDelivery.run(at, String(workerId || ''), leaseUntil, at, candidate.id, at)
+        const claimToken = String(token || randomUUID())
+        const result = statements.claimDelivery.run(at, String(workerId || ''), claimToken, leaseUntil, at, candidate.id, at)
         if (result.changes === 0) return null
         return statements.findDelivery.get(candidate.dedupe_key)
       })
+    },
+
+    /**
+     * 长任务续租（Phase 5.2 C3）。
+     *
+     * 一个阶段可能跑很久（转写 40 分钟、笔记跑一小时），而租约通常只有 10 分钟：
+     * 到期后别的 worker 会认为"这个任务没人管了"而重新领取——同一个阶段被跑两遍，
+     * 模型被调两次、钱付两次。所以长循环里要**周期性续租**。
+     *
+     * 两条保证：只续"还是自己领的那条"（workerId 不匹配就返回 false，绝不替别人延长期限）；
+     * 任务已经交还（claimed_by 为空）时不续。
+     */
+    renewTaskLease({ id, workerId, leaseSeconds = 900, now } = {}) {
+      const at = nowIso(now)
+      const current = hydrate(db.prepare('SELECT * FROM tasks WHERE id = ?').get(Number(id)))
+      if (!current) return false
+      if (!workerId || current.claimed_by !== String(workerId)) return false
+      const leaseUntil = new Date(new Date(at).getTime() + Math.max(60, Number(leaseSeconds) || 900) * 1000).toISOString()
+      const result = statements.renewTaskLease.run(leaseUntil, at, id)
+      return result.changes > 0
     },
 
     /** 卡住的投递（claimed 且租约已过期）：管理台用它回答"是不是有通知发丢了"。 */
@@ -407,16 +446,31 @@ export function openLedger(databasePath = ':memory:', options = {}) {
       return Number(statements.countStuckDeliveries.get(nowIso(now))?.n || 0)
     },
 
-    ackDelivery({ id, status, externalId = '', error = '', now } = {}) {
+    /**
+     * 确认一条投递的结果。
+     *
+     * 带 token 时会校验认领令牌：令牌不匹配（说明这条已经被别人重新领走了）就**不写**，
+     * 返回 false 让调用方知道"我这一份已经过期了"。不传 token 时保持旧行为（本地 CLI、测试）。
+     */
+    ackDelivery({ id, status, externalId = '', error = '', now, token = '' } = {}) {
       const at = nowIso(now)
       const sentAt = status === 'sent' ? at : null
+      if (token) {
+        const current = statements.findDeliveryById.get(Number(id))
+        if (!current || String(current.claim_token || '') !== String(token)) return false
+      }
       const result = statements.ackDelivery.run(String(status), String(externalId), String(error), sentAt, at, id)
       return result.changes > 0
     },
 
     /** 把失败的投递放回队列并推迟重试时间（退避）。次数上限由调用方判断。 */
-    retryDelivery({ id, error = '', nextAttemptAt = null, now } = {}) {
+    /** 把失败的投递放回队列（同样校验认领令牌，理由见 ackDelivery）。 */
+    retryDelivery({ id, error = '', nextAttemptAt = null, now, token = '' } = {}) {
       const at = nowIso(now)
+      if (token) {
+        const current = statements.findDeliveryById.get(Number(id))
+        if (!current || String(current.claim_token || '') !== String(token)) return false
+      }
       const result = statements.retryDelivery.run(String(error || ''), nextAttemptAt, at, id)
       return result.changes > 0
     },

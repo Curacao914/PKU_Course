@@ -163,20 +163,23 @@ export async function runDeliveryCycle({
     const message = buildDeliveryMessage(delivery, { publicSiteUrl })
     try {
       const sent = await sender.send(message)
-      store.ackDelivery({ id: delivery.id, status: 'sent', externalId: sent.externalId, now: at })
-      const event = { id: delivery.id, dedupeKey: delivery.dedupe_key, status: 'sent', externalId: sent.externalId, message }
+      // 带上认领令牌：如果这条投递在发送期间因为租约过期被别的进程重新领走了，
+      // 这一次 ack 会被拒绝（返回 false），而不是把别人的结果覆盖掉。
+      const acked = store.ackDelivery({ id: delivery.id, status: 'sent', externalId: sent.externalId, now: at, token: delivery.claim_token })
+      const event = { id: delivery.id, dedupeKey: delivery.dedupe_key, status: acked ? 'sent' : 'superseded', externalId: sent.externalId, message, ...(acked ? {} : { error: '发送期间被重新领取，本次结果未记账' }) }
       results.push(event)
       onEvent(event)
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)
       const exhausted = Number(delivery.attempts || 0) >= maxAttempts
       if (exhausted) {
-        store.ackDelivery({ id: delivery.id, status: 'failed', error: detail, now: at })
+        store.ackDelivery({ id: delivery.id, status: 'failed', error: detail, now: at, token: delivery.claim_token })
       } else {
         store.retryDelivery({
           id: delivery.id,
           error: detail,
-          nextAttemptAt: new Date(new Date(at ?? Date.now()).getTime() + retryDelayMs).toISOString()
+          nextAttemptAt: new Date(new Date(at ?? Date.now()).getTime() + retryDelayMs).toISOString(),
+          token: delivery.claim_token
         })
       }
       const event = { id: delivery.id, dedupeKey: delivery.dedupe_key, status: exhausted ? 'failed' : 'retry', error: detail, attempts: delivery.attempts }
