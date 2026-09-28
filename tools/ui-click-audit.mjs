@@ -857,6 +857,13 @@ async function auditCoursewareFlow(page, site, fixture, failures) {
 }
 
 /** 笔记阅读页：字号 / 深色 / 进度条 / 回到顶部 / 锚点复制 / 位置记忆 / 目录。 */
+/**
+ * 审计里"故意注入失败"的开关：目前只有 .md 的 404 用它。
+ * 放在模块作用域是因为控制台错误收集器在 main() 里，而注入发生在 auditNotePage() 里——
+ * 用一个布尔把两边连起来，比把 404 全局放行安全得多。
+ */
+let expectedHttp404 = false
+
 async function auditNotePage(page, site, noteUrl, failures) {
   const results = []
   const record = async (name, ok, detail) => {
@@ -1265,6 +1272,56 @@ async function auditNotePage(page, site, noteUrl, failures) {
   const annotTools = await page.$$eval('#tools button[data-tool^="annot-"]', nodes => nodes.map(node => node.dataset.tool))
   await record('工具栏有批注导出/导入入口', annotTools.length === 2, '按钮：' + annotTools.join(' / '))
 
+  /**
+   * A6：复制的两条失败路径都要当场说清楚。
+   *
+   * 旧实现不看 HTTP 状态、也不接剪贴板的 Promise：取到 404 错误页也照样往剪贴板里塞，
+   * 权限被拒时则一点反应都没有——读者以为"点了没生效"，其实复制的是错误页或在静默失败。
+   */
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: () => Promise.reject(new Error('权限被拒绝（审计注入）')) }
+    })
+  })
+  const readToast = () => page.evaluate(() => {
+    const box = document.getElementById('toast')
+    return {
+      text: box ? box.textContent : '',
+      hasFallback: Boolean(box && box.querySelector('textarea')),
+      visible: box ? box.style.opacity === '1' : false
+    }
+  })
+
+  // 先验"A 路径"：剪贴板被拒 → 提示 + 给出可手工复制的文本域。
+  // 走**选区工具条**上的复制：它没有网络请求，测的就是剪贴板这一件事
+  // （工具栏那个还依赖 .md 的响应，混在一起会分不清失败原因）。
+  await page.reload({ waitUntil: 'networkidle' })
+  await selectSomeText()
+  await page.click('#selbar button[data-annot="copy"]')
+  await page.waitForTimeout(400)
+  const clipboardFail = await readToast()
+  await record('剪贴板被拒时给出手工兜底',
+    clipboardFail.visible && /复制失败/.test(clipboardFail.text) && clipboardFail.hasFallback,
+    '提示：' + clipboardFail.text.trim().slice(0, 40) + '｜是否带可选中的文本域：' + clipboardFail.hasFallback)
+
+  // 再验"B 路径"：HTTP 不对时绝不能把错误页塞进剪贴板
+  expectedHttp404 = true
+  await page.route('**/*.md', route => route.fulfill({
+    status: 404,
+    contentType: 'text/plain',
+    headers: { 'cache-control': 'no-store' },
+    body: 'not found'
+  }))
+  await page.reload({ waitUntil: 'networkidle' })
+  await page.click('#tools button[data-tool="copy"]')
+  await page.waitForTimeout(600)
+  const httpFail = await readToast()
+  await page.unroute('**/*.md')
+  expectedHttp404 = false
+  await record('取正文失败时不往剪贴板塞错误页', httpFail.visible && /取正文失败（HTTP 404）/.test(httpFail.text),
+    '提示：' + httpFail.text.trim().slice(0, 60))
+
   // 目录：点一条要跳到对应小节，且当前小节会被高亮
   await page.evaluate(() => window.scrollTo(0, 0))
   await page.waitForTimeout(300)
@@ -1310,6 +1367,83 @@ async function auditSearch(page, site, failures) {
   await page.waitForTimeout(250)
   const cleared = await page.inputValue('#q')
   await record('Esc 清空', cleared === '', '输入框剩「' + cleared + '」')
+
+  /**
+   * A6：异步反馈必须跟得上人的手速。
+   *
+   * 三件事各自对应一次真实的错觉：
+   *   · 清空/Esc 之后，在途的那次请求晚一拍返回，把结果贴回一个已经空掉的框里；
+   *   · 服务端其实拒绝了（429/400/504），页面却只说"暂时不可用"，读者找不到原因；
+   *   · 中文输入法组字途中就发请求，搜的是半成品，还会顶掉完整查询的结果。
+   * 这里用**可控延迟**与**拦截响应**把三种情形摆出来，而不是靠手速碰运气。
+   */
+  let searchRequests = 0
+  await page.route('**/api/search**', async (route) => {
+    searchRequests += 1
+    await new Promise(resolve => setTimeout(resolve, 400))
+    await route.continue()
+  })
+
+  await page.fill('#q', '执行措施')
+  await page.waitForTimeout(220)   // 过 160ms 防抖，请求已经在途
+  await page.fill('#q', '')
+  await page.waitForTimeout(700)   // 等那次在途请求"回来"
+  const afterClear = await page.evaluate(() => ({
+    results: document.getElementById('results').innerHTML.trim().length,
+    hint: document.getElementById('hint').textContent.trim()
+  }))
+  await record('清空后不被在途结果污染', afterClear.results === 0 && afterClear.hint === '',
+    `结果长度 ${afterClear.results}、提示「${afterClear.hint}」`)
+
+  await page.fill('#q', '执行措施')
+  await page.waitForTimeout(220)
+  await page.keyboard.press('Escape')
+  await page.waitForTimeout(700)
+  const afterEscape = await page.evaluate(() => ({
+    results: document.getElementById('results').innerHTML.trim().length,
+    hint: document.getElementById('hint').textContent.trim(),
+    value: document.getElementById('q').value
+  }))
+  await record('Esc 取消在途检索', afterEscape.value === '' && afterEscape.results === 0 && afterEscape.hint === '',
+    `输入「${afterEscape.value}」结果长度 ${afterEscape.results} 提示「${afterEscape.hint}」`)
+
+  // 服务端说了原因就照实转达（429 / 400 / 504 都带 message）
+  await page.unroute('**/api/search**')
+  await page.route('**/api/search**', route => route.fulfill({
+    status: 429,
+    contentType: 'application/json',
+    body: JSON.stringify({ ok: false, error: 'rate_limited', message: '请求过于频繁（每 60 秒最多 300 次），请稍后再试。' })
+  }))
+  await page.fill('#q', '执行措施')
+  await page.waitForTimeout(600)
+  const refused = await page.textContent('#hint')
+  await record('服务端拒绝时说清原因', /请求过于频繁/.test(refused || ''), '提示「' + (refused || '').trim() + '」')
+
+  // 输入法组字期间不发请求
+  await page.unroute('**/api/search**')
+  searchRequests = 0
+  await page.route('**/api/search**', async (route) => { searchRequests += 1; await route.continue() })
+  await page.fill('#q', '')
+  await page.waitForTimeout(300)
+  searchRequests = 0
+  await page.evaluate(() => {
+    const input = document.getElementById('q')
+    input.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }))
+    input.value = '执行措施'
+    input.dispatchEvent(new InputEvent('input', { bubbles: true, isComposing: true }))
+    input.dispatchEvent(new InputEvent('input', { bubbles: true, isComposing: true }))
+  })
+  await page.waitForTimeout(500)
+  const duringCompose = searchRequests
+  await page.evaluate(() => {
+    const input = document.getElementById('q')
+    input.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }))
+  })
+  await page.waitForTimeout(700)
+  await record('输入法组字期间不检索、组完再搜',
+    duringCompose === 0 && searchRequests >= 1,
+    `组字中发了 ${duringCompose} 次，组完发了 ${searchRequests} 次`)
+  await page.unroute('**/api/search**')
 
   return results
 }
@@ -1749,6 +1883,12 @@ async function main() {
     // 不是缺陷；其余控制台报错一律算失败
     if (message.type() !== 'error') return
     if (/401/.test(message.text())) return
+    // 429 是搜索页那一步**自己造的**：拦截 /api/search 回一个限流响应，专门验证
+    // "服务端拒绝时说清原因"。浏览器把它记成控制台错误是预期的，不算缺陷。
+    if (/429 \(Too Many Requests\)/.test(message.text())) return
+    // 404 只在"故意注入 .md 失败"的那一小段里被忽略（expectedHttp404 由那一步自己开关），
+    // 其它时间出现 404 仍然算缺陷——不要为了省事把 404 全局放行。
+    if (expectedHttp404 && /404 \(Not Found\)/.test(message.text())) return
     failures.push('控制台报错：' + message.text())
   })
   // 余额是外部网络调用，审计里换成固定值

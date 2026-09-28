@@ -1590,16 +1590,37 @@ const SEARCH_SCRIPT = `<script>
     try { history.replaceState(null, '', text ? '/search/?q=' + encodeURIComponent(text) : '/search/') } catch (error) {}
   }
 
+  /** 清空/取消：把在途请求作废并中止，别让它 200ms 后把结果贴回一个已经空掉的框里。 */
+  function reset (message) {
+    seq += 1;
+    if (timer) { clearTimeout(timer); timer = null }
+    if (controller) { controller.abort(); controller = null }
+    results.innerHTML = '';
+    show(message || '');
+    sync('');
+  }
+
   function run (value) {
     var text = String(value || '').trim();
+    if (!text) { reset(''); return }
     sync(text);
-    if (!text) { results.innerHTML = ''; show(''); return }
     var mine = (seq += 1);
     if (controller) controller.abort();
     controller = new AbortController();
     show('检索中…');
     fetch('/api/search?q=' + encodeURIComponent(text) + '&limit=20', { signal: controller.signal })
-      .then(function (response) { return response.json() })
+      // 先看 HTTP 状态再解析：429（太频繁）、400（查询过长）、504（超时）都会带可读的
+      // message，照实说给读者听，比一律"稍后再试"有用得多。
+      .then(function (response) {
+        return response.json().catch(function () { return null }).then(function (data) {
+          if (!response.ok) {
+            var error = new Error((data && data.message) || ('检索服务返回 ' + response.status + '，稍后再试。'))
+            error.serverSaid = true
+            throw error
+          }
+          return data || {}
+        })
+      })
       .then(function (data) {
         if (mine !== seq) return;
         if (!data.ok) { results.innerHTML = ''; show(data.message || '检索失败。'); return }
@@ -1625,19 +1646,33 @@ const SEARCH_SCRIPT = `<script>
         if (error && error.name === 'AbortError') return;
         if (mine !== seq) return;
         results.innerHTML = '';
-        show('检索服务暂时不可用，稍后再试。');
+        show(error && error.serverSaid ? error.message : '检索服务暂时不可用，稍后再试。');
       });
   }
 
-  function schedule (value) { clearTimeout(timer); timer = setTimeout(function () { run(value) }, 160) }
+  function schedule (value) { clearTimeout(timer); timer = setTimeout(function () { timer = null; run(value) }, 160) }
 
   var initial = new URLSearchParams(location.search).get('q');
   if (initial) { input.value = initial; run(initial) }
 
-  input.addEventListener('input', function () { schedule(input.value) });
+  // 中文输入法组字期间不检索：候选每变一次都会触发 input，中途搜出来的是半成品，
+  // 而且会把「刚才那条完整查询」的结果顶掉。组字结束再排一次。
+  var composing = false;
+  input.addEventListener('compositionstart', function () { composing = true });
+  input.addEventListener('compositionend', function () {
+    composing = false;
+    if (!input.value.trim()) { reset(''); return }
+    schedule(input.value);
+  });
+  input.addEventListener('input', function (event) {
+    if (composing || (event && event.isComposing)) return;
+    if (!input.value.trim()) { reset(''); return }
+    schedule(input.value);
+  });
   document.addEventListener('keydown', function (event) {
     if (event.key === '/' && document.activeElement !== input) { event.preventDefault(); input.focus() }
-    if (event.key === 'Escape' && document.activeElement === input) { input.value = ''; run('') }
+    // Esc = 取消：清空输入、作废在途请求、清掉结果与提示
+    if (event.key === 'Escape' && document.activeElement === input) { input.value = ''; reset('') }
   });
 })();
 </script>`

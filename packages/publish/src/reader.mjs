@@ -265,6 +265,46 @@ export const READER_SCRIPT = '<script>' + ANCHOR_RUNTIME + String.raw`
   function closeNav () { if (navMenu && navMenu.open) navMenu.open = false }
   if (navMenu) navMenu.addEventListener('toggle', function () { if (navMenu.open) closePops() })
 
+  /**
+   * 临时提示条：异步动作（复制 / 导出 / 导入）必须当场有反馈——点了没反应，读者只会怀疑
+   * "是不是没点到"。需要人工兜底时（剪贴板被浏览器拒绝）把文本放进一个**已选中**的
+   * textarea：按 ⌘C 就能拿走，不用再点一次。
+   */
+  function toast (message, fallbackText) {
+    var box = document.getElementById('toast')
+    if (!box) {
+      box = document.createElement('div')
+      box.id = 'toast'
+      box.setAttribute('role', 'status')
+      box.setAttribute('aria-live', 'polite')
+      box.style.cssText = 'position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:60;' +
+        'max-width:min(90vw,560px);padding:10px 14px;border-radius:10px;background:rgba(20,20,20,.92);' +
+        'color:#fff;font-size:14px;line-height:1.5;opacity:0;transition:opacity .18s ease;pointer-events:none'
+      document.body.appendChild(box)
+    }
+    box.innerHTML = ''
+    box.style.pointerEvents = fallbackText ? 'auto' : 'none'
+    var line = document.createElement('div')
+    line.textContent = message
+    box.appendChild(line)
+    if (fallbackText) {
+      var area = document.createElement('textarea')
+      area.value = fallbackText
+      area.setAttribute('readonly', 'readonly')
+      area.rows = 3
+      area.style.cssText = 'width:100%;margin-top:8px;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace'
+      box.appendChild(area)
+      var tip = document.createElement('div')
+      tip.style.cssText = 'margin-top:6px;opacity:.8;font-size:12px'
+      tip.textContent = '按 ⌘C / Ctrl+C 复制上面这段'
+      box.appendChild(tip)
+      setTimeout(function () { area.focus(); area.select() }, 0)
+    }
+    box.style.opacity = '1'
+    clearTimeout(box.__timer)
+    box.__timer = setTimeout(function () { box.style.opacity = '0' }, fallbackText ? 12000 : 2600)
+  }
+
   if (tools) {
     // 挂在 document 上而不是 #tools 上：即使某次重绘换掉了按钮节点，点击也仍然能被接住
     document.addEventListener('click', function (event) {
@@ -297,14 +337,27 @@ export const READER_SCRIPT = '<script>' + ANCHOR_RUNTIME + String.raw`
           button.setAttribute('aria-pressed', 'true')
           setTimeout(function () { button.setAttribute('aria-pressed', 'false') }, 1200)
         }
+        // 复制是异步的：先看状态码（404/503 的响应体是一段错误页，塞进剪贴板等于把错误页
+        // 复制走），再看剪贴板权限（可能被拒）。两种情况都要当场说清楚，并给出人工兜底。
+        var write = function (text) {
+          if (!navigator.clipboard || !navigator.clipboard.writeText) return Promise.reject(new Error('这个浏览器不给用剪贴板'))
+          return navigator.clipboard.writeText(text)
+        }
+        var copyText = function (text) {
+          return write(text).then(function () { toast('已复制 Markdown'); done() })
+            .catch(function (error) {
+              toast('复制失败：' + ((error && error.message) || '浏览器拒绝了剪贴板权限'), text)
+            })
+        }
         if (link && window.fetch) {
-          fetch(link.getAttribute('href')).then(function (res) { return res.text() }).then(function (text) {
-            if (navigator.clipboard) navigator.clipboard.writeText(text)
-            done()
-          }).catch(function () { done() })
+          fetch(link.getAttribute('href')).then(function (res) {
+            if (!res.ok) throw new Error('取正文失败（HTTP ' + res.status + '）')
+            return res.text()
+          }).then(copyText).catch(function (error) {
+            toast((error && error.message) || '复制失败，稍后再试')
+          })
         } else {
-          if (navigator.clipboard) navigator.clipboard.writeText(document.querySelector('article').innerText)
-          done()
+          copyText(document.querySelector('article').innerText)
         }
         return
       }
@@ -798,8 +851,20 @@ export const READER_SCRIPT = '<script>' + ANCHOR_RUNTIME + String.raw`
       if (!button) return
       var kind = button.getAttribute('data-annot')
       if (kind === 'copy') {
-        var text = window.getSelection().toString()
-        if (navigator.clipboard) navigator.clipboard.writeText(text)
+        // 选区复制没有网络请求，但**剪贴板权限仍可能被拒**（http 页面、无用户手势、企业策略）。
+        // 旧实现不接 Promise：被拒时一点反应都没有，读者以为复制成功了。
+        var selected = window.getSelection().toString()
+        if (!selected) { hideSelbar(); return }
+        if (!navigator.clipboard || !navigator.clipboard.writeText) {
+          toast('这个浏览器不给用剪贴板，请手动选择后按 ⌘C / Ctrl+C', selected)
+          hideSelbar()
+          return
+        }
+        navigator.clipboard.writeText(selected).then(function () {
+          toast('已复制所选文字')
+        }).catch(function (error) {
+          toast('复制失败：' + ((error && error.message) || '浏览器拒绝了剪贴板权限'), selected)
+        })
         hideSelbar()
         return
       }
