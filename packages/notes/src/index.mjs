@@ -129,6 +129,16 @@ export {
 } from './task-runner.mjs'
 
 export {
+  checkMarkerPropagation,
+  checkMetadata,
+  checkNoteQuality,
+  checkTables,
+  checkTruncation,
+  findOpenMarkers,
+  formatQualityReport
+} from './quality.mjs'
+
+export {
   DEFAULT_COURSE_SPEC,
   applyFinalReview,
   applyNodeReview,

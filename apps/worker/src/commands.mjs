@@ -9,7 +9,8 @@ import { checkFreeSpace, createValidatedAcquisitionRuntime, formatBytes } from '
 import {
   addMaterial, guessMaterialIdentity, listMaterials, ocrMaterial, parseInboxName, pendingOcrMaterials, readDecks, unassignedDir
 } from '@course/materials'
-import { cacheUrlsFor, purgeCloudflareCache } from '@course/publish'
+import { checkNoteQuality, formatQualityReport } from '@course/notes'
+import { cacheUrlsFor, extractNoteMetadata, purgeCloudflareCache } from '@course/publish'
 
 import { NOTIFY_POLICY, clearPending, pendingNotifications, planNotification, resolveNotifyPolicy } from './notify-outbox.mjs'
 import { acquirePublishLock, checkRevisionUnchanged, libraryRevision, publishLockPath } from './publish-guard.mjs'
@@ -752,6 +753,32 @@ export function createCommands(context) {
         stderr(`警告：成品笔记里有 ${metaCommentary} 处"写作过程"的话（本节点/写作目标/待补写…），不该出现在交付物里`)
       }
 
+      /**
+       * 内容质量检查（Phase 5.2 A8）。
+       *
+       * 放在成稿之后、发布之前：分类漏抽/重复、表格少一列、同一节被拼两遍、正文被截断、
+       * 待核标记没有出处或没有贯通到简报/一页纸/测验——这些都能在**发布前**用纯文本发现。
+       * 两条纪律：
+       *   · 只报告不改写：改内容要人点头；
+       *   · **不进通知**：这是给作者看的，读者那条链路只发 course-note。
+       * 想让它拦住发布就设 COURSE_NOTES_QUALITY_STRICT=1（默认只提醒）。
+       */
+      let quality = null
+      if (produced) {
+        quality = checkNoteQuality({
+          markdown: result.lesson.finalNote.markdown,
+          metadata: extractNoteMetadata(result.lesson.finalNote.markdown),
+          artifacts: {
+            简报: brief ? [brief.briefing, ...(brief.keyPoints || [])].join('\n') : '',
+            一页纸: ''
+          }
+        })
+        stderr(formatQualityReport(quality))
+        if (quality.counts.error && String(env.COURSE_NOTES_QUALITY_STRICT || '') === '1') {
+          throw new Error(`内容质量检查发现 ${quality.counts.error} 个错误（COURSE_NOTES_QUALITY_STRICT=1）：见上面的清单`)
+        }
+      }
+
       const summary = {
         course,
         lesson: lessonTitle,
@@ -768,7 +795,9 @@ export function createCommands(context) {
         resumed: resume,
         maxSteps: options.options['max-steps'] ? Number(options.options['max-steps']) : null,
         brief: brief ? { path: briefPath, words: brief.words, keyPoints: brief.keyPoints.length } : null,
-        briefError
+        briefError,
+        // 质量检查结果进摘要（不进通知）：发布与日报都能引用它，作者也能事后查
+        quality: quality ? { counts: quality.counts, findings: quality.findings } : null
       }
       fs.writeFileSync(summaryPath, `${JSON.stringify(summary, null, 2)}\n`)
 
