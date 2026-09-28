@@ -1421,6 +1421,26 @@ test('verify reports every unmet prerequisite instead of pretending to run', asy
   assert.ok(report.hint, '应给出下一步提示')
 })
 
+test('verify 不加 --yes 只做前置检查：绝不下载、不转写、不发推送', async () => {
+  // 真实教训：排查问题时顺手敲了一下 verify，它真跑了一整轮——下载 1.3G、开始转写
+  // （按小时计费），跑下去还会写笔记并可能给读者推一条。这个闸门就是为此加的。
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const env = {
+    PKU_USERNAME: 'u', PKU_PASSWORD: 'p',
+    DASHSCOPE_API_KEY: 'k', R2_ENDPOINT: 'https://r2.example.com',
+    COURSE_AI_API_KEY: 'sk-test'
+  }
+  const { deps, lines } = harness()
+  const code = await runCli(['verify', '--out', path.join(dir, 'site')], { ...deps, env })
+  assert.equal(code, 0)
+  const payload = parse(lines.at(-1))
+  assert.equal(payload.ready, true)
+  assert.equal(payload.dryRun, true, '默认只报告条件是否齐备')
+  assert.match(payload.willRun, /转写|模型调用|推送/, '要说清真跑会花什么')
+  assert.match(payload.hint, /--yes/)
+  assert.ok(Array.isArray(payload.criteria) && payload.criteria.length > 0)
+})
+
 test('verify runs a real cycle and asserts each acceptance criterion', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
   const model = fakeModel()
@@ -1458,7 +1478,7 @@ test('verify runs a real cycle and asserts each acceptance criterion', async () 
   ledger.discoverReplays([{ replay_key: 'replay-1', course_key: 'course-abc', course_name: '刑法分论', title: '第10-12节' }])
   ledger.reportStage({ id: ledger.getTask('replay-1').id, stage: 'downloaded', data: { artifacts: { mediaPath } } })
 
-  const code = await runCli(['verify', '--out', path.join(dir, 'site'), '--max-tasks', '8'], { ...deps, env })
+  const code = await runCli(['verify', '--yes', '--out', path.join(dir, 'site'), '--max-tasks', '8'], { ...deps, env })
   const report = parse(lines.at(-1))
 
   assert.equal(report.ready, true)

@@ -2,7 +2,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-import { ACTIONABLE_STAGES, SCHEMA_SQL, assertStage } from './schema.mjs'
+
+import { ACTIONABLE_STAGES, SCHEMA_SQL, assertStage, migrate } from './schema.mjs'
 
 function nowIso(now) {
   return (now instanceof Date ? now : new Date(now ?? Date.now())).toISOString()
@@ -31,9 +32,21 @@ export function openLedger(databasePath = ':memory:', options = {}) {
   if (resolved !== ':memory:') fs.mkdirSync(path.dirname(resolved), { recursive: true })
 
   const db = new DatabaseSync(resolved)
-  if (resolved !== ':memory:') db.exec('PRAGMA journal_mode = WAL')
+  if (resolved !== ':memory:') {
+    db.exec('PRAGMA journal_mode = WAL')
+    // WAL 之下 synchronous=NORMAL 是安全且明显更快的选择：掉电最多丢最后几个事务，
+    // 不会损坏数据库（完整模式每个事务都要 fsync，而账本是高频小写入）
+    db.exec('PRAGMA synchronous = NORMAL')
+  }
   db.exec('PRAGMA foreign_keys = ON')
+  /**
+   * 忙等：worker、站点、管理台 CLI 会同时读写同一个账本文件。
+   * 没有 busy_timeout 时，撞上别人持有写锁会直接抛 SQLITE_BUSY——记一次"失败"，
+   * 对账本这种"改一行"的操作是完全不必要的失败。等 5 秒再放弃。
+   */
+  db.exec('PRAGMA busy_timeout = 5000')
   db.exec(SCHEMA_SQL)
+  migrate(db, options.log || (() => {}))
 
   const statements = {
     insertTask: db.prepare(`
@@ -96,27 +109,42 @@ export function openLedger(databasePath = ':memory:', options = {}) {
       ON CONFLICT (dedupe_key) DO NOTHING
     `),
     findDelivery: db.prepare('SELECT * FROM deliveries WHERE dedupe_key = ?'),
+    /**
+     * 可领取的投递 = 到点的 pending，**加上租约已过期的 claimed**。
+     *
+     * 后半句是崩溃自愈：发送进程在"领取之后、记录结果之前"挂掉（或整机重启），
+     * 那条投递会永远停在 claimed，而它既不在 pending 里、也没有人再去看它——
+     * 通知就这么静默消失了。过期可领，配合 attempts 上限，最终要么发出、要么标失败。
+     */
     selectDelivery: db.prepare(`
       SELECT * FROM deliveries
-      WHERE status = 'pending' AND scheduled_for <= ?
+      WHERE (status = 'pending' AND scheduled_for <= ?)
+         OR (status = 'claimed' AND (lease_expires_at IS NULL OR lease_expires_at <= ?))
       ORDER BY scheduled_for, id
       LIMIT 1
     `),
     claimDelivery: db.prepare(`
       UPDATE deliveries
-      SET status = 'claimed', claimed_at = ?, claimed_by = ?, attempts = attempts + 1, updated_at = ?
-      WHERE id = ? AND status = 'pending'
+      SET status = 'claimed', claimed_at = ?, claimed_by = ?, attempts = attempts + 1,
+          lease_expires_at = ?, updated_at = ?
+      WHERE id = ?
+        AND (status = 'pending'
+             OR (status = 'claimed' AND (lease_expires_at IS NULL OR lease_expires_at <= ?)))
     `),
     ackDelivery: db.prepare(`
       UPDATE deliveries
-      SET status = ?, external_id = ?, last_error = ?, sent_at = ?, updated_at = ?
+      SET status = ?, external_id = ?, last_error = ?, sent_at = ?, lease_expires_at = NULL, updated_at = ?
       WHERE id = ?
     `),
     retryDelivery: db.prepare(`
       UPDATE deliveries
-      SET status = 'pending', claimed_at = NULL, claimed_by = '', last_error = ?,
+      SET status = 'pending', claimed_at = NULL, claimed_by = '', lease_expires_at = NULL, last_error = ?,
           scheduled_for = COALESCE(?, scheduled_for), updated_at = ?
       WHERE id = ?
+    `),
+    countStuckDeliveries: db.prepare(`
+      SELECT COUNT(*) AS n FROM deliveries
+      WHERE status = 'claimed' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?
     `)
   }
 
@@ -333,6 +361,11 @@ export function openLedger(databasePath = ':memory:', options = {}) {
       return statements.listDeliveries.all(status, status, Number(limit || 50)).map(hydrateDelivery)
     },
 
+    /** 按幂等键取一条投递（管理台与排障用；找不到返回 null）。 */
+    findDelivery(dedupeKey) {
+      return hydrateDelivery(statements.findDelivery.get(String(dedupeKey))) || null
+    },
+
     /** 把发失败的通知放回队列重发（人工决定，不自动循环骚扰）。 */
     reviveFailedDeliveries({ now } = {}) {
       const at = nowIso(now)
@@ -340,15 +373,28 @@ export function openLedger(databasePath = ':memory:', options = {}) {
       return { revived: result.changes }
     },
 
-    claimDelivery({ workerId, now } = {}) {
+    /**
+     * 领取一条待发送的投递。
+     *
+     * leaseSeconds 默认 10 分钟：正常一次发送是秒级，超时只可能是进程出了问题；
+     * 过期后这条投递会被重新领取（见 selectDelivery 的说明），attempts 也会继续累加，
+     * 因此"崩一次"不会变成无限重发。
+     */
+    claimDelivery({ workerId, leaseSeconds = 600, now } = {}) {
       const at = nowIso(now)
+      const leaseUntil = new Date(new Date(at).getTime() + leaseSeconds * 1000).toISOString()
       return transaction(() => {
-        const candidate = statements.selectDelivery.get(at)
+        const candidate = statements.selectDelivery.get(at, at)
         if (!candidate) return null
-        const result = statements.claimDelivery.run(at, String(workerId || ''), at, candidate.id)
+        const result = statements.claimDelivery.run(at, String(workerId || ''), leaseUntil, at, candidate.id, at)
         if (result.changes === 0) return null
         return statements.findDelivery.get(candidate.dedupe_key)
       })
+    },
+
+    /** 卡住的投递（claimed 且租约已过期）：管理台用它回答"是不是有通知发丢了"。 */
+    countStuckDeliveries({ now } = {}) {
+      return Number(statements.countStuckDeliveries.get(nowIso(now))?.n || 0)
     },
 
     ackDelivery({ id, status, externalId = '', error = '', now } = {}) {

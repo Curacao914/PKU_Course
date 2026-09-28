@@ -1225,15 +1225,23 @@ export function createCommands(context) {
       { ...record, checksum: contentChecksum }
     ]
     fs.mkdirSync(siteRoot, { recursive: true })
-    // 发布库用 tmp + fsync + rename 原子替换：半截 JSON 会让下一次发布直接停摆
-    writeJsonAtomic(libraryForRebuild, nextLibrary)
 
+    /**
+     * 先把页面写出去，**最后**才写发布库。
+     *
+     * 顺序是有讲究的：发布库是"提交点"——/api/notes、MCP、站内搜索都读它。
+     * 如果先写库再写页面，中间那几百毫秒里读者会拿到一条指向尚未生成的页面的记录
+     * （点进去 404、搜索命中却打不开）。反过来先写页面，万一写到一半崩了，
+     * 库还是旧的：站点内容与库始终自洽，重跑一次 publish 即可补齐。
+     */
     const site = writeSite({
       records: nextLibrary,
       outputDir: siteRoot,
       siteOrigin: options.options.origin || 'https://course.law-tech.dev',
       docs: readPublicDocs()
     })
+    // 页面写完才动发布库（提交点，见上面的说明）：tmp + fsync + rename 原子替换
+    writeJsonAtomic(libraryForRebuild, nextLibrary)
     const index = readSiteIndex(siteRoot)
     const purge = purgeCache(options, { reason: `发布 ${record.slug}` })
 
@@ -1862,6 +1870,25 @@ export function createCommands(context) {
     if (!ready) {
       emit({ ready: false, criteria, hint: '补齐上面未通过的前置条件后重新运行' }, options)
       return 1
+    }
+
+    /**
+     * 默认只做前置检查，**要真跑必须显式 --yes**。
+     *
+     * 这是踩出来的：verify 会真跑一整轮完整链路（下载 → 转写 → 笔记 → 发布 → 推送），
+     * 一次误调用就是真金白银——转写按小时计费、笔记是几十次模型调用，而且发布之后
+     * 读者可能立刻收到一条推送。排查问题时顺手敲一下 verify，代价却是几块钱和一次打扰。
+     * 所以先报告「条件齐备」，让调用方自己决定要不要真跑。
+     */
+    if (!options.flags?.has('yes')) {
+      emit({
+        ready: true,
+        dryRun: true,
+        criteria,
+        willRun: '真跑一轮会：下载（占带宽与磁盘）→ 转写（ASR 按小时计费）→ 写笔记（多次模型调用）→ 发布 → 可能向读者推送',
+        hint: '前置条件齐备。确认真跑请加 --yes；只想看条件检查就用现在这个输出。'
+      }, options)
+      return 0
     }
 
     // 真实跑一轮（命令返回退出码，摘要从共享槽位取）
@@ -2770,8 +2797,9 @@ export const USAGE = `用法：course <命令> [选项]
                                            "该课次没有任何课件"的课次（不推进阶段，只留一行日志）；
                                            0 = 无课件也照跑。指定 --replay-key 的单节课
                                            不受这条限制（显式点名就是"我现在就要跑"）
-  verify     [--course <名称>] [--replay-key <键>] [--out <站点目录>]
-                                           验收：跑一轮真实链路并按验收条件逐项断言
+  verify     [--course <名称>] [--replay-key <键>] [--out <站点目录>] [--yes]
+                                           验收：默认只检查前置条件；加 --yes 才真跑一轮
+                                           完整链路（下载、转写计费、写笔记、可能推送读者）
   mcp        [--library <发布库.json>] [--origin <站点域名>] [--ttl <秒>]
                                            以 stdio 启动课程笔记 MCP 服务器，供 Claude Code /
                                            DSH 等客户端挂载：课程 → 课次 → 检索 → 正文

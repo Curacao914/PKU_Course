@@ -94,6 +94,9 @@ CREATE TABLE IF NOT EXISTS deliveries (
   scheduled_for TEXT    NOT NULL,
   claimed_at    TEXT,
   claimed_by    TEXT    NOT NULL DEFAULT '',
+  -- 投递也有租约：发送进程崩了、整机重启了，这条投递不能永远卡在 claimed 状态
+  --（那等于通知静默消失）。过期之后可以被重新领取。
+  lease_expires_at TEXT,
   sent_at       TEXT,
   created_at    TEXT    NOT NULL,
   updated_at    TEXT    NOT NULL
@@ -102,6 +105,50 @@ CREATE TABLE IF NOT EXISTS deliveries (
 CREATE INDEX IF NOT EXISTS idx_deliveries_pending
   ON deliveries (status, scheduled_for);
 `
+// 注意：不要在这里建 idx_deliveries_lease——老库还没有 lease_expires_at 这一列，
+// CREATE INDEX 会先于迁移执行并报 "no such column"。这个索引放在迁移里建，
+// 新库与老库都会走到同一步。
+
+/**
+ * 迁移：老账本只有 CREATE TABLE IF NOT EXISTS，新增列不会自己出现。
+ *
+ * 用 SQLite 自带的 PRAGMA user_version 记版本，按序补。每一步都在事务里做，
+ * 失败就整体回滚——宁可停在一个已知的旧版本，也不要半个迁移。
+ * 新建的库因为 SCHEMA_SQL 里已经带了这一列，同一步会检测到并跳过（幂等）。
+ */
+export const MIGRATIONS = [
+  {
+    version: 1,
+    name: 'deliveries.lease_expires_at（投递租约）',
+    up: db => {
+      const columns = db.prepare('PRAGMA table_info(deliveries)').all().map(row => row.name)
+      if (!columns.includes('lease_expires_at')) db.exec('ALTER TABLE deliveries ADD COLUMN lease_expires_at TEXT')
+      db.exec('CREATE INDEX IF NOT EXISTS idx_deliveries_lease ON deliveries (status, lease_expires_at)')
+    }
+  }
+]
+
+export function migrate(db, log = () => {}) {
+  const current = Number(db.prepare('PRAGMA user_version').get()?.user_version || 0)
+  const pending = MIGRATIONS.filter(migration => migration.version > current)
+  if (!pending.length) return { from: current, to: current, applied: [] }
+  const applied = []
+  for (const migration of pending) {
+    db.exec('BEGIN IMMEDIATE')
+    try {
+      migration.up(db)
+      // user_version 不接受参数绑定，只能拼字符串——版本号来自本文件的常量，不是外部输入
+      db.exec(`PRAGMA user_version = ${Number(migration.version)}`)
+      db.exec('COMMIT')
+      applied.push(migration.name)
+      log(`账本迁移：${migration.version} · ${migration.name}`)
+    } catch (error) {
+      db.exec('ROLLBACK')
+      throw new Error(`账本迁移失败（${migration.name}）：${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  return { from: current, to: pending.at(-1).version, applied }
+}
 
 export function assertStage(stage) {
   if (!STAGES.includes(stage)) throw new Error(`未知阶段：${stage}`)

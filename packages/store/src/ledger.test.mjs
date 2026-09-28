@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import test from 'node:test'
 
 import { openLedger } from './ledger.mjs'
@@ -305,6 +306,72 @@ test('deliveries dedupe by key and follow pending → claimed → sent', () => {
 test('delivery enqueue validates its inputs', () => {
   const db = ledger()
   assert.throws(() => db.enqueueDelivery({ dedupeKey: 'a', purpose: 'b' }), /dedupeKey、purpose 与 bodyText/)
+  db.close()
+})
+
+test('投递租约：领取后进程挂掉，租约过期会被重新领取（通知不会静默消失）', () => {
+  const db = ledger()
+  db.enqueueDelivery({ dedupeKey: 'note:1', purpose: 'course-note', bodyText: '正文', scheduledFor: '2026-09-25T00:00:00.000Z' })
+
+  const first = db.claimDelivery({ workerId: 'w1', leaseSeconds: 600, now: '2026-09-25T00:00:00.000Z' })
+  assert.equal(first.status, 'claimed')
+  assert.equal(first.attempts, 1)
+  assert.ok(first.lease_expires_at, '领取时要写租约到期时间')
+
+  // 租约内别人领不到，也不算卡住
+  assert.equal(db.claimDelivery({ workerId: 'w2', now: '2026-09-25T00:05:00.000Z' }), null)
+  assert.equal(db.countStuckDeliveries({ now: '2026-09-25T00:05:00.000Z' }), 0)
+
+  // 租约过期：同一条被重新领取，attempts 继续累加（不会无限重发）
+  const again = db.claimDelivery({ workerId: 'w2', now: '2026-09-25T00:11:00.000Z' })
+  assert.equal(again.id, first.id)
+  assert.equal(again.attempts, 2)
+
+  // 记录结果时释放租约：这条投递就此结束，不再出现在任何队列里
+  db.ackDelivery({ id: again.id, status: 'sent', now: '2026-09-25T00:11:05.000Z' })
+  const settled = db.findDelivery('note:1')
+  assert.equal(settled.status, 'sent')
+  assert.equal(settled.lease_expires_at, null)
+  assert.equal(db.claimDelivery({ workerId: 'w3', now: '2026-09-26T00:00:00.000Z' }), null, '已发送的不该再被领取')
+  db.close()
+})
+
+test('卡住的投递能被看见：claimed 且租约过期就计数', () => {
+  const db = ledger()
+  db.enqueueDelivery({ dedupeKey: 'note:2', purpose: 'course-note', bodyText: '正文', scheduledFor: '2026-09-25T00:00:00.000Z' })
+  db.claimDelivery({ workerId: 'w1', leaseSeconds: 60, now: '2026-09-25T00:00:00.000Z' })
+  assert.equal(db.countStuckDeliveries({ now: '2026-09-25T00:00:30.000Z' }), 0)
+  assert.equal(db.countStuckDeliveries({ now: '2026-09-25T00:02:00.000Z' }), 1, '管理台据此回答：是不是有通知发丢了')
+  db.close()
+})
+
+test('账本迁移：老库打开时自动补上投递租约列，且可重复打开', () => {
+  // 老库的形状：deliveries 里没有 lease_expires_at（CREATE TABLE IF NOT EXISTS 不会补列）
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-ledger-migrate-'))
+  const file = path.join(dir, 'ledger.sqlite')
+  const raw = new DatabaseSync(file)
+  raw.exec(`CREATE TABLE deliveries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, dedupe_key TEXT NOT NULL UNIQUE, purpose TEXT NOT NULL,
+    body_text TEXT NOT NULL, object_url TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0, external_id TEXT NOT NULL DEFAULT '', last_error TEXT NOT NULL DEFAULT '',
+    scheduled_for TEXT NOT NULL, claimed_at TEXT, claimed_by TEXT NOT NULL DEFAULT '', sent_at TEXT,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`)
+  raw.close()
+
+  const migrated = openLedger(file)
+  const columns = migrated.db.prepare('PRAGMA table_info(deliveries)').all().map(row => row.name)
+  assert.ok(columns.includes('lease_expires_at'), '打开老库时补列')
+  assert.equal(Number(migrated.db.prepare('PRAGMA user_version').get().user_version), 1)
+  migrated.close()
+
+  const reopened = openLedger(file)
+  assert.equal(Number(reopened.db.prepare('PRAGMA user_version').get().user_version), 1, '重复打开是幂等的')
+  reopened.close()
+})
+
+test('busy_timeout 已设置：worker、站点、CLI 同时写账本时不至于直接报 SQLITE_BUSY', () => {
+  const db = ledger()
+  assert.equal(db.db.prepare('PRAGMA busy_timeout').get().timeout, 5000)
   db.close()
 })
 
