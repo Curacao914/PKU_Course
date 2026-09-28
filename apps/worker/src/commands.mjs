@@ -323,13 +323,22 @@ export function createCommands(context) {
    * 账本里没有这条回放时不报错——手动跑单节课仍然可用，只是不记录阶段，
    * 并且会在 stderr 明确说明，避免让人误以为进度已被记账。
    */
-  function claimForRun(store, replayKey, workerId) {
+  /**
+   * 领取这次运行要推进的课次。
+   *
+   * leaseSeconds 可以按阶段给：**转写**这一步的等待发生在 Python 进程里（ASR 轮询最长几十分钟），
+   * JS 这侧没有续租的时机，所以只能把租约开得足够长——代价是"worker 崩了之后要等更久
+   * 才会被别的 worker 接管"。笔记那一步反过来：它有十几次模型调用、每落一次状态就能续租，
+   * 所以用默认租约 + renewTaskLease（见 notes 的 saveState）。两种做法各有各的适用场景，
+   * 不要为了统一把转写的租约也调小——那会让长转写被第二个 worker 抢走重跑，钱付两次。
+   */
+  function claimForRun(store, replayKey, workerId, { leaseSeconds } = {}) {
     const existing = store.getTask(replayKey)
     if (!existing) {
       stderr(`账本中没有 ${replayKey}：本次按独立运行处理，不记录阶段。先跑 course discover 可登记回放。`)
       return null
     }
-    const claim = store.claimTask({ replayKey, workerId })
+    const claim = store.claimTask({ replayKey, workerId, ...(leaseSeconds ? { leaseSeconds } : {}) })
     if (!claim.claimed) {
       throw new Error(`无法领取 ${replayKey}：${claim.reason}（当前阶段 ${claim.task?.stage}）`)
     }
@@ -2964,7 +2973,8 @@ export function createCommands(context) {
     const workerId = options.options['worker-id'] || defaultWorkerId()
     const store = openStore(config.ledgerPath)
     try {
-      const task = replayKey ? claimForRun(store, replayKey, workerId) : null
+      // 转写：ASR 轮询在 Python 里，最长可能几十分钟，JS 侧没有续租时机 → 开长租约（见 claimForRun）
+      const task = replayKey ? claimForRun(store, replayKey, workerId, { leaseSeconds: 5400 }) : null
       const previousStage = task?.stage || 'discovered'
 
       const result = await runPython({
