@@ -492,15 +492,37 @@ test('redactStatus collapses anything secret-looking to set/missing', () => {
   assert.ok(!JSON.stringify(redacted).includes('sk-123'))
 })
 
-test('run spawns the same CLI entry the timer uses', async () => {
+/** 等一个 job 跑完（C2：长动作不再挂着请求等，前端按 jobId 轮询）。 */
+async function waitJob (handler, jobId, tries = 50) {
+  for (let index = 0; index < tries; index += 1) {
+    const { body } = await call(handler, { url: '/api/admin/job?id=' + encodeURIComponent(jobId) })
+    if (body.status && body.status !== 'running') return body
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  throw new Error('job 一直没有结束：' + jobId)
+}
+
+test('run 立刻返回 jobId，结果由 job 接口查（不再挂着一个请求等几分钟）', async () => {
   const { handler, calls } = fixture()
   const { res, body } = await call(handler, {
     method: 'POST', url: '/api/admin/run', body: JSON.stringify({ action: 'cycle', maxTasks: 3 })
   })
-  assert.equal(res.state.status, 200)
+  assert.equal(res.state.status, 202, '长动作应当是 202 + jobId，而不是等它跑完再回 200')
   assert.equal(body.ok, true)
+  assert.ok(body.jobId, '必须给出 jobId')
+  assert.equal(body.poll, '/api/admin/job?id=' + body.jobId)
   assert.equal(calls.length, 1)
   assert.deepEqual(calls[0].args, ['/repo/apps/worker/bin/course.mjs', 'cycle', '--max-tasks', '3'])
+
+  const finished = await waitJob(handler, body.jobId)
+  assert.equal(finished.status, 'done')
+  assert.equal(finished.exitCode, 0)
+  assert.equal(finished.action, 'cycle')
+
+  // 未知 id 要说清"进程内只保留最近 20 个"，而不是含糊的 500
+  const missing = await call(handler, { url: '/api/admin/job?id=不存在的' })
+  assert.equal(missing.res.state.status, 404)
+  assert.equal(missing.body.error, 'job_not_found')
 })
 
 test('run rejects unsupported actions and unknown routes', async () => {
@@ -520,8 +542,8 @@ test('a second run is refused while one is in flight', async () => {
     runCommand: async () => { await gate; return { code: 0, stdout: '{}', stderr: '' } }
   })
 
-  const first = call(handler, { method: 'POST', url: '/api/admin/run', body: JSON.stringify({ action: 'discover' }) })
-  await new Promise(resolve => setTimeout(resolve, 10))
+  const first = await call(handler, { method: 'POST', url: '/api/admin/run', body: JSON.stringify({ action: 'discover' }) })
+  assert.equal(first.res.state.status, 202)
 
   // 运行期间状态里应能看到"正在运行"，用户才知道按钮为什么没反应
   const during = await call(handler, { url: '/api/admin/status' })
@@ -530,10 +552,11 @@ test('a second run is refused while one is in flight', async () => {
   const second = await call(handler, { method: 'POST', url: '/api/admin/run', body: JSON.stringify({ action: 'discover' }) })
   assert.equal(second.res.state.status, 409)
   assert.equal(second.body.error, 'already_running')
+  assert.equal(second.body.jobId, first.body.jobId, '409 要带上正在跑的 jobId，前端才能接上继续等')
 
   release()
-  const done = await first
-  assert.equal(done.res.state.status, 200)
+  const done = await waitJob(handler, first.body.jobId)
+  assert.equal(done.status, 'done')
 })
 
 test('a failing run is reported as not ok rather than swallowed', async () => {
@@ -541,10 +564,12 @@ test('a failing run is reported as not ok rather than swallowed', async () => {
     runCommand: async () => ({ code: 1, stdout: JSON.stringify({ errors: [{ step: 'discover', message: 'AUTH_EXPIRED' }] }), stderr: 'boom' })
   })
   const { res, body } = await call(handler, { method: 'POST', url: '/api/admin/run', body: JSON.stringify({ action: 'discover' }) })
-  assert.equal(res.state.status, 200)
-  assert.equal(body.ok, false)
-  assert.equal(body.exitCode, 1)
-  assert.match(body.stderr, /boom/)
+  assert.equal(res.state.status, 202)
+  const finished = await waitJob(handler, body.jobId)
+  assert.equal(finished.status, 'failed', '失败要如实报成 failed，不能吞掉')
+  assert.equal(finished.exitCode, 1)
+  assert.match(finished.stderr, /boom/)
+  assert.match(JSON.stringify(finished.result), /AUTH_EXPIRED/)
 })
 
 test('the console page is served without a token so the user can enter one', async () => {

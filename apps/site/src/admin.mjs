@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -512,6 +513,18 @@ export function createAdminHandler({
 } = {}) {
   const failures = new Map()
   let running = null
+  /**
+   * 进程内的"长动作"快照（Phase 5.2 C2）。
+   *
+   * 为什么要有：跑一轮 / 重跑一节 / 备份动辄几分钟，旧实现是**挂着一个请求等它跑完**——
+   * 中间刷新页面、网络抖一下，人就不知道到底跑没跑、跑到哪了。现在立刻返回 jobId，
+   * 由前端轮询 job 状态。
+   *
+   * 边界写清楚：这是**进程内**快照，重启就没了；真正持久的记录在账本里（阶段、事件、
+   * 尝试次数），所以"重启后还能不能续跑"靠的是账本，不是这个 Map。
+   */
+  const jobs = new Map()
+  const JOB_KEEP = 20
   // 主令牌由 handle() 每次请求传进来，但 handleApi 也需要它（鉴权 + 找回路径提示），
   // 因此在这里留一个当前请求的闭包副本。
   let activeToken = ''
@@ -1251,7 +1264,8 @@ export function createAdminHandler({
 
     if (pathname === `${ADMIN_PREFIX}run` && req.method === 'POST') {
       if (running) {
-        sendJson(res, 409, { ok: false, error: 'already_running', startedAt: running.startedAt, action: running.action })
+        // 409 里带上正在跑的那个 jobId：前端可以直接"接上"它继续等，而不是只能干瞪眼
+        sendJson(res, 409, { ok: false, error: 'already_running', startedAt: running.startedAt, action: running.action, jobId: running.jobId || null })
         return true
       }
       let payload = {}
@@ -1275,22 +1289,77 @@ export function createAdminHandler({
         return true
       }
 
-      running = { action, startedAt: new Date(now()).toISOString() }
-      try {
-        const result = await runCommand(args, { env: workerEnv, timeoutMs: DEFAULT_RUN_TIMEOUT_MS })
-        const parsed = safeJson(result.stdout)
-        sendJson(res, 200, {
-          ok: result.code === 0,
-          action,
-          exitCode: result.code,
-          result: parsed ? redactStatus(parsed) : null,
-          stderr: String(result.stderr || '').slice(-4000)
-        })
-      } catch (error) {
-        sendJson(res, 500, { ok: false, action, error: error instanceof Error ? error.message : String(error) })
-      } finally {
-        running = null
+      const job = {
+        id: randomUUID(),
+        action,
+        args,
+        status: 'running',
+        startedAt: new Date(now()).toISOString(),
+        finishedAt: null,
+        exitCode: null,
+        result: null,
+        stderr: '',
+        error: ''
       }
+      jobs.set(job.id, job)
+      // 只留最近 20 个：这是给人看的进度快照，不是审计日志（审计在账本里）
+      while (jobs.size > JOB_KEEP) jobs.delete(jobs.keys().next().value)
+      running = { action, startedAt: job.startedAt, jobId: job.id }
+
+      // 不 await：立刻把 jobId 交给调用方，长动作在后台跑
+      void (async () => {
+        try {
+          const result = await runCommand(args, { env: workerEnv, timeoutMs: DEFAULT_RUN_TIMEOUT_MS })
+          const parsed = safeJson(result.stdout)
+          job.status = result.code === 0 ? 'done' : 'failed'
+          job.exitCode = result.code
+          job.result = parsed ? redactStatus(parsed) : null
+          job.stderr = String(result.stderr || '').slice(-4000)
+        } catch (error) {
+          job.status = 'failed'
+          job.error = error instanceof Error ? error.message : String(error)
+        } finally {
+          job.finishedAt = new Date(now()).toISOString()
+          running = null
+        }
+      })()
+
+      sendJson(res, 202, {
+        ok: true,
+        accepted: true,
+        jobId: job.id,
+        action,
+        status: job.status,
+        startedAt: job.startedAt,
+        poll: `${ADMIN_PREFIX}job?id=${job.id}`
+      })
+      return true
+    }
+
+    /** 查询长动作的状态：`GET /api/admin/job?id=…`。 */
+    if (pathname === `${ADMIN_PREFIX}job` && req.method === 'GET') {
+      const id = String(url.searchParams.get('id') || '').trim()
+      const job = jobs.get(id)
+      if (!job) {
+        sendJson(res, 404, {
+          ok: false,
+          error: 'job_not_found',
+          message: '进程内只保留最近 20 个任务、重启即清空；持久状态请看 /api/admin/status（账本就是记录）'
+        })
+        return true
+      }
+      sendJson(res, 200, {
+        ok: true,
+        jobId: job.id,
+        action: job.action,
+        status: job.status,
+        startedAt: job.startedAt,
+        finishedAt: job.finishedAt,
+        exitCode: job.exitCode,
+        result: job.result,
+        stderr: job.stderr,
+        ...(job.error ? { error: job.error } : {})
+      })
       return true
     }
 

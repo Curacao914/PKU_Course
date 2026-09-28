@@ -938,10 +938,28 @@ async function doAction (action, extra, btn) {
   try {
     var res = await fetch('/api/admin/run', { method: 'POST', headers: headers(true), body: JSON.stringify(Object.assign({ action: action }, extra || {})) })
     var data = await res.json().catch(function () { return {} })
-    out(JSON.stringify(data, null, 2))
-    if (res.status === 409) toast('服务端正忙（' + (data.action || '别的任务') + '），稍后再点', 'error')
-    else if (data.ok) toast('完成：' + label + '（退出码 ' + data.exitCode + '）', 'ok')
-    else toast('没成功：' + label + ' —— ' + (data.message || data.error || ('退出码 ' + data.exitCode)), 'error')
+    if (res.status === 409) toast('服务端已有任务在跑（' + (data.action || '别的任务') + '），改为等待它结束', 'info')
+    var jobId = data.jobId
+    if (!jobId) {
+      // 老服务端（或参数被拒）没有 jobId：照旧把响应打出来
+      out(JSON.stringify(data, null, 2))
+      if (res.status !== 409) toast('没成功：' + label + ' —— ' + (data.message || data.error || ('退出码 ' + data.exitCode)), 'error')
+      return
+    }
+    // 长动作动辄几分钟：拿 jobId 轮询，而不是挂着一个请求等（刷新页面也能接着看）
+    out('已开始（任务 ' + jobId + '），等待结果…')
+    var snapshot = data
+    for (var attempt = 0; attempt < 600; attempt += 1) {
+      await new Promise(function (resolve) { setTimeout(resolve, 1500) })
+      var poll = await fetch('/api/admin/job?id=' + encodeURIComponent(jobId), { headers: headers(false) })
+      snapshot = await poll.json().catch(function () { return {} })
+      if (!snapshot.status || snapshot.status !== 'running') break
+      if (attempt % 8 === 7) out('仍在运行：' + label + '（已等 ' + Math.round((attempt + 1) * 1.5) + ' 秒）')
+    }
+    out(JSON.stringify(snapshot, null, 2))
+    if (snapshot.status === 'done') toast('完成：' + label + '（退出码 ' + snapshot.exitCode + '）', 'ok')
+    else if (snapshot.status === 'running') toast('还在跑：' + label + '（可以离开这个页面，服务端会继续）', 'info')
+    else toast('没成功：' + label + ' —— ' + (snapshot.error || snapshot.message || ('退出码 ' + snapshot.exitCode)), 'error')
   } catch (error) {
     out('请求失败：' + error)
     toast('请求失败：' + error, 'error')
