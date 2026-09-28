@@ -476,6 +476,14 @@ admin.law-tech.dev   → A 记录直连 124.222.111.108:443        ← 管理台
 cf.law-tech.dev      → Cloudflare（橙云）+ 隧道               ← 兜底入口
 ```
 
+> **2026-09-28 更新（以线上为准）**：`course.law-tech.dev` 已经改成**直连**，不再走隧道——
+> 隧道最近的边缘在洛杉矶，读者流量绕一圈被压到 100—250KB/s，直连是国内速度。Cloudflare
+> 仍然负责 DNS 与证书续期的 DNS 验证，隧道留给 `cf.law-tech.dev` 兜底。两个直接后果：
+> 上面那条"缓存规则"不再作用于 `course.*`（边缘不参与，回源开销由这台机器直接承担，
+> 并发/限流闸门见 docs/12 §7.3.1）；`$remote_addr` 就是真实客户端，所以 nginx 的
+> `$proxy_add_x_forwarded_for` 追加出来的最右一跳可信（服务端据此做每 IP 限流）。
+> 线上 nginx 配置已抄回仓库：`deploy/nginx-course.conf.example`（改 nginx 前先 diff 它）。
+
 | 组件 | 位置 | 说明 |
 |---|---|---|
 | nginx（系统服务，enabled） | `/etc/nginx/sites-available/course` | 443 TLS → 反代 `127.0.0.1:3100`；`client_max_body_size 256m`；`proxy_read_timeout 1800s`（管理台「跑一轮」要跑十几分钟） |
