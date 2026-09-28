@@ -1466,6 +1466,35 @@ const INDEX_FILTER_SCRIPT = `<script>
 })();
 </script>`
 
+/**
+ * 公开索引里允许出现的字段（/api/notes 与 notes.json 共用）。
+ *
+ * 白名单而不是黑名单：发布库是内部数据结构，往里加字段的人不会想到"它会不会被公网看到"。
+ * 要新增公开字段，就在这份列表里加一条——这是一次有意识的决定，而不是一次顺手的展开。
+ */
+export function publicIndexFields(record = {}) {
+  return {
+    slug: record.slug,
+    courseName: record.courseName || '',
+    teacher: record.teacher || '',
+    lessonTitle: record.lessonTitle || '',
+    lessonDate: record.lessonDate || '',
+    firstPublishedAt: record.firstPublishedAt || '',
+    updatedAt: record.updatedAt || '',
+    theme: record.theme || '',
+    keywords: record.keywords || [],
+    keywordsSource: record.keywordsSource || '',
+    summary: record.summary || '',
+    brief: record.brief ? { briefing: record.brief.briefing || '', keyPoints: record.brief.keyPoints || [] } : null,
+    readMinutes: record.readMinutes || 0,
+    chars: String(record.markdown || '').length,
+    headings: record.headings || [],
+    metadata: record.metadata || { concepts: [], statutes: [], cases: [], keywords: [] },
+    anchors: record.anchors || {},
+    onepage: record.onepage ? { title: record.onepage.title || '', chars: record.onepage.chars || 0 } : null
+  }
+}
+
 /** 站内搜索页：纯客户端，索引就是 notes.json（不含正文，体积可控）。 */
 export function renderSearchPage({ siteOrigin = '' } = {}) {
   const body = [
@@ -1858,8 +1887,10 @@ export function writeSite({ records = [], outputDir, siteOrigin = '', docs = [] 
     siteName: SITE_NAME,
     generatedAt: new Date().toISOString(),
     count: sorted.length,
-    // 索引里带一个 chars：日报与列表页要显示"多少字"，而 markdown 本身不进索引（太大）
-    notes: sorted.map(({ markdown, ...rest }) => ({ ...rest, chars: String(markdown || '').length }))
+    // 公开索引**只列出明确允许的字段**（白名单），不再用 { markdown, ...rest } 那种写法：
+    // 发布库记录里以后再加什么内部字段（派生物指纹、重放键、抓取元数据），
+    // 都会因为"顺手展开"而自动出现在公网索引里。chars 是日报与列表页要显示的"多少字"。
+    notes: sorted.map(record => publicIndexFields(record))
   }, null, 2)}\n`)
 
   return { outputDir: root, count: sorted.length, written }

@@ -11,6 +11,10 @@ export const STAGES = [
   'downloaded',
   'transcribing',
   'transcript_ready',
+  // 这一阶段是"把课件文字与转录合成文本包"：worker 会推进到它（见 commands 的阶段映射），
+  // 但 STAGES 里漏了它，于是 assertStage('building_textpack') 曾经会直接抛错——
+  // 两个列表的漂移就是这样静默存在的。ACTIONABLE_STAGES 里的每一项都必须在 STAGES 里。
+  'building_textpack',
   'writing',
   'notes_ready',
   'publishing',

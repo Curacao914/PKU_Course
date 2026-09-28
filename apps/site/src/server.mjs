@@ -88,7 +88,14 @@ function sendJson(res, status, value, headers = {}) {
 
 /** 规范化后必须仍在 root 之内，否则视为非法路径。 */
 export function resolveInsideRoot(root, requestPath) {
-  const decoded = decodeURIComponent(String(requestPath || '/').split('?')[0])
+  // 坏的百分号编码（/%E5%）会让 decodeURIComponent 抛异常——那是一段**用户输入**，
+  // 绝不能让它逃逸出去变成 500/未捕获异常。这里当作非法路径返回 null（调用方按 400 处理）。
+  let decoded = ''
+  try {
+    decoded = decodeURIComponent(String(requestPath || '/').split('?')[0])
+  } catch {
+    return null
+  }
   const relative = decoded.replace(/^\/+/, '')
   const target = path.resolve(root, relative)
   const normalizedRoot = path.resolve(root)
@@ -98,6 +105,16 @@ export function resolveInsideRoot(root, requestPath) {
 
 export function createRequestHandler({
   root,
+  /**
+   * 管理台是否挂在这个进程上。
+   *
+   * 公开站点与管理台是**两个进程、两份环境**：公开进程只读站点目录与静态资源，
+   * 不加载 PKU / AI / R2 / 管理令牌这些机密；管理进程才拿完整环境、才能跑 worker。
+   * 这样"公开接口被攻破"与"管理凭据泄露"不再是同一件事。
+   */
+  admin: adminEnabled = true,
+  // 公开进程上访问管理路径时，把浏览器导向管理台域名（API 调用则明确 404）
+  adminOrigin = '',
   adminToken = '',
   scratchRoot = '',
   workerPath = '',
@@ -114,18 +131,26 @@ export function createRequestHandler({
    * 不用重启服务、不用重新部署，最多等一个短缓存周期就能被 AI 看到。
    */
   mcp = true,
-  mcpOrigin = siteOrigin
+  mcpOrigin = siteOrigin,
+  // MCP 的安全边界：默认只认自己的域名 + 本机（名单同时用于比对 Origin 与 Host，端口会被忽略）。
+  // 额外域名/端口用下面两个选项加，不要为了省事把名单清空——那等于把接口交给任意站点调用。
+  mcpOrigins = [],
+  mcpHosts = [],
+  mcpRateLimit = { windowMs: 60_000, max: 120 },
+  mcpMaxConcurrent = 8
 } = {}) {
   const normalizedRoot = path.resolve(root)
   const normalizedAssets = assetsDir ? path.resolve(assetsDir) : ''
-  const admin = createAdminHandler({
-    root: normalizedRoot,
-    scratchRoot: scratchRoot || normalizedRoot,
-    ...(materialsRoot ? { materialsRoot } : {}),
-    workerPath,
-    workerEnv,
-    runCommand
-  })
+  const admin = adminEnabled
+    ? createAdminHandler({
+      root: normalizedRoot,
+      scratchRoot: scratchRoot || normalizedRoot,
+      ...(materialsRoot ? { materialsRoot } : {}),
+      workerPath,
+      workerEnv,
+      runCommand
+    })
+    : null
 
   /**
    * 笔记服务单例：MCP 与站内搜索**共用同一个**。
@@ -201,9 +226,20 @@ export function createRequestHandler({
     }
     try {
       const { createMcpHttpHandler } = await import('@course/notes-mcp')
+      const siteHost = (() => {
+        try {
+          return new URL(siteOrigin).hostname
+        } catch {
+          return ''
+        }
+      })()
       mcpHandler = createMcpHttpHandler({
         service,
-        log: line => process.stderr.write(`${line}\n`)
+        log: line => process.stderr.write(`${line}\n`),
+        allowedOrigins: [siteOrigin, 'https://admin.' + siteHost, ...mcpOrigins].filter(Boolean),
+        allowedHosts: [siteHost, 'localhost', '127.0.0.1', ...mcpHosts].filter(Boolean),
+        rateLimit: mcpRateLimit,
+        maxConcurrent: mcpMaxConcurrent
       })
     } catch (error) {
       mcpFailed = error instanceof Error ? error.message : String(error)
@@ -241,10 +277,29 @@ export function createRequestHandler({
     }
 
     // 管理台先接管：它要处理 POST，因此必须排在方法检查之前
-    try {
-      if (await admin.handle(req, res, pathname, url, { adminToken })) return
-    } catch (error) {
-      sendJson(res, 500, { ok: false, error: 'admin_failed', message: error instanceof Error ? error.message : String(error) })
+    if (admin) {
+      try {
+        if (await admin.handle(req, res, pathname, url, { adminToken })) return
+      } catch (error) {
+        sendJson(res, 500, { ok: false, error: 'admin_failed', message: error instanceof Error ? error.message : String(error) })
+        return
+      }
+    } else if (pathname === '/admin' || pathname.startsWith('/admin/') || pathname.startsWith('/api/admin/')) {
+      /**
+       * 公开进程上**没有**管理台：这不是"被拦住"，而是这里根本没有那些路由。
+       *   · 浏览器访问 /admin → 302 到管理台域名（它由另一个进程提供）；
+       *   · 接口调用 /api/admin/* → 明确 404，别让客户端以为"再试一次就能进"。
+       */
+      if (pathname.startsWith('/api/admin/')) {
+        sendJson(res, 404, { ok: false, error: 'not_found', message: '管理接口不在公开站点上；请访问管理台域名' })
+        return
+      }
+      if (adminOrigin) {
+        res.writeHead(302, { location: `${String(adminOrigin).replace(/\/+$/, '')}${pathname}`, 'cache-control': 'no-store' })
+        res.end()
+        return
+      }
+      send(res, 404, 'not found', { 'cache-control': 'no-store' })
       return
     }
 
@@ -354,6 +409,15 @@ export function createRequestHandler({
       return
     }
 
+    // 坏的百分号编码（/%E5%）是一段**用户输入**：明确回 400，而不是让它变成 500。
+    // resolveInsideRoot 现在也不会因它抛错（返回 null），但这里要给出准确的语义。
+    try {
+      decodeURIComponent(pathname)
+    } catch {
+      send(res, 400, 'bad request: malformed percent-encoding', { 'cache-control': 'no-store' })
+      return
+    }
+
     let candidate = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '')
     if (candidate.endsWith('/')) candidate += 'index.html'
     const target = resolveInsideRoot(normalizedRoot, candidate)
@@ -422,9 +486,19 @@ export function createSiteServer(options = {}) {
 /** 启动服务器；port 传 0 时由系统分配（测试用）。 */
 export function startSiteServer({
   root, port = 3100, host = '127.0.0.1', adminToken = '',
+  // 角色相关的三项必须透传下去：否则"公开进程"照样会挂上管理台（实测踩到：以为设了
+  // admin:false，结果 /api/admin 仍然按"未配置令牌"回 503，而不是根本不存在的 404）。
+  admin = true, adminOrigin = '',
+  mcp = true, mcpOrigins = [], mcpHosts = [], mcpRateLimit = undefined, mcpMaxConcurrent = undefined,
+  siteOrigin = 'https://course.law-tech.dev',
   scratchRoot = '', workerPath = '', workerEnv = {}, assetsDir = '', materialsRoot = '', runCommand
 } = {}) {
-  const server = createSiteServer({ root, adminToken, scratchRoot, workerPath, workerEnv, assetsDir, materialsRoot, runCommand })
+  const server = createSiteServer({
+    root, adminToken, admin, adminOrigin, mcp, mcpOrigins, mcpHosts, siteOrigin,
+    ...(mcpRateLimit ? { mcpRateLimit } : {}),
+    ...(mcpMaxConcurrent ? { mcpMaxConcurrent } : {}),
+    scratchRoot, workerPath, workerEnv, assetsDir, materialsRoot, runCommand
+  })
   return new Promise((resolve, reject) => {
     server.once('error', reject)
     server.listen(port, host, () => {

@@ -230,25 +230,22 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
   /**
    * OpenAI 标准知识接口之一：search(query) → { results: [{ id, title, url }] }。
    *
-   * 与 course 专用的 search_notes 的关系：**复用同一套检索**，只是输出换成标准格式。
-   * 先查索引；索引命中太少时就下沉到正文再查一次（标准接口的调用方只会给一个 query，
-   * 不会像模型那样自己决定要不要 includeBody）。
+   * 与 course 专用的 search_notes 的关系：**同一套检索、同一套召回策略**，只是输出换成标准格式。
    *
-   * id 用 slug，稳定且能直接喂给 fetch。
+   * 这里曾经有一层「命中少于 3 条再下沉到正文查一遍」的历史 gate。它与 searchRecords 里
+   * 「索引没命中就自动扫正文」的规则叠在一起，会让同一个问题在两个入口得到不同结果：
+   * 标准接口一旦召回 3 条以上就永远不再扫正文，专用接口则会。现在规则只有一处
+   * （在 searchRecords 里），两个入口的召回完全一致。
+   *
+   * id 用 slug（命中到小节时给 slug#小节），稳定且能直接喂给 fetch。
    */
   async function searchKnowledge({ query = '', limit = 8 } = {}) {
     const text = String(query || '').trim()
     if (!text) throw new ToolError('search 需要 query。')
     const records = await source.listNotes()
     const bySlug = new Map(records.map(record => [record.slug, record]))
-    const first = await searchNotes({ query: text, limit: Math.max(limit * 2, 8) })
-    let hits = first.hits || []
-    if (hits.length < 3) {
-      // 索引里没写到的内容（正文细节）再扫一遍正文；远程数据源会逐篇下载，代价可接受
-      const deep = await searchNotes({ query: text, includeBody: true, limit: Math.max(limit * 2, 8) })
-      const seen = new Set(hits.map(hit => hit.slug))
-      hits = [...hits, ...(deep.hits || []).filter(hit => !seen.has(hit.slug))]
-    }
+    const found = await searchNotes({ query: text, limit: Math.max(limit * 2, 8) })
+    const hits = found.hits || []
     const results = hits.slice(0, limit).map(hit => {
       const record = bySlug.get(hit.slug)
       const course = hit.courseName || record?.courseName || ''
@@ -262,7 +259,7 @@ export function createNotesService({ source, siteOrigin = '' } = {}) {
         url: noteUrl(hit.slug)
       }
     })
-    return { query: text, scanned: first.scanned || records.length, results }
+    return { query: text, scanned: found.scanned || records.length, results }
   }
 
   /**

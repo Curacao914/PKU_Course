@@ -22,9 +22,36 @@ export function createMcpHttpHandler({
   instructions,
   log = () => {},
   maxBodyBytes = 1_000_000,
-  path: mountPath = '/mcp'
+  path: mountPath = '/mcp',
+  // 安全边界（都是"存在才校验"，不打断正常客户端）：
+  //   allowedOrigins  浏览器发来的 Origin 必须在这个名单里（防跨站调用）
+  //   allowedHosts    Host 头必须在这个名单里（防 DNS rebinding）
+  //   rateLimit       每 IP 每窗口的请求上限；maxConcurrent 同时处理的请求数上限
+  allowedOrigins = [],
+  allowedHosts = [],
+  rateLimit = { windowMs: 60_000, max: 120 },
+  maxConcurrent = 8
 } = {}) {
   const server = createProtocolServer({ service, serverInfo, instructions, logger: log })
+  const origins = new Set(allowedOrigins.map(item => String(item).toLowerCase()))
+  const hosts = new Set(allowedHosts.map(item => String(item).toLowerCase()))
+  const buckets = new Map()
+  let inFlight = 0
+
+  /** 轻量限流：内存里的滑动窗口。公开只读接口也会被脚本刷——限制成本极低，收益是别被打爆。 */
+  function allow(ip, now = Date.now()) {
+    if (!rateLimit || !rateLimit.max) return true
+    const windowMs = Number(rateLimit.windowMs) || 60_000
+    const entry = buckets.get(ip) || { start: now, count: 0 }
+    if (now - entry.start >= windowMs) { entry.start = now; entry.count = 0 }
+    entry.count += 1
+    buckets.set(ip, entry)
+    // 顺手清理过期桶，避免长期运行后 Map 无限增长
+    if (buckets.size > 5000) {
+      for (const [key, value] of buckets) if (now - value.start >= windowMs) buckets.delete(key)
+    }
+    return entry.count <= Number(rateLimit.max)
+  }
 
   return async function handleMcpHttp(req, res) {
     const method = String(req.method || 'GET').toUpperCase()
@@ -37,10 +64,46 @@ export function createMcpHttpHandler({
       'access-control-expose-headers': 'mcp-protocol-version'
     }
 
+    // Origin 只在校验名单非空、且客户端**确实带了** Origin 时检查：
+    // 无 Origin 的 CLI / ChatGPT / Inspector 客户端照常使用（它们不是浏览器，没有 CSRF 面）。
+    const origin = String(req.headers.origin || '').trim().toLowerCase()
+    if (origins.size && origin && !origins.has(origin)) {
+      res.writeHead(403, { ...common, 'content-type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32000, message: '来源不被允许' } }))
+      return true
+    }
+    // Host：防 DNS rebinding（把域名解析到本机，再从浏览器里打我们的本地端口）。
+    // 比对时去掉端口：同一个名字在不同部署里端口不同（3000/3100/3101），
+    // 端口不该影响"这是不是我们的域名"这个判断。
+    const host = String(req.headers.host || '').trim().toLowerCase().replace(/:\d+$/, '')
+    if (hosts.size && host && !hosts.has(host)) {
+      res.writeHead(403, { ...common, 'content-type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32000, message: 'Host 不被允许' } }))
+      return true
+    }
+
     if (method === 'OPTIONS') {
       res.writeHead(204, common)
       res.end()
       return true
+    }
+
+    // 限流与并发闸门：公开只读接口也会被脚本刷，限制成本极低，收益是别被打爆。
+    // 计数在响应 finish 时归还（POST 分支有多个 return 出口，逐处减容易漏）。
+    if (method !== 'GET' && method !== 'DELETE') {
+      const ip = String(req.socket?.remoteAddress || 'unknown')
+      if (!allow(ip)) {
+        res.writeHead(429, { ...common, 'content-type': 'application/json; charset=utf-8', 'retry-after': '60' })
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32000, message: '请求过于频繁，请稍后再试' } }))
+        return true
+      }
+      if (inFlight >= maxConcurrent) {
+        res.writeHead(503, { ...common, 'content-type': 'application/json; charset=utf-8', 'retry-after': '1' })
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32000, message: '并发请求过多，请稍后再试' } }))
+        return true
+      }
+      inFlight += 1
+      res.once('finish', () => { inFlight = Math.max(0, inFlight - 1) })
     }
 
     if (method === 'GET') {

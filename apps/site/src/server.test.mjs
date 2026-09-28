@@ -181,6 +181,45 @@ test('每个响应都带安全头：CSP 只允许本站与内联，框架禁止�
   }
 })
 
+test('坏路径编码回 400（不是 500），穿越防护仍然拒得住', async () => {
+  const root = siteDir()
+  const site = await startSiteServer({ root, port: 0 })
+  try {
+    // 未完成的百分号编码：decodeURIComponent 会抛，绝不能让它逃逸成 500
+    const malformed = await fetch(site.url + '/%E5%95', { redirect: 'manual' })
+    assert.equal(malformed.status, 400)
+    assert.equal(resolveInsideRoot(root, '/%E5%95'), null, '非法编码在解析层也返回 null 而不是抛错')
+    const traversal = await fetch(site.url + '/%2e%2e/%2e%2e/etc/passwd')
+    assert.ok([403, 404].includes(traversal.status), '穿越不得放行（实际 ' + traversal.status + '）')
+  } finally {
+    await site.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('公开进程上不存在管理台：/api/admin 明确 404，/admin 把人导向管理台域名', async () => {
+  // 公开站点与管理台是两个进程：公开进程里根本没有这些路由（不是「有但不让进」）。
+  const root = siteDir()
+  const site = await startSiteServer({ root, port: 0, admin: false, adminOrigin: 'https://admin.law-tech.dev' })
+  try {
+    const api = await fetch(site.url + '/api/admin/status')
+    assert.equal(api.status, 404)
+    assert.equal((await api.json()).error, 'not_found')
+
+    const page = await fetch(site.url + '/admin', { redirect: 'manual' })
+    assert.equal(page.status, 302)
+    assert.equal(page.headers.get('location'), 'https://admin.law-tech.dev/admin')
+    assert.equal(page.headers.get('cache-control'), 'no-store')
+
+    // 公开内容与 MCP 照常
+    assert.equal((await fetch(site.url + '/api/notes')).status, 200)
+    assert.equal((await fetch(site.url + '/notes/刑法分论/第10-12节.html')).status, 200)
+  } finally {
+    await site.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('admin endpoints fail closed when no token is configured', async () => {
   const site = await startSiteServer({ root: siteDir(), port: 0 })
   try {

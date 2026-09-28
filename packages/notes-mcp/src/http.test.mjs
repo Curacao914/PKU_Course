@@ -73,6 +73,93 @@ function rpc(url, body, options = {}) {
   })
 }
 
+test('标准 search 与专用 search_notes 召回一致（同一套规则，不得各有一套 gate）', async () => {
+  // 曾经标准接口有一层「命中少于 3 条才扫正文」的历史 gate：同一个问题在两个入口
+  // 会给出不同结果。现在规则只有一处（searchRecords），这里把它钉住。
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-mcp-parity-'))
+  const library = path.join(dir, 'library.json')
+  fs.writeFileSync(library, JSON.stringify(LIBRARY))
+  const service = createNotesService({ source: createLocalLibrarySource({ file: library }) })
+  const server = http.createServer(createMcpHttpHandler({ service, log: () => {} }))
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  const url = `http://127.0.0.1:${server.address().port}/mcp`
+  const call = (name, args) => fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } })
+  }).then(response => response.json())
+
+  try {
+    // 只在正文深处出现的词：两个入口都必须找得到，且召回一致
+    const query = '违反义务'
+    const standard = await call('search', { query })
+    const dedicated = await call('search_notes', { query })
+    const standardIds = JSON.parse(standard.result.content[0]['text']).results.map(item => item.id.split('#')[0])
+    const dedicatedSlugs = (await service.searchNotes({ query })).hits.map(hit => hit.slug)
+    assert.ok(standardIds.length > 0, '标准接口要能召回')
+    assert.deepEqual(new Set([...standardIds].sort()), new Set([...dedicatedSlugs].sort()), '两个入口必须给出同一批课次')
+  } finally {
+    await new Promise(resolve => server.close(resolve))
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('安全边界：Origin 与 Host 只在带了且不在名单里时拒绝，无 Origin 的 CLI 照常', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-mcp-guard-'))
+  const library = path.join(dir, 'library.json')
+  fs.writeFileSync(library, JSON.stringify(LIBRARY))
+  const server = http.createServer(createMcpHttpHandler({
+    service: createNotesService({ source: createLocalLibrarySource({ file: library }) }),
+    log: () => {},
+    allowedOrigins: ['https://course.law-tech.dev'],
+    // 名单比对的是**主机名**（端口会被去掉）：本机部署时 Host 是 127.0.0.1:端口
+    allowedHosts: ['course.law-tech.dev', '127.0.0.1', 'localhost'],
+    // 只统计"走到处理流程"的请求：被 Origin/Host 挡掉的请求不占额度（顺序见 http.mjs）
+    rateLimit: { windowMs: 60_000, max: 2 }
+  }))
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  const port = server.address().port
+  const BODY = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' })
+  const post = (headers = {}) => fetch(`http://127.0.0.1:${port}/mcp`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json', 'x-forwarded-for': '1.2.3.4', ...headers },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' })
+  })
+
+  try {
+    // 跨站浏览器请求：拒绝
+    const crossSite = await post({ origin: 'https://evil.example' })
+    assert.equal(crossSite.status, 403)
+    // 我们自己的页面 / 无 Origin 的 CLI、ChatGPT、Inspector：都放行
+    assert.equal((await post({ origin: 'https://course.law-tech.dev' })).status, 200)
+    assert.equal((await post()).status, 200)
+    // Host 不在名单里（DNS rebinding 的典型形状）。
+    // 注意：fetch 不允许设置 Host（规范里的 forbidden header），必须用底层 http 请求。
+    const reboundStatus = await new Promise((resolve, reject) => {
+      const request = http.request({
+        host: '127.0.0.1',
+        port,
+        path: '/mcp',
+        method: 'POST',
+        headers: { 'content-type': 'application/json', host: 'evil.example', 'content-length': Buffer.byteLength(BODY) }
+      }, response => {
+        response.resume()
+        response.on('end', () => resolve(response.statusCode))
+      })
+      request.on('error', reject)
+      request.end(BODY)
+    })
+    assert.equal(reboundStatus, 403)
+    // 限流：上面已经打了 4 次，窗口内上限是 3
+    const limited = await post()
+    assert.equal(limited.status, 429)
+    assert.equal(limited.headers.get('retry-after'), '60')
+  } finally {
+    await new Promise(resolve => server.close(resolve))
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('MCP-Protocol-Version：不支持的版本回 400，支持的与不带的都照常', async () => {
   // 2025-06-18 起客户端要在每个请求上带这个头；规范要求服务器收到不支持的版本时回 400，
   // 而不是硬着头皮解析（那会让客户端看到一个语法正确、语义却对不上的响应）。
