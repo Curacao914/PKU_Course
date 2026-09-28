@@ -193,7 +193,12 @@ mkdir -p "$TARGET"
 # node_modules **必须排除**：--delete 会把"源里没有、目标里有"的东西删掉，
 # 而 node_modules 正是那种东西（源里永远没有它）。第一次跑这个脚本就是这么把
 # 新 release 的依赖删光、测试全红的——脚本拒绝切换，所以线上没受影响。
-rsync -a --delete --exclude '.git' --exclude 'node_modules' \
+# --checksum 不是可有可无的：rsync 默认的"快检"只看**大小 + 秒级 mtime**。同一秒里
+# 改了一个**同样大小**的文件（改一个版本号、翻一个布尔值），或者源与目标 mtime 落在同一秒，
+# 它就会判定"没变"，于是把上一个 release 的文件用 --link-dest 直接硬链接过来——
+# 发布出去的就不是 staging 里那份代码了。这个坑是 CI 上跑 deploy 仿真测试抓到的
+# （锁文件内容变了但大小不变，第二次发布复用了同一个依赖仓）。
+rsync -a --checksum --delete --exclude '.git' --exclude 'node_modules' \
   ${LINK_DEST:+--link-dest="$LINK_DEST"} "$SRC/" "$TARGET/"
 
 # Python 虚拟环境不在 release 里：它装在 ~/venvs/course（稳定路径），

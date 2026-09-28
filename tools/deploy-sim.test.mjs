@@ -91,8 +91,12 @@ function sandbox({ siteRole = 'public', adminRole = 'admin', venv = true } = {})
   return { home, shims, log, staging, units, record }
 }
 
-const writeLock = (staging, marker) => {
-  fs.writeFileSync(path.join(staging, 'package-lock.json'), JSON.stringify({ lockfileVersion: 3, marker }))
+const writeLock = (staging, marker, { keepMtime } = {}) => {
+  const file = path.join(staging, 'package-lock.json')
+  fs.writeFileSync(file, JSON.stringify({ lockfileVersion: 3, marker }))
+  // 故意把 mtime 设回旧值：rsync 默认只比"大小 + 秒级 mtime"，同样大小 + 同一秒就会被
+  // 判定为没变，从而把上一个 release 的旧文件硬链接过来。release.sh 靠 --checksum 防这个。
+  if (keepMtime) fs.utimesSync(file, keepMtime, keepMtime)
 }
 
 function run(sandbox, args = []) {
@@ -197,9 +201,15 @@ test('锁文件变了：依赖仓按哈希新增一个，旧的仍然留着（�
   const box = sandbox()
   assert.equal((await run(box)).code, 0)
   const first = currentOf(box)
-  writeLock(box.staging, 'lock-v2')
+  // lock-v1 → lock-v2：长度一样，而且 mtime 保持旧值——这正是 rsync 快检会漏掉的形状
+  const mtime = fs.statSync(path.join(box.staging, 'package-lock.json')).mtime
+  writeLock(box.staging, 'lock-v2', { keepMtime: mtime })
   const second = await run(box)
   assert.equal(second.code, 0, second.stdout + second.stderr)
+
+  // 先确认"改了的文件真的进了新 release"，否则下面的依赖仓断言会被掩盖
+  const copied = fs.readFileSync(path.join(currentOf(box), 'package-lock.json'), 'utf8')
+  assert.match(copied, /lock-v2/, '同样大小 + 同一秒的改动也必须被拷进 release（--checksum）')
 
   const stores = storeDirs(box)
   assert.equal(stores.length, 2, '两个不同的锁文件 = 两个依赖仓')
