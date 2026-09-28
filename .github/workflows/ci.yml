@@ -20,8 +20,11 @@ jobs:
       # 跳过这一步的话，fresh runner 上所有 import @course/* 都会直接失败（踩过）。
       - name: 安装 workspace 链接
         run: npm ci
+      # 走 ci-report：失败时把"哪些用例挂了 + 末尾 40 行输出"写成 **注解**。
+      # 理由：Actions 的原始日志要 admin 权限才能下载（公开仓库也是 403），
+      # 而注解挂在 check-run 上，公开仓库匿名就能读——排障不必只能翻网页。
       - name: 单元与集成测试
-        run: npm test
+        run: node tools/ci-report.mjs npm test
 
 # 说明：npm run test:ui 打开的是真浏览器（Playwright 驱动本机 Chrome），
 # 需要额外装浏览器与依赖，本地与服务器上跑更合适，不放进 CI。

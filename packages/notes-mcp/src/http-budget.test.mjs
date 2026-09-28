@@ -102,7 +102,8 @@ async function waitFor(predicate, { timeoutMs = 2_000, label = '条件' } = {}) 
 
 test('客户端中途断开：并发名额立刻归还，后台检索真的被 abort', async () => {
   const budget = createRequestBudget({ maxConcurrent: 1, timeoutMs: 0 })
-  const { source, state } = fakeSource({ delayMs: 200 })
+  // 断开必须发生在后台还在跑的时候：把慢数据源的延迟放大，别让调度抖动吃掉整个窗口
+  const { source, state } = fakeSource({ delayMs: 1_000 })
   const service = createNotesService({ source })
   const site = await startServer({ service, budget })
   try {
@@ -130,8 +131,8 @@ test('客户端中途断开：并发名额立刻归还，后台检索真的被 a
 })
 
 test('超出时间预算：回 504 + -32001，中止后台检索，槽位归还后照常服务', async () => {
-  const budget = createRequestBudget({ maxConcurrent: 2, timeoutMs: 50 })
-  const { source, state } = fakeSource({ delayMs: 400 })
+  const budget = createRequestBudget({ maxConcurrent: 2, timeoutMs: 200 })
+  const { source, state } = fakeSource({ delayMs: 1_500 })
   const service = createNotesService({ source })
   const site = await startServer({ service, budget })
   try {
@@ -143,7 +144,7 @@ test('超出时间预算：回 504 + -32001，中止后台检索，槽位归还�
     assert.equal(payload.error.code, -32001)
     assert.match(payload.error.message, /检索超时/)
     // 超时预算的意义就是"到点就回"，而不是等后台把 400ms 跑完
-    assert.ok(Date.now() - started < 350, '不该等到后台工作自己跑完')
+    assert.ok(Date.now() - started < 1_200, '不该等到后台工作自己跑完')
 
     await waitFor(() => state.aborted === 1, { label: '后台收到 abort' })
     await waitFor(() => budget.stats().inFlight === 0, { label: '槽位归还' })
@@ -164,7 +165,7 @@ test('超出时间预算：回 504 + -32001，中止后台检索，槽位归还�
 
 test('并发闸门：满员回 503（带 retry-after），腾出来之后立刻能用', async () => {
   const budget = createRequestBudget({ maxConcurrent: 1, max: 0, timeoutMs: 0 })
-  const { source } = fakeSource({ delayMs: 150 })
+  const { source } = fakeSource({ delayMs: 800 })
   const service = createNotesService({ source })
   const site = await startServer({ service, budget })
   try {

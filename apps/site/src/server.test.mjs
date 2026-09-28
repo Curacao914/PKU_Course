@@ -290,7 +290,8 @@ test('systemd 下没写角色就拒绝启动；手工跑（非 systemd）才允�
     // 一打印 listening 就收工，别让测试白等超时（这条测试要起三次进程）
     child.stdout.on('data', chunk => { stdout += chunk; if (stdout.includes('listening')) stop() })
     child.stderr.on('data', chunk => { stderr += chunk })
-    const timer = setTimeout(stop, 5_000)
+    // 15 秒：CI 上并行跑测试时进程启动会慢一些，别把正常启动误判成失败
+    const timer = setTimeout(stop, 15_000)
     child.on('exit', code => { clearTimeout(timer); resolve({ code, stdout, stderr }) })
   })
 
@@ -441,7 +442,7 @@ test('站内搜索中途断开：并发名额立刻归还（下一个请求不�
     const pending = fetch(`${site.url}/api/search?q=${encodeURIComponent('共同行为')}`, { signal: controller.signal })
       .catch(error => error)
     // 等检索真的跑起来再断开（这份库的检索要几十毫秒，20ms 足够进到处理中）
-    await new Promise(resolve => setTimeout(resolve, 20))
+    await new Promise(resolve => setTimeout(resolve, 60))
     controller.abort()
     await pending
     // 服务端收到 close 有一个网络往返的延迟，给它一点点时间
