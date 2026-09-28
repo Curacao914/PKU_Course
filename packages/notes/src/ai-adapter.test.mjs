@@ -8,8 +8,10 @@ import {
   buildPrompt,
   callCourseModel,
   extractCourseModelContent,
+  isRetryableStatus,
   parseJsonResponse,
-  requireCourseModelConfig
+  requireCourseModelConfig,
+  retryDelayFor
 } from './ai-adapter.mjs'
 
 const ENV = {
@@ -29,6 +31,102 @@ function reply(payload, { status = 200, body } = {}) {
 function completion(content, extra = {}) {
   return { choices: [{ message: { content } }], usage: { total_tokens: 10 }, ...extra }
 }
+
+test('传输层重试：429 与 5xx 会重试，其余 4xx 立即失败', async () => {
+  const call = fetchImpl => callCourseModel({
+    role: 'writer',
+    prompt: buildPrompt({ role: 'writer', sourceText: '转录', schema: { markdown: 'string' } }),
+    env: ENV,
+    fetchImpl,
+    sleepImpl: async () => {},
+    onRetry: () => {}
+  })
+
+  // 429 → 200：应当重试一次并成功，模型调用算 1 次成功
+  let calls = 0
+  const throttled = await call(async () => {
+    calls += 1
+    return calls === 1
+      ? reply({ error: 'rate limited' }, { status: 429, body: '{"error":"rate limited"}' })
+      : reply(completion('{"markdown":"正文"}'))
+  })
+  assert.equal(calls, 2, '429 之后要再试一次')
+  assert.deepEqual(throttled.parsed, { markdown: '正文' })
+
+  // 网络抖动 → 200：同样重试
+  let networkCalls = 0
+  const flaky = await call(async () => {
+    networkCalls += 1
+    if (networkCalls === 1) throw new TypeError('fetch failed')
+    return reply(completion('{"markdown":"正文"}'))
+  })
+  assert.equal(networkCalls, 2)
+  assert.deepEqual(flaky.parsed, { markdown: '正文' })
+
+  // 500 一直失败：重试到上限后如实抛出，错误里带状态码与尝试次数
+  let serverCalls = 0
+  const error = await call(async () => {
+    serverCalls += 1
+    return reply({ error: 'boom' }, { status: 500, body: '{"error":"boom"}' })
+  }).then(() => null, failure => failure)
+  assert.equal(serverCalls, 3, '默认 2 次重试 = 最多 3 次尝试')
+  assert.match(error.message, /failed: 500/)
+  assert.equal(error.meta.transportAttempts, 3)
+
+  // 401：重试没有意义，请求只发一次
+  let authCalls = 0
+  await call(async () => {
+    authCalls += 1
+    return reply({ error: 'unauthorized' }, { status: 401, body: '{"error":"unauthorized"}' })
+  }).catch(() => {})
+  assert.equal(authCalls, 1, '认证失败不重试，重试只是再浪费一次额度')
+})
+
+test('重试会报告给运维：谁在重试、第几次、等多久、为什么', async () => {
+  const retries = []
+  let calls = 0
+  await callCourseModel({
+    role: 'writer',
+    prompt: buildPrompt({ role: 'writer', sourceText: '转录', schema: { markdown: 'string' } }),
+    env: ENV,
+    sleepImpl: async () => {},
+    onRetry: info => retries.push(info),
+    fetchImpl: async () => {
+      calls += 1
+      if (calls === 1) return reply({}, { status: 503, body: '{}', headers: { get: () => null } })
+      return reply(completion('{"markdown":"正文"}'))
+    }
+  })
+  assert.equal(retries.length, 1)
+  assert.equal(retries[0].reason, 'HTTP 503')
+  assert.equal(retries[0].attempt, 1)
+  assert.ok(retries[0].delayMs >= 0)
+})
+
+test('退避策略：指数增长有上限、听 Retry-After、预算不够就不试', () => {
+  assert.equal(isRetryableStatus(429), true)
+  assert.equal(isRetryableStatus(503), true)
+  assert.equal(isRetryableStatus(408), true)
+  assert.equal(isRetryableStatus(400), false)
+  assert.equal(isRetryableStatus(401), false)
+  assert.equal(isRetryableStatus(404), false)
+
+  const noHeader = { headers: { get: () => null } }
+  const first = retryDelayFor({ attempt: 0, response: noHeader, now: 0, deadlineAt: 1_000_000 })
+  const later = retryDelayFor({ attempt: 4, response: noHeader, now: 0, deadlineAt: 1_000_000 })
+  assert.ok(first >= 375 && first <= 625, `首次退避约 500ms（含抖动），实际 ${first}`)
+  assert.ok(later <= 8000, '退避有上限，不会一等就是几分钟')
+  assert.ok(later > first, '退避总体递增')
+
+  const withHeader = retryDelayFor({ attempt: 0, response: { headers: { get: () => '7' } }, now: 0, deadlineAt: 1_000_000 })
+  assert.equal(withHeader, 7000, '服务端说等 7 秒就等 7 秒')
+  const absurd = retryDelayFor({ attempt: 0, response: { headers: { get: () => '99999' } }, now: 0, deadlineAt: 1_000_000 })
+  assert.equal(absurd, 60_000, '但也不能被服务端拖住一小时')
+
+  assert.equal(retryDelayFor({ attempt: 0, response: noHeader, now: 0, deadlineAt: 0 }), null, '没有预算就不试')
+  const clamped = retryDelayFor({ attempt: 3, response: noHeader, now: 0, deadlineAt: 3000 })
+  assert.ok(clamped <= 2000, `退避不得越过总预算（实际 ${clamped}）`)
+})
 
 test('parseJsonResponse accepts plain, fenced and prose-wrapped payloads', () => {
   assert.deepEqual(parseJsonResponse('{"a":1}'), { a: 1 })

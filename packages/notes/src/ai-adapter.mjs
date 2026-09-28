@@ -400,6 +400,41 @@ export function parseJsonResponse(text) {
   throw new Error('Model response must be valid JSON')
 }
 
+/** 值得重试的状态码：限流与服务端临时故障。4xx 里其余的都别试——重试只是再浪费一次额度。 */
+export function isRetryableStatus(status) {
+  return status === 408 || status === 425 || status === 429 || (status >= 500 && status <= 599)
+}
+
+/** 服务端说"等 N 秒"时听它的；Retry-After 也接受 HTTP 日期格式。 */
+export function retryAfterMs(response) {
+  const header = response?.headers?.get?.('retry-after')
+  if (!header) return null
+  const seconds = Number(header)
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(60_000, Math.round(seconds * 1000))
+  const at = Date.parse(header)
+  return Number.isFinite(at) ? Math.min(60_000, Math.max(0, at - Date.now())) : null
+}
+
+/**
+ * 下一次尝试前等多久：指数退避 + 抖动，并听 Retry-After。
+ * 返回 null 表示"剩下的时间已经不够再试一次了"——那就别试，把失败如实报上去。
+ */
+export function retryDelayFor({ attempt = 0, response = null, error = null, now = Date.now(), deadlineAt = Infinity, baseMs = 500, capMs = 8000 } = {}) {
+  const suggested = retryAfterMs(response)
+  const exponential = Math.min(capMs, baseMs * 2 ** Math.max(0, attempt))
+  // 抖动：多个 worker 同时被限流时，不要让它们同时回来（±25%）。
+  // 上限要**在抖动之后**再夹一次，否则"最多 8 秒"会被抖动顶到 10 秒——上限就不是上限了。
+  const jitter = 1 + (Math.random() * 0.5 - 0.25)
+  let delay = suggested ?? Math.round(Math.min(capMs, exponential * jitter))
+  // 网络错误往往瞬间返回，稍等一下就有意义；但绝不能等到超过总预算
+  const remaining = deadlineAt - now
+  if (remaining <= 0) return null
+  if (delay > remaining - 1000) delay = Math.max(0, remaining - 1000)
+  if (delay <= 0 && remaining < 2000) return null
+  void error
+  return Math.max(0, delay)
+}
+
 export async function callCourseModel({
   role,
   prompt,
@@ -407,6 +442,9 @@ export async function callCourseModel({
   config: overrideConfig,
   env = process.env,
   fetchImpl = fetch,
+  // 重试相关的两个注入点：sleepImpl 让测试不必真等，onRetry 让运维看得见"又试了一次"
+  sleepImpl = ms => new Promise(resolve => setTimeout(resolve, ms)),
+  onRetry = () => {},
   // 自建服务器上没有 Vercel 那样的函数生命周期上限，240s 只是一个保守默认值，
   // 而不是硬天花板；需要时可以调高。
   maxTimeoutMs = 900_000
@@ -421,6 +459,12 @@ export async function callCourseModel({
   const jsonRetries = Number.isFinite(configuredRetries)
     ? Math.min(2, Math.max(0, Math.floor(configuredRetries)))
     : 1
+  // 传输层重试次数（429/5xx/网络抖动）：默认 2，即最多尝试 3 次。
+  // 与 JSON 重试分开计数——后者是"模型答得不对"，前者是"这次请求没成功"。
+  const configuredHttpRetries = Number(env.COURSE_AI_HTTP_RETRIES ?? 2)
+  const httpRetries = Number.isFinite(configuredHttpRetries)
+    ? Math.min(5, Math.max(0, Math.floor(configuredHttpRetries)))
+    : 2
   // JSON retries and any outline-repair call share the enclosing batch deadline.
   const batchDeadline = Number(overrideConfig?.deadlineAt)
   const deadlineAt = Math.min(
@@ -457,57 +501,97 @@ export async function callCourseModel({
       new DOMException('Course model time budget expired', 'TimeoutError')
     ), remainingMs)
     timer.unref?.()
-    const requestSignal = signal
-      ? AbortSignal.any([signal, timeout.signal])
-      : timeout.signal
-    const messages = [
-      { role: 'system', content: prompt.system },
-      { role: 'user', content: prompt.user }
-    ]
-    if (attempt > 0) messages.push({
-      role: 'user',
-      content: '上一次响应未能解析为合法 JSON。请重新完成同一任务，只返回一个严格合法、可由 JSON.parse 直接解析的 JSON 对象；字符串中的换行必须正确转义，不要输出思考过程、代码围栏、注释或前后说明。'
-    })
-
-    let response
-    let body
-    let phase = 'request'
-    try {
-      response = await fetchImpl(`${config.baseUrl}/chat/completions`, {
-        method: 'POST',
-        signal: requestSignal,
-        headers: {
-          authorization: `Bearer ${config.apiKey}`,
-          'content-type': 'application/json'
-        },
-        body: JSON.stringify({
-          model: config.model,
-          messages,
-          temperature: attempt > 0 ? 0 : Number(env.COURSE_AI_TEMPERATURE || 0.2),
-          response_format: { type: 'json_object' }
-        })
+    // 同一个 JSON 尝试内部的传输层重试：429/5xx/网络抖动都值得再试一次，
+    // 而 400/401 这类重试多少次都一样，只会浪费时间与额度。
+    let response = null
+    let body = ''
+    let transportAttempts = 0
+    for (let transport = 0; ; transport += 1) {
+      transportAttempts = transport + 1
+      const budgetLeft = Math.ceil(deadlineAt - Date.now())
+      if (budgetLeft <= 0) {
+        throw transportError(null, 'before-request', attempt, timeoutMs, true, false)
+      }
+      const timeout = new AbortController()
+      const timer = setTimeout(() => timeout.abort(
+        new DOMException('Course model time budget expired', 'TimeoutError')
+      ), budgetLeft)
+      timer.unref?.()
+      const requestSignal = signal
+        ? AbortSignal.any([signal, timeout.signal])
+        : timeout.signal
+      const messages = [
+        { role: 'system', content: prompt.system },
+        { role: 'user', content: prompt.user }
+      ]
+      if (attempt > 0) messages.push({
+        role: 'user',
+        content: '上一次响应未能解析为合法 JSON。请重新完成同一任务，只返回一个严格合法、可由 JSON.parse 直接解析的 JSON 对象；字符串中的换行必须正确转义，不要输出思考过程、代码围栏、注释或前后说明。'
       })
-      phase = 'response-body'
-      body = await response.text()
-    } catch (error) {
-      const timedOut = timeout.signal.aborted || error?.name === 'TimeoutError'
-      const cancelled = !timedOut && Boolean(signal?.aborted)
-      throw transportError(error, phase, attempt, remainingMs, timedOut, cancelled)
-    } finally {
-      clearTimeout(timer)
+
+      let phase = 'request'
+      let failure = null
+      try {
+        response = await fetchImpl(`${config.baseUrl}/chat/completions`, {
+          method: 'POST',
+          signal: requestSignal,
+          headers: {
+            authorization: `Bearer ${config.apiKey}`,
+            'content-type': 'application/json'
+          },
+          body: JSON.stringify({
+            model: config.model,
+            messages,
+            temperature: attempt > 0 ? 0 : Number(env.COURSE_AI_TEMPERATURE || 0.2),
+            response_format: { type: 'json_object' }
+          })
+        })
+        phase = 'response-body'
+        body = await response.text()
+      } catch (error) {
+        const timedOut = timeout.signal.aborted || error?.name === 'TimeoutError'
+        const cancelled = !timedOut && Boolean(signal?.aborted)
+        if (cancelled) throw transportError(error, phase, attempt, budgetLeft, false, true)
+        failure = { error, phase, timedOut }
+      } finally {
+        clearTimeout(timer)
+      }
+
+      if (!failure && response && !response.ok) {
+        if (!isRetryableStatus(response.status)) {
+          const detail = providerErrorDetail(body)
+          const error = new Error([
+            `Course model call failed: ${response.status}`,
+            modelTarget(config),
+            detail
+          ].filter(Boolean).join(' · '))
+          error.meta = { provider: config.provider, model: config.model, role, startedAt, endedAt: new Date().toISOString(), status: response.status, attempt: attempt + 1 }
+          throw error
+        }
+        failure = { error: new Error(`HTTP ${response.status}`), phase: 'response-status', timedOut: false, status: response.status }
+      }
+
+      if (!failure) break
+      const exhausted = transport >= httpRetries
+      const delay = exhausted ? 0 : retryDelayFor({ attempt: transport, response, error: failure.error, now: Date.now(), deadlineAt })
+      if (exhausted || delay === null) {
+        if (failure.status) {
+          const detail = providerErrorDetail(body)
+          const error = new Error([
+            `Course model call failed: ${failure.status}`,
+            modelTarget(config),
+            detail
+          ].filter(Boolean).join(' · '))
+          error.meta = { provider: config.provider, model: config.model, role, startedAt, endedAt: new Date().toISOString(), status: failure.status, attempt: attempt + 1, transportAttempts }
+          throw error
+        }
+        throw transportError(failure.error, failure.phase, attempt, Math.ceil(deadlineAt - Date.now()), failure.timedOut, false)
+      }
+      onRetry({ role, model: config.model, attempt: transport + 1, of: httpRetries + 1, delayMs: delay, reason: failure.status ? `HTTP ${failure.status}` : (failure.timedOut ? 'timeout' : 'network') })
+      await sleepImpl(delay)
     }
 
     const endedAt = new Date().toISOString()
-    if (!response.ok) {
-      const detail = providerErrorDetail(body)
-      const error = new Error([
-        `Course model call failed: ${response.status}`,
-        modelTarget(config),
-        detail
-      ].filter(Boolean).join(' · '))
-      error.meta = { provider: config.provider, model: config.model, role, startedAt, endedAt, status: response.status, attempt: attempt + 1 }
-      throw error
-    }
 
     let data
     try {

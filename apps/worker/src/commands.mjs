@@ -660,7 +660,7 @@ export function createCommands(context) {
           : undefined
       }
       const callModel = injectedCallModel ||
-        (payload => callCourseModel({ ...payload, config: { ...modelConfig, ...(payload.config || {}) } }))
+        (payload => callCourseModel({ ...payload, config: { ...modelConfig, ...(payload.config || {}) }, onRetry: onModelRetry }))
 
       /**
        * 跨课次上下文：同一门课此前讲到哪。
@@ -833,6 +833,16 @@ export function createCommands(context) {
   }
 
   /**
+   * 模型调用的重试要看得见。
+   *
+   * 限流与服务端抖动本来就该自动重试，但如果日志里什么都不说，运维只会看到"这一步变慢了"，
+   * 却不知道是网络在抖、还是账号被限流——两者的处理方式完全不同。
+   */
+  const onModelRetry = info => stderr(
+    `模型调用重试（${info.role} · ${info.reason}）：第 ${info.attempt}/${info.of} 次，等待 ${(info.delayMs / 1000).toFixed(1)}s`
+  )
+
+  /**
    * 从站点发布库提炼"同一门课此前讲到哪"。
    *
    * 读不到发布库（第一次跑、或站点还没建）不算错误：返回空上下文，流水线照常走——
@@ -891,7 +901,7 @@ export function createCommands(context) {
       models: config.ai.models
     }
     const callModel = injectedCallModel ||
-      (payload => callCourseModel({ ...payload, config: { ...modelConfig, ...(payload.config || {}) } }))
+      (payload => callCourseModel({ ...payload, config: { ...modelConfig, ...(payload.config || {}) }, onRetry: onModelRetry }))
 
     const result = await generateOnepage({
       markdown,
@@ -960,7 +970,7 @@ export function createCommands(context) {
       models: config.ai.models
     }
     const callModel = injectedCallModel ||
-      (payload => callCourseModel({ ...payload, config: { ...modelConfig, ...(payload.config || {}) } }))
+      (payload => callCourseModel({ ...payload, config: { ...modelConfig, ...(payload.config || {}) }, onRetry: onModelRetry }))
 
     const result = await generateBriefFromMarkdown({
       markdown,
@@ -1081,7 +1091,7 @@ export function createCommands(context) {
       models: config.ai.models
     }
     const derivedCallModel = () => injectedCallModel ||
-      (payload => callCourseModel({ ...payload, config: { ...derivedModelConfig, ...(payload.config || {}) } }))
+      (payload => callCourseModel({ ...payload, config: { ...derivedModelConfig, ...(payload.config || {}) }, onRetry: onModelRetry }))
 
     /**
      * 取一份派生物（简报 / 一页纸）。
