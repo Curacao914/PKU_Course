@@ -34,7 +34,7 @@ run_variant() {
   local label="$1" nodes="$2"
   local dir="$OUT_ROOT/$label"
   mkdir -p "$dir"
-  echo "=== $label（目标 $nodes 个节点）$(date +%H:%M:%S) ==="
+  echo "=== ${label}（目标 $nodes 个节点）$(date +%H:%M:%S) ==="
   node apps/worker/bin/course.mjs notes \
     --transcript "$TRANSCRIPT" \
     --course "$COURSE" --lesson "$LESSON" \

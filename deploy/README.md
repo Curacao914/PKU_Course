@@ -4,10 +4,13 @@
 
 ```
 腾讯云 124.222.111.108（2 vCPU / 1.9G / 39G，Ubuntu 24.04）
-├── /home/ubuntu/course-runtime      代码（rsync 同步，含 .venv）
-├── /home/ubuntu/.course-worker/     worker 状态：env(0600)、browser-profile、replays/
-├── course-site.service              ← 待建：course.law-tech.dev 站点
-├── course-worker.timer              ← 待建：定时发现与处理
+├── /home/ubuntu/course-runtime      → 符号链接，指向 ~/releases/course/<时间戳>（原子切换）
+├── /home/ubuntu/releases/course/    每次发布一个完整目录；.history 记成功发布、.history-failed 记失败
+├── /home/ubuntu/deps/course/        依赖仓：按 package-lock.json 的哈希缓存（只增不改）
+├── /home/ubuntu/.course-worker/     worker 状态：env(0600)、env.public、browser-profile、replays/
+├── course-site.service              公开站点（role=public，127.0.0.1:3100，无任何机密）
+├── course-admin.service             管理台 + worker 触发口（role=admin，127.0.0.1:3101，完整环境）
+├── course-cycle.timer               定时闭环（扫描 → 推进 → 通知）
 ├── openclaw-gateway.service         已存在，不动
 ├── law-tech-cloudflared.service     已存在，不动（复用其隧道接入 course.law-tech.dev）
 └── law-tech-wechat-relay.service    已存在，不动
@@ -25,6 +28,85 @@ node /home/ubuntu/course-runtime/apps/worker/bin/course.mjs doctor
 ```
 
 `doctor` 只报告每个凭据是 `set` 还是 `missing`，永远不会回显取值。
+
+## 两个服务与它们的单元（仓库是唯一来源）
+
+生产上跑**两个进程、两份环境**：
+
+| 服务 | 角色 | 监听 | 环境文件 | 里面有什么 |
+|---|---|---|---|---|
+| `course-site.service` | `public` | `127.0.0.1:3100` | `~/.course-worker/env.public` | 只有站点目录这类公开配置，**没有任何机密** |
+| `course-admin.service` | `admin` | `127.0.0.1:3101` | `~/.course-worker/env`（0600） | PKU / 百炼 / R2 / 管理令牌 / 账本 / 能触发 worker |
+
+这样"公开接口被攻破"与"管理凭据泄露"不再是同一件事。三条硬约束：
+
+- 单元里**显式**写死 `COURSE_SITE_ROLE`。systemd 启动时若没有这个变量，`serve.mjs` 直接拒绝
+  启动（按 `INVOCATION_ID` 判断），因为退回 `all` 会把管理台挂到公开端口上并加载全部机密。
+  本地手工 `node apps/site/bin/serve.mjs` 仍然允许省略——那只是本机开发。
+- 公开进程的环境文件里不许出现机密。自查：
+  `grep -Ei 'password|token|secret|key' ~/.course-worker/env.public`（应当没有输出）。
+- 站点搜索与 MCP 的请求预算（限流/并发/超时/查询长度）由 `env.public` 配置，
+  见 `deploy/env.public.example` 与 `docs/12` §7.3.1。
+
+安装/更新单元（幂等，改完单元跑一次）：
+
+```bash
+ssh ubuntu@124.222.111.108
+cd ~/course-runtime
+deploy/install-units.sh                 # 装/更新两个单元 + daemon-reload（不重启服务）
+deploy/install-units.sh --restart       # 顺带 enable --now 并做健康检查
+deploy/install-units.sh --dry-run       # 只看它打算做什么
+```
+
+脚本做四件事：把单元里的 `__NODE__` 换成服务器上真实的 node 路径；旧单元先留一份
+`.bak-<时间戳>`；缺失时从 `deploy/env.public.example` 生成一份 `env.public`（**绝不覆盖**
+已有配置）；最后 `daemon-reload`。单元里没有显式角色时它会直接拒绝安装。
+
+nginx 反代见 `deploy/nginx-course.conf.example`（两个 server 块：`course.` → 3100，
+`admin.` → 3101）。仓库不直接写 `/etc`：先 `cp`，再 `diff`，确认后
+`nginx -t && systemctl reload nginx`。
+
+## 发布（deploy/release.sh）
+
+```bash
+deploy/push-release.sh                  # 本机：rsync 到 ~/course-staging，并在服务器上发布
+ssh ubuntu@124.222.111.108 'bash ~/course-staging/deploy/release.sh --rollback'   # 回滚
+```
+
+形状：
+
+```
+~/releases/course/<时间戳>/        每次发布一个完整目录（未改动的文件用 --link-dest 硬链接）
+~/course-runtime -> 上面某个       符号链接；systemd 单元的 WorkingDirectory 不用改
+~/deps/course/<锁哈希>/            node_modules 依赖仓：键是 package-lock.json 的哈希
+~/releases/course/.history         成功发布历史（回滚只认它）
+~/releases/course/.history-failed  失败记录（stage=deps|test|roles|health|rollback，只给人看）
+```
+
+七步，每一步都对应一种"发不出去就别发"的情形：
+
+1. **先检查两个单元的角色**（site=public、admin=admin）：角色不对就在拷贝之前停手，
+   不必等切换之后才发现服务起不来。
+2. 拷贝到新 release；依赖按锁文件哈希从依赖仓**硬链接**进来——命中就不装，装一次多个
+   release 共享（workspace 的相对符号链接只有在 release 目录里才解析得对，所以是硬链接
+   而不是把依赖仓软链过来）。
+3. 在 release 目录里跑全部测试（含 `tools/*.test.mjs`）；不通过就删掉这个目录、什么都不切换。
+4. 切换符号链接：先建 `course-runtime.new`，再 `mv -T` rename——原子，不存在"链接指向空"的瞬间。
+5. 重启**两个**服务并各做一次 `/healthz`；任一失败就自动 `--rollback` 回上一个成功版本。
+6. 全部通过才写 `.history` 与 `.release-meta`（stamp / 目录指纹 digest / lockHash /
+   每个服务的 role 与 health 结果）。
+7. 清理：保留最近 `KEEP` 个 release（默认 3），并删掉没有任何 release 引用的依赖仓。
+
+**回滚取的是"历史里最后一个不等于当前的版本"**，所以两种情形都对：手动回滚（当前是最后
+一次成功发布 → 取它前面那条）与自动回滚（当前这次健康检查没过、压根没进历史 → 取历史最后
+一条）。回滚成功后会把被回滚掉的那条从 `.history` 划掉，避免"回滚→失败→回滚"的乒乓。
+
+发布脚本自己也有仿真测试：`node --test tools/deploy-sim.test.mjs`（已并入 `npm test`）。
+它用 PATH 上的 shim 假装 systemctl/curl/npm/node，在临时 HOME 里真跑一遍：首次发布、
+复用依赖仓、换锁文件、测试失败、健康检查失败自动回滚、手动回滚、单元角色写错。
+**它上线就抓到三个真 bug**：`$VAR：` 紧跟中文让 bash 报 unbound variable、同一秒内二次
+发布撞目录名（会 rsync 进正在跑的版本）、以及 `mv -T` 在 BSD/macOS 上会把新链接挪进旧目录
+（表现为"发布成功但 course-runtime 还指着旧版本"）。
 
 ## 服务器上已具备
 
@@ -413,6 +495,10 @@ cf.law-tech.dev      → Cloudflare（橙云）+ 隧道               ← 兜底
 
 ## 待建（后续步骤）
 
+- **同机同用户的两个服务之间仍有文件权限上的边界**：公开进程以同一个 `ubuntu` 用户运行，
+  理论上能读 `~/.course-worker/env`。彻底隔离需要独立的系统用户（`ProtectHome`/`ReadOnlyPaths`
+  只能挡住文件系统布局的一部分，挡不住"同一个用户"这件事本身），且要配好 `COURSE_*` 环境
+  与目录属主；在没做之前，公开进程里"没有机密"靠的是它**不加载**那份环境，而不是读不到。
 - 微信出站消除会话窗口依赖（等 Control UI 批准设备）。
 - `COURSE_ADMIN_TOKEN`：管理接口目前未配令牌，因此一律拒绝访问。接入管理台时一并配置。
 - 磁盘下限检查：空闲低于设定值时拒绝开始下载（旧系统用 `COURSE_WORKER_MIN_FREE_BYTES`，默认 5GiB）。

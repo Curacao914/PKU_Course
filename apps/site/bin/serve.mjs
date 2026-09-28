@@ -16,7 +16,25 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../
  *   admin  → 端口 3101，拿完整环境，能触发 worker、能读课件与账本。
  * 这样"公开接口被攻破"与"管理凭据泄露"不再是一件事。
  */
-const role = String(process.env.COURSE_SITE_ROLE || 'all').toLowerCase()
+/**
+ * 角色：public / admin / all。**systemd 下必须显式给**，不给就直接拒绝启动。
+ *
+ * 为什么卡这么死：角色缺省成 all 时，公开进程会挂上管理台、并加载 PKU/百炼/R2/管理令牌——
+ * 那正是"拆成两个进程"要防的事，一次手滑（单元里忘写 Environment=）就全退回去了。
+ * 判断"是不是 systemd 起的"看 INVOCATION_ID（systemd 给每个单元都会设它）。
+ * 手工在本机跑（node apps/site/bin/serve.mjs）仍然允许省略：那只是本地开发。
+ */
+let role = String(process.env.COURSE_SITE_ROLE || '').trim().toLowerCase()
+if (!role) {
+  if (process.env.INVOCATION_ID) {
+    throw new Error(
+      'systemd 下必须显式设置 COURSE_SITE_ROLE=public|admin：静默退回 all 会把管理台与全部机密放进对外进程。' +
+      '单元文件见 deploy/course-site.service 与 deploy/course-admin.service，安装用 deploy/install-units.sh。'
+    )
+  }
+  role = 'all'
+  console.log('[site] 未设置 COURSE_SITE_ROLE，按 all（单进程）启动：只适合本机开发，生产上跑两个单元')
+}
 if (!['public', 'admin', 'all'].includes(role)) throw new Error(`未知的 COURSE_SITE_ROLE：${role}（应为 public / admin / all）`)
 const isPublic = role === 'public'
 const isAdmin = role === 'admin'

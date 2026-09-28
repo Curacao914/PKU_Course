@@ -22,4 +22,8 @@ rsync -az "$ROOT/package.json" "$HOST:$STAGING/package.json"
 echo "② 在服务器上发布（测试不过就不切换）"
 ssh "$HOST" "cd ~ && bash \"$STAGING/deploy/release.sh\" \"$STAGING\""
 
-echo "③ 完成。回滚：ssh $HOST 'bash ~/course-staging/deploy/release.sh --rollback'"
+echo "③ 完成。"
+echo "   回滚：ssh $HOST 'bash ~/course-staging/deploy/release.sh --rollback'"
+# 单元文件也要跟着更新，否则新版本可能跑在与单元不一致的角色/端口上。
+# install-units.sh 是幂等的：没变化就只打印一行。
+echo "   若 deploy/*.service 有改动：ssh $HOST 'bash ~/course-runtime/deploy/install-units.sh --restart'"

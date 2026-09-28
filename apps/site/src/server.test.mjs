@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 import { buildNoteRecord, writeSite } from '@course/publish'
 
@@ -265,6 +267,55 @@ test('a broken index is reported as unavailable rather than an empty site', asyn
 test('the request handler is usable directly without a socket', () => {
   const handler = createRequestHandler({ root: siteDir() })
   assert.equal(typeof handler, 'function')
+})
+
+/**
+ * 角色必须显式：systemd 下没写 COURSE_SITE_ROLE 就拒绝启动。
+ *
+ * 这条不是洁癖：角色缺省成 all 时，公开进程会挂上管理台并加载 PKU/百炼/R2/管理令牌——
+ * 一次"单元里忘写 Environment=" 就能把两个进程的隔离全退回去。用 INVOCATION_ID
+ * 判断"是不是 systemd 起的"（systemd 给每个单元都会设它）。
+ */
+test('systemd 下没写角色就拒绝启动；手工跑（非 systemd）才允许退成 all', async () => {
+  const serve = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'serve.mjs')
+  const spawnServe = env => new Promise((resolve) => {
+    const child = spawn(process.execPath, [serve], {
+      env: { ...process.env, COURSE_SITE_PORT: '0', ...env },
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
+    let stdout = ''
+    let stderr = ''
+    let killed = false
+    const stop = () => { if (!killed) { killed = true; child.kill('SIGTERM') } }
+    // 一打印 listening 就收工，别让测试白等超时（这条测试要起三次进程）
+    child.stdout.on('data', chunk => { stdout += chunk; if (stdout.includes('listening')) stop() })
+    child.stderr.on('data', chunk => { stderr += chunk })
+    const timer = setTimeout(stop, 5_000)
+    child.on('exit', code => { clearTimeout(timer); resolve({ code, stdout, stderr }) })
+  })
+
+  // systemd 启动（有 INVOCATION_ID）且没有角色：必须非零退出，并说清怎么修
+  const refused = await spawnServe({ INVOCATION_ID: 'test-invocation', COURSE_SITE_ROLE: '' })
+  assert.notEqual(refused.code, 0)
+  assert.match(refused.stderr, /COURSE_SITE_ROLE/)
+  assert.doesNotMatch(refused.stdout, /listening/)
+
+  // 起得来 = 打印了 listening；退出码可能是 0（收到 SIGTERM 后自己退）或 143
+  // （信号处理器还没装上就被杀——测试抢先 kill 时会这样），两者都算"启动成功"。
+  const startedFine = (result) => {
+    assert.match(result.stdout, /listening/, result.stderr)
+    assert.ok([0, 143, null].includes(result.code), '意外的退出码：' + result.code + ' ' + result.stderr)
+  }
+
+  // 本地手工跑：允许，但要明确说这是"只适合本机开发"的单进程模式
+  const local = await spawnServe({ INVOCATION_ID: '', COURSE_SITE_ROLE: '' })
+  startedFine(local)
+  assert.match(local.stdout, /只适合本机开发/)
+
+  // 显式 public 角色：正常启动
+  const explicit = await spawnServe({ INVOCATION_ID: 'test-invocation', COURSE_SITE_ROLE: 'public' })
+  startedFine(explicit)
+  assert.match(explicit.stdout, /role=public/)
 })
 
 /** 大一点的发布库：用来把"检索确实要花时间"变成可测的事实（384 篇 × 约 7KB 正文）。 */

@@ -1,0 +1,84 @@
+# course.law-tech.dev / admin.law-tech.dev 的反代配置（照线上配置整理，装法见 deploy/README.md）
+#
+# 仓库不直接往 /etc 写文件（那需要 root，也会让"仓库是唯一来源"变成一句空话）。安装：
+#   sudo cp deploy/nginx-course.conf.example /etc/nginx/sites-available/course
+#   sudo diff -u /etc/nginx/sites-available/course deploy/nginx-course.conf.example   # 先看清差异
+#   sudo nginx -t && sudo systemctl reload nginx
+#
+# 两条链路**故意不同**（见 deploy/README.md「网络架构」）：
+#   course.law-tech.dev → Cloudflare 橙云 + 隧道 + 缓存规则   ← 读者：命中边缘，不回源
+#   admin.law-tech.dev  → A 记录直连本机 443                  ← 管理台与上传：直连才跑得动
+# 所以公开块的超时按应用自身的预算给，管理块的超时给到十几分钟。
+#
+# 证书由 certbot（DNS-01，Cloudflare 插件）签发，覆盖两个域名；这里只写 443。
+
+# ---------- 公开站点：读者与 AI 客户端（MCP 也在这个端口后面）----------
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name course.law-tech.dev;
+
+    ssl_certificate     /etc/letsencrypt/live/course.law-tech.dev/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/course.law-tech.dev/privkey.pem;
+
+    # MCP 与搜索都是短请求（应用自身有 20 秒墙钟预算，超了回 504），这里给足余量即可
+    proxy_read_timeout 120s;
+    client_max_body_size 8m;
+
+    # 真实客户端地址：**必须追加**（$proxy_add_x_forwarded_for），不要用 $remote_addr 覆盖。
+    # 服务端按"最右不可信跳"取地址做限流（packages/notes-mcp/src/budget.mjs），追加写法能让
+    # 客户端自己伪造的前缀失效。改这里之后要确认 env.public 里 COURSE_TRUSTED_PROXIES
+    # 含 127.0.0.1（否则服务端根本不读这个头，所有读者共用一个限流桶）。
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_http_version 1.1;
+
+    location / {
+        proxy_pass http://127.0.0.1:3100;
+    }
+
+    # 接口不进任何中间缓存：/api/* 与 /mcp 的响应本身都带 no-store，
+    # 这里再明确一次，免得哪天上游加了缓存规则把搜索结果或 AI 的回答接过去
+    location ~ ^/(api/|mcp$) {
+        proxy_pass http://127.0.0.1:3100;
+        proxy_buffering off;
+    }
+}
+
+# ---------- 管理台：只给本人，走直连 ----------
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name admin.law-tech.dev;
+
+    ssl_certificate     /etc/letsencrypt/live/course.law-tech.dev/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/course.law-tech.dev/privkey.pem;
+
+    # 「跑一轮」要十几分钟、上传课件几十兆：这两个数字是实测调出来的
+    proxy_read_timeout 1800s;
+    proxy_send_timeout 1800s;
+    client_max_body_size 256m;
+
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_http_version 1.1;
+
+    location / {
+        proxy_pass http://127.0.0.1:3101;
+    }
+}
+
+# 与现状有关的三点（改之前先确认）：
+#   · course.law-tech.dev 的读者流量走 Cloudflare 隧道（cloudflared 在本机回源到
+#     127.0.0.1:3100）；这个 443 站点是隧道之外的直连入口。
+#   · 若橙云代理回源到本机 443，$remote_addr 是 Cloudflare 边缘地址。两种正确处理：
+#     配 realip 模块 + Cloudflare 网段，或在 env.public 里设
+#     COURSE_CLIENT_IP_HEADER=cf-connecting-ip（只采信 Cloudflare 写的那个头）。
+#   · 管理台的身份校验在下游（令牌 / scrypt 密码 / 按来源 IP 的登录失败计数），
+#     不要在 nginx 上再加一层"共享口令"——那只会让人以为有它就安全。
