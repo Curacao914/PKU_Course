@@ -69,6 +69,11 @@ export function renderSearch(data) {
   // 模型据此判断结果有多可信——把猜着匹配的结果说成精确命中，比不命中更糟。
   const scope = data.includeBody ? '索引 + 正文' : data.bodyScanned ? '索引 + 自动扫正文' : '索引'
   const lines = [`查询「${data.query}」命中 ${data.total} 处（scope：${scope}；扫描 ${data.scanned} 篇）`]
+  // 语义回退：字面零命中、这几条是按"意思"找的。必须说清楚——模型据此判断可信度，
+  // 不能把"猜着找的"和"字面对上的"混在一起报。
+  if (data.semantic?.used) {
+    lines.push('（字面检索没有命中；以下结果按**语义近似**召回，相似度见每条末尾——请按"意思相近"而不是"原文出现"来使用）')
+  }
   if (data.fuzzy?.length) {
     lines.push(`（查询里有语料中不存在的词，已按近似词检索：${data.fuzzy.map(item => `${item.from}→${item.to}`).join('、')}）`)
   }
@@ -79,6 +84,7 @@ export function renderSearch(data) {
     if (hit.location?.title || hit.location?.id) {
       lines.push(`   位置：${line(hit.location.title, hit.location.id ? `#${hit.location.id}` : '')}`)
     }
+    if (hit.semantic) lines.push(`   相似度：${hit.similarity}（按语义近似召回）`)
     for (const snippet of hit.snippets) lines.push(`   片段：${snippet}`)
   })
   if (!data.hits.length) {

@@ -1637,6 +1637,10 @@ const SEARCH_SCRIPT = `<script>
           return;
         }
         var notes = [];
+        // 语义回退：字面没命中、这几条是按意思找的——必须说清楚，并给出相似度
+        if (data.semantic && data.semantic.used) {
+          notes.push('字面没有命中，以下按**语义近似**召回' + (hits[0] && hits[0].similarity ? '（最像的一条相似度 ' + hits[0].similarity + '）' : ''));
+        }
         if (data.fuzzy && data.fuzzy.length) {
           notes.push('按近似词检索：' + data.fuzzy.map(function (item) { return item.from + '→' + item.to }).join('、'));
         }

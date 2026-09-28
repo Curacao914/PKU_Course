@@ -468,6 +468,10 @@ export function createRequestHandler({
           // 页面上那行提示说的是后者（本地库正文就在内存里，auto 每句都会用到它）
           coverage: found.coverage,
           escalated: found.escalated,
+          // 语义回退：字面一条都没命中时才会 used=true。页面上必须把它标出来——
+          // "按意思找的"和"字面对上的"可信度不一样，读者有权知道。
+          semantic: found.semantic || { used: false, enabled: false },
+          lexicalTotal: found.lexicalTotal ?? found.total,
           bodyScanned: found.bodyScanned,
           fuzzy: found.fuzzy,
           terms: found.terms,
@@ -484,6 +488,8 @@ export function createRequestHandler({
             sectionId: hit.location?.id || '',
             // 一篇里命中的多个小节（去重、配额）：页面可以显示"本文命中 2 处"
             sections: (hit.sections || []).map(item => ({ id: item.id, title: item.title, score: item.score })),
+            // 语义命中的条目带 similarity，前端据此显示"像到什么程度"
+            ...(hit.semantic ? { semantic: true, similarity: hit.similarity } : {}),
             snippets: hit.snippets
           }))
         })

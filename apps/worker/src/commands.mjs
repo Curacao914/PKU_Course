@@ -1018,7 +1018,9 @@ export function createCommands(context) {
     // ③ 只对"新出现/改过"的小节花钱
     let stats = { tokens: 0, calls: 0, hits: 0, costCny: 0 }
     if (todo.length) {
-      const cacheFile = String(options.options.cache || env.COURSE_EMBED_CACHE || path.join(config.scratchRoot, `embeddings-cache-${model}.json`))
+      // 缓存文件名与 tools/semantic-eval.mjs 的默认值一致（embeddings-cache-<provider>.json）：
+      // 实验跑过的文本，建索引时不必再花钱
+      const cacheFile = String(options.options.cache || env.COURSE_EMBED_CACHE || path.join(config.scratchRoot, 'embeddings-cache-dashscope.json'))
       const result = await embedTexts({
         texts: todo.map(unit => unit.text),
         type: 'document',
