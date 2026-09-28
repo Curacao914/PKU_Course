@@ -1310,6 +1310,7 @@ export function createCommands(context) {
      */
     if (options.flags?.has('rebuild')) {
       if (!fs.existsSync(libraryForRebuild)) throw new Error(`找不到发布库 ${libraryForRebuild}；先发布过至少一篇笔记再 --rebuild`)
+      const revisionBefore = libraryRevision(libraryForRebuild)
       const library = JSON.parse(fs.readFileSync(libraryForRebuild, 'utf8'))
       const site = writeSite({
         records: library,
@@ -1317,6 +1318,24 @@ export function createCommands(context) {
         siteOrigin: options.options.origin || 'https://course.law-tech.dev',
         docs: readPublicDocs()
       })
+      /**
+       * --write-back：把 refreshRecord 算出来的派生字段写回发布库。
+       *
+       * 为什么需要：站点页面每次重建都会重算这些字段（A3 之后包括**全量小节索引**——
+       * 每节的 id/标题/字数/内容指纹），但发布库本身还是旧的，而检索、MCP、公开索引读的
+       * 都是发布库。不写回的话，"老笔记也有小节索引"永远不会发生。
+       * 两道保险照旧：写前版本检查（读入后被改过就中止）+ 留一份 .bak。
+       */
+      if (options.flags?.has('write-back')) {
+        const refreshed = library.map(refreshRecord)
+        const check = checkRevisionUnchanged({ file: libraryForRebuild, expected: revisionBefore.revision })
+        if (!check.ok) throw new Error(check.message)
+        const backup = `${libraryForRebuild}.bak-${new Date().toISOString().replace(/[:.]/g, '-')}`
+        fs.copyFileSync(libraryForRebuild, backup)
+        writeJsonAtomic(libraryForRebuild, refreshed)
+        const withSections = refreshed.filter(item => (item.sections || []).length).length
+        stderr(`发布库已写回派生字段：${refreshed.length} 条（其中 ${withSections} 条带小节索引）；写前备份 ${path.basename(backup)}`)
+      }
       const index = readSiteIndex(siteRoot)
       const purge = await purgeCache(options, { reason: '重建站点', files: site.written || [] })
       emit({

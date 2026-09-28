@@ -20,6 +20,7 @@
  * 只有改过的小节需要重新向量化。
  */
 
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -46,7 +47,7 @@ const PRICES = {
 const estimateTokens = text => Math.ceil(String(text || '').length / 1.5)
 
 /** 词面近似：字符 2-gram 的哈希向量。只用来验证管道，**不是**语义模型。 */
-function localStubVector (text) {
+export function localStubVector (text) {
   const vector = new Array(256).fill(0)
   const clean = String(text || '').replace(/\s+/g, '')
   for (let i = 0; i + 2 <= clean.length; i += 1) {
@@ -96,21 +97,109 @@ function sectionBodyOf (markdown, id) {
   return section ? String(section.ownBody || '').trim() : ''
 }
 
-export function makeEmbedder (provider = 'local-stub') {
+/** 缓存：键 = 文本的 sha256。重跑不花钱，也是"只重算改动内容"的落点。 */
+function openCache (file) {
+  let data = { items: {} }
+  try { data = JSON.parse(fs.readFileSync(file, 'utf8')) } catch { data = { items: {} } }
+  if (!data.items || typeof data.items !== 'object') data.items = {}
+  let dirty = false
+  return {
+    get (text) { return data.items[createHash('sha256').update(String(text)).digest('hex')] },
+    set (text, vector) {
+      data.items[createHash('sha256').update(String(text)).digest('hex')] = vector
+      dirty = true
+    },
+    flush () { if (dirty) { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(data)) } },
+    get size () { return Object.keys(data.items).length }
+  }
+}
+
+/**
+ * 真模型：阿里云百炼 text-embedding-v3。
+ *
+ * 三件必须做的事（与 ASR 那套预算纪律一致）：
+ *   1. **先算钱再花**：按预估 token 算一次预计花费，超过 COURSE_EMBED_MAX_COST_CNY 就拒绝开跑；
+ *   2. 记账用接口返回的 usage.total_tokens（不是自己估的），跑完报实际花费；
+ *   3. 按文本哈希缓存：同一段文字第二次不重复花钱，也是"增量只算改动小节"的实现。
+ * 分批：一次最多 10 条（v3 的限制），失败按指数退避重试三次。
+ */
+function createDashScopeEmbedder ({ capCny = 0, cacheFile = '' } = {}) {
+  const apiKey = String(process.env.DASHSCOPE_API_KEY || '').trim()
+  if (!apiKey) throw new Error('provider=dashscope 需要 DASHSCOPE_API_KEY（服务器上的 ~/.course-worker/env 里有）')
+  const model = String(process.env.COURSE_EMBED_MODEL || 'text-embedding-v3')
+  const price = PRICES.dashscope
+  const cache = cacheFile ? openCache(cacheFile) : null
+  const spent = { tokens: 0, calls: 0, hits: 0 }
+
+  const post = async (texts, textType) => {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const response = await fetch('https://dashscope.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({ model, input: { texts }, parameters: { text_type: textType } })
+      })
+      if (response.ok) return response.json()
+      const detail = await response.text().catch(() => '')
+      if (response.status === 429 || response.status >= 500) {
+        await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)))
+        continue
+      }
+      throw new Error(`百炼 embedding 返回 ${response.status}：${detail.slice(0, 200)}`)
+    }
+    throw new Error('百炼 embedding 连续失败三次（限流或服务异常），本次实验中止')
+  }
+
+  return {
+    provider: 'dashscope',
+    label: `${price.label}（model=${model}）`,
+    stats: () => ({ ...spent, cacheSize: cache ? cache.size : 0, costCny: spent.tokens * price.cnyPerMTok / 1_000_000 }),
+    embed: async (texts, { type = 'document' } = {}) => {
+      const vectors = new Array(texts.length).fill(null)
+      const missing = []
+      texts.forEach((text, index) => {
+        const hit = cache?.get(text)
+        if (hit) { vectors[index] = hit; spent.hits += 1 } else missing.push({ index, text })
+      })
+      for (let start = 0; start < missing.length; start += 10) {
+        const batch = missing.slice(start, start + 10)
+        // 先算钱：按 1 token ≈ 1.5 汉字保守估，超上限就当场拒绝（而不是先花掉再后悔）
+        const projected = (spent.tokens + batch.reduce((sum, item) => sum + estimateTokens(item.text), 0)) * price.cnyPerMTok / 1_000_000
+        if (capCny > 0 && projected > capCny) {
+          throw new Error(`预计花费 ¥${projected.toFixed(4)} 超过上限 ¥${capCny}（COURSE_EMBED_MAX_COST_CNY）：已停止，未发出的批次不花钱`)
+        }
+        const payload = await post(batch.map(item => item.text), type)
+        spent.calls += 1
+        spent.tokens += Number(payload?.usage?.total_tokens || batch.reduce((sum, item) => sum + estimateTokens(item.text), 0))
+        for (const item of payload?.output?.embeddings || []) {
+          const target = batch[Number(item.text_index)]
+          if (!target) continue
+          vectors[target.index] = item.embedding
+          cache?.set(target.text, item.embedding)
+        }
+      }
+      cache?.flush()
+      if (vectors.some(vector => !vector)) throw new Error('有文本没有拿到向量（接口返回不完整），本次实验中止')
+      return vectors
+    }
+  }
+}
+
+export function makeEmbedder (provider = 'local-stub', { capCny = 0, cacheFile = '' } = {}) {
   if (provider === 'local-stub') {
-    return { provider, label: PRICES['local-stub'].label, embed: async texts => texts.map(localStubVector) }
+    return { provider, label: PRICES['local-stub'].label, stats: () => ({ tokens: 0, calls: 0, hits: 0, costCny: 0 }), embed: async texts => texts.map(localStubVector) }
   }
   if (process.env.COURSE_EMBED_ALLOW_PAID !== '1') {
     throw new Error(`provider=${provider} 会产生真实费用：先把 COURSE_EMBED_ALLOW_PAID=1（并设 COURSE_EMBED_MAX_COST_CNY）再跑`)
   }
+  if (provider === 'dashscope') return createDashScopeEmbedder({ capCny, cacheFile })
   throw new Error(`provider=${provider} 还没接：实现 embed() 即可（价格表已在 PRICES 里），接口见 docs/13`)
 }
 
-export async function runExperiment ({ records = [], queries = [], provider = 'local-stub', limit = 3 } = {}) {
+export async function runExperiment ({ records = [], queries = [], provider = 'local-stub', limit = 3, capCny = 0, cacheFile = '' } = {}) {
   const units = buildUnits(records)
-  const embedder = makeEmbedder(provider)
-  const vectors = await embedder.embed(units.map(unit => unit.text))
-  const queryVectors = await embedder.embed(queries.map(query => query.query))
+  const embedder = makeEmbedder(provider, { capCny, cacheFile })
+  const vectors = await embedder.embed(units.map(unit => unit.text), { type: 'document' })
+  const queryVectors = await embedder.embed(queries.map(query => query.query), { type: 'query' })
   const results = []
   for (const [index, query] of queries.entries()) {
     const scored = units
@@ -151,6 +240,8 @@ export async function runExperiment ({ records = [], queries = [], provider = 'l
     queryTokens,
     indexCostCny: tokens * price.cnyPerMTok / 1_000_000,
     queryCostCny: queryTokens * price.cnyPerMTok / 1_000_000,
+    // 实际花了多少：以接口返回的 usage 为准（预算是估的，账单是真的）
+    usage: embedder.stats(),
     development: {
       total: scored.length,
       top1: scored.filter(item => item.hit1).length,
@@ -175,7 +266,14 @@ async function main () {
   const queryFile = valueOf('queries', path.join(import.meta.dirname, 'fixtures', 'semantic-queries.example.json'))
   const queries = JSON.parse(fs.readFileSync(queryFile, 'utf8'))
   const provider = valueOf('provider', process.env.PROVIDER || 'local-stub')
-  const report = await runExperiment({ records, queries, provider })
+  // 花费上限：付费 provider 不给上限就不开跑（预算纪律，与 ASR 那套一致）
+  const capCny = Number(valueOf('max-cost', process.env.COURSE_EMBED_MAX_COST_CNY || (provider === 'local-stub' ? 0 : '')) || 0)
+  if (provider !== 'local-stub' && !(capCny > 0)) {
+    console.error(`provider=${provider} 必须给花费上限：--max-cost <元> 或 COURSE_EMBED_MAX_COST_CNY`)
+    process.exit(2)
+  }
+  const cacheFile = valueOf('cache', process.env.COURSE_EMBED_CACHE || path.join(os.homedir(), '.course-worker', `embeddings-cache-${provider}.json`))
+  const report = await runExperiment({ records, queries, provider, capCny, cacheFile })
   if (flag('json')) { console.log(JSON.stringify(report, null, 2)); return }
   console.log(`语义召回实验（provider=${report.provider}｜${report.providerLabel}）`)
   console.log(`  单元 ${report.units} 个小节 / ${report.notes} 篇笔记；索引 ${report.indexTokens} token（≈¥${report.indexCostCny.toFixed(4)}），每次查询 ≈¥${report.queryCostCny.toFixed(6)}`)
@@ -190,7 +288,11 @@ async function main () {
     const query = report.queryTokens * price.cnyPerMTok / 1_000_000
     console.log(`    ${key.padEnd(12)} ¥${index.toFixed(4)} / 索引全量；每查询 ¥${query.toFixed(6)}  — ${price.label}`)
   }
-  console.log('  提醒：local-stub 是词面近似，只验证管道；要判断语义效果必须换成真模型（docs/13 §4）。')
+  if (report.provider === 'local-stub') {
+    console.log('  提醒：local-stub 是词面近似，只验证管道；要判断语义效果必须换成真模型（docs/13 §4）。')
+  } else {
+    console.log(`  实际用量：${report.usage.tokens} token / ${report.usage.calls} 次调用 / 缓存命中 ${report.usage.hits}（缓存 ${report.usage.cacheSize} 条）→ 实际花费 ¥${report.usage.costCny.toFixed(4)}（上限 ¥${capCny}）`)
+  }
 }
 
 if (process.argv[1] && process.argv[1].endsWith('semantic-eval.mjs')) {
