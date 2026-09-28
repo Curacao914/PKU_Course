@@ -11,9 +11,35 @@
  *      写上之后要能留住（存浏览器），并且下划线"从左到右画出来"、高亮"从左到右刷过去"。
  */
 
+import * as anchors from './anchors.mjs'
 import { markdownUrl, onePageMarkdownUrl } from './markdown-path.mjs'
 
+/**
+ * 把 anchors.mjs 的**源码原文**内联进页面脚本。
+ *
+ * 为什么要这么绕：定位逻辑必须只有一份实现——页面上跑的和单测里跑的是同一段代码，
+ * 否则"测试过了、线上还是贴错位置"。这里用的都是无闭包的纯函数，序列化函数源码即可，
+ * 不需要打包器（这个项目全站零依赖、没有构建步骤）。
+ */
+const ANCHOR_RUNTIME = [
+  'var A = (function () {',
+  `var CONTEXT_LENGTH = ${anchors.CONTEXT_LENGTH}`,
+  `var OFFSET_TOLERANCE = ${anchors.OFFSET_TOLERANCE}`,
+  'const str = value => String(value == null ? \'\' : value)',
+  String(anchors.annotationId),
+  String(anchors.anchorFromSelection),
+  String(anchors.normalizeAnchor),
+  String(anchors.collectText),
+  String(anchors.piecesForRange),
+  String(anchors.findAnchor),
+  'return { annotationId: annotationId, anchorFromSelection: anchorFromSelection, normalizeAnchor: normalizeAnchor, collectText: collectText, piecesForRange: piecesForRange, findAnchor: findAnchor }',
+  '})();'
+].join('\n')
+
 export const READER_ICONS = {
+  // 批注的导出/导入：一个"带箭头的框"，方向区分出/入
+  annotExport: '<path d="M12 3v10M8.5 9.5L12 13l3.5-3.5"/><path d="M4 15v3.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V15"/>',
+  annotImport: '<path d="M12 13V3M8.5 6.5L12 3l3.5 3.5"/><path d="M4 15v3.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V15"/>',
   sun: '<circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M4.6 4.6l1.6 1.6M17.8 17.8l1.6 1.6M2.5 12h2.2M19.3 12h2.2M4.6 19.4l1.6-1.6M17.8 6.2l1.6-1.6"/>',
   moon: '<path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"/>',
   font: '<path d="M5 19l5.5-14h1L17 19M7.6 14h7"/><path d="M3 5h4M17 5h4"/>',
@@ -115,6 +141,10 @@ export function toolBar(record = {}) {
     `<button type="button" data-tool="print" title="打印 / 存为 PDF" aria-label="打印或存为 PDF">${svgIcon('printer')}</button>`,
     `<button type="button" data-tool="copy" title="复制 Markdown" aria-label="复制 Markdown">${svgIcon('copy')}</button>`,
     `<button type="button" data-tool="focus" title="专注模式" aria-label="专注模式">${svgIcon('focus')}</button>`,
+    // 批注只存在这台浏览器里（没有服务端）：换设备、清缓存前导出一份带走。
+    // 导入按 id 合并，不会重复。
+    `<button type="button" data-tool="annot-export" title="导出划词批注（JSON）" aria-label="导出划词批注">${svgIcon('annotExport')}</button>`,
+    `<button type="button" data-tool="annot-import" title="导入划词批注（JSON）" aria-label="导入划词批注">${svgIcon('annotImport')}</button>`,
     // 日/夜各一个图标，用当前主题决定显示哪个（CSS 切，不在 JS 里换 innerHTML）
     `<button type="button" data-tool="theme" id="toolTheme" title="深浅色" aria-label="深浅色">` +
       `<span class="icon-sun">${svgIcon('sun')}</span><span class="icon-moon">${svgIcon('moon')}</span></button>`,
@@ -220,7 +250,7 @@ function escapeAttr(value) {
  * 全部原生 JS，没有依赖——站点没有构建步骤，这段就是它全部的交互。
  */
 // 深浅 / 底色 / 字号不在这里再写一遍：与顶栏的阅读设置下拉共用 PREF_CORE（见上）
-export const READER_SCRIPT = '<script>' + String.raw`
+export const READER_SCRIPT = '<script>' + ANCHOR_RUNTIME + String.raw`
 (function () {
   var reading = document.getElementById('reading')
   var tools = document.getElementById('tools')
@@ -276,6 +306,13 @@ export const READER_SCRIPT = '<script>' + String.raw`
           if (navigator.clipboard) navigator.clipboard.writeText(document.querySelector('article').innerText)
           done()
         }
+        return
+      }
+      if (tool === 'annot-export' || tool === 'annot-import') {
+        var api = window.__courseAnnots
+        if (!api) return
+        if (tool === 'annot-export') api.exportAll()
+        else api.importAll()
         return
       }
       if (tool === 'paper' || tool === 'font') {
@@ -405,32 +442,117 @@ export const READER_SCRIPT = '<script>' + String.raw`
   var selbar = document.getElementById('selbar')
   var marks = []
   try { marks = JSON.parse(store.get(ANNOT_KEY, '[]')) || [] } catch (e) { marks = [] }
+  // 批注锚定的全部算术都在 anchors.mjs 里（单测覆盖），这里只是把它接上 DOM。
+  // 页面第一次拿到正文的版本号：正文重发之后值会变，用来在导出里说明"这条批注是对哪一版写的"。
+  var REVISION = (document.querySelector('meta[name="course-revision"]') || {}).content || ''
+  var unresolved = []
 
   function saveMarks () { store.set(ANNOT_KEY, JSON.stringify(marks)) }
 
-  /** 用"文本 + 前后文"定位：笔记将来重新生成、文字略有变动时也能大概率找回。 */
-  function anchorOf (range) {
-    var article = document.querySelector('article')
-    var full = article.innerText
-    var text = range.toString()
-    var index = full.indexOf(text)
-    return {
-      text: text,
-      before: index > 0 ? full.slice(Math.max(0, index - 24), index) : '',
-      after: index >= 0 ? full.slice(index + text.length, index + text.length + 24) : ''
+  /**
+   * 参与定位的文本节点：正文里除去链接/代码/脚本，以及**已经被批注包住**的片段
+   * （不排除的话，第二次批注会把上一层的文本也数进去，区间整体偏移）。
+   */
+  function anchorNodes (root) {
+    var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null)
+    var nodes = []
+    while (walker.nextNode()) {
+      var node = walker.currentNode
+      var parent = node.parentElement
+      if (!parent) continue
+      if (['A', 'CODE', 'SCRIPT', 'STYLE'].indexOf(parent.tagName) >= 0) continue
+      if (parent.closest && parent.closest('.annot')) continue
+      nodes.push(node)
     }
+    return nodes
+  }
+
+  /** 选区所在的小节根：往上找第一个带 id 的祖先（目录锚点），找不到就用整篇。 */
+  function sectionRootOf (node) {
+    var element = node && node.nodeType === 3 ? node.parentElement : node
+    while (element && element !== document.body) {
+      // 只认**正文小节**的 id：目录/侧栏里的 a 也带 id（那正是锚点跳到的地方），
+      // 认了它就会把批注锚到"目录那一条"上——正文改版、目录重排之后就再也找不回来。
+      var inChrome = element.closest && element.closest('nav, .rail, .toc, #tools, #selbar')
+      if (element.id && element.tagName !== 'ARTICLE' && element.tagName !== 'A' && !inChrome) return element
+      element = element.parentElement
+    }
+    return document.querySelector('article')
+  }
+
+  /** (container, offset) → 该小节文本里的绝对偏移。 */
+  function offsetIn (nodes, container, offset) {
+    var total = 0
+    for (var i = 0; i < nodes.length; i += 1) {
+      var node = nodes[i]
+      if (node === container) return total + offset
+      total += (node.nodeValue || '').length
+    }
+    // container 是元素节点时的兜底：取区间起点之前所有节点的长度
+    return total
+  }
+
+  /** 造锚点：这是"下次能不能贴回原处"的全部依据。 */
+  function anchorOf (range) {
+    var root = sectionRootOf(range.startContainer)
+    var nodes = anchorNodes(root || document.querySelector('article'))
+    var collected = A.collectText(nodes.map(function (node) { return node.nodeValue || '' }))
+    var start = offsetIn(nodes, range.startContainer, range.startOffset)
+    var end = offsetIn(nodes, range.endContainer, range.endOffset)
+    if (range.startContainer !== range.endContainer && start >= end) {
+      // 跨节点选区：用 range.toString() 的长度兜底，至少别存成空区间
+      end = start + range.toString().length
+    }
+    return A.anchorFromSelection({
+      text: range.toString(),
+      prefix: collected.text.slice(Math.max(0, start - 32), start),
+      suffix: collected.text.slice(end, end + 32),
+      sectionId: root && root.id ? root.id : '',
+      start: start,
+      end: end,
+      kind: 'mark',
+      revision: REVISION
+    })
   }
 
   var KINDS = { underline: 'underline', mark: 'mark', bold: 'bold' }
 
-  function wrapRange (range, kind, animate) {
-    var span = document.createElement('span')
-    span.className = 'annot annot-' + (KINDS[kind] || 'underline') + (animate ? ' animate' : '')
-    try { range.surroundContents(span) } catch (e) {
-      // 跨元素的选择没法整段包起来：退化成"只标记首段"，总比丢掉强
-      try { range.collapse(true); return null } catch (e2) { return null }
+  /**
+   * 把一段区间包上批注。
+   *
+   * 跨行内元素的选择（一句话里夹着 strong 或链接）没法整段 surroundContents，
+   * 旧实现直接放弃（collapse 一下什么都不标）。现在按文本节点切成若干片段，每段各包一个
+   * span，全部带同一个 data-annot-id 属性——一条批注可以由多个片段组成，
+   * 删除时按 id 一起删（不再靠"文字包含"猜）。
+   */
+  function wrapRange (range, kind, id, animate) {
+    var root = sectionRootOf(range.startContainer) || document.querySelector('article')
+    var nodes = anchorNodes(root)
+    var collected = A.collectText(nodes.map(function (node) { return node.nodeValue || '' }))
+    var start = offsetIn(nodes, range.startContainer, range.startOffset)
+    var end = offsetIn(nodes, range.endContainer, range.endOffset)
+    if (end <= start) end = start + range.toString().length
+    var pieces = A.piecesForRange(collected.index, start, end)
+    if (!pieces.length) {
+      var single = document.createElement('span')
+      single.className = 'annot annot-' + (KINDS[kind] || 'underline')
+      single.setAttribute('data-annot-id', id)
+      try { range.surroundContents(single); return single } catch (error) { return null }
     }
-    return span
+    var first = null
+    // 从后往前包：替换节点会让后面片段的偏移失效
+    pieces.slice().reverse().forEach(function (piece) {
+      var node = nodes[piece.nodeIndex]
+      if (!node || piece.end <= piece.start) return
+      var target = document.createRange()
+      target.setStart(node, piece.start)
+      target.setEnd(node, piece.end)
+      var span = document.createElement('span')
+      span.className = 'annot annot-' + (KINDS[kind] || 'underline') + (animate ? ' animate' : '')
+      span.setAttribute('data-annot-id', id)
+      try { target.surroundContents(span); first = span } catch (error) {}
+    })
+    return first
   }
 
   /**
@@ -471,19 +593,22 @@ export const READER_SCRIPT = '<script>' + String.raw`
     // 同一个按钮再按一次 = 取消：把包着的 span 拆掉，并从本地记录里删掉
     var existing = annotsInRange(range, kind)
     if (existing.length) {
-      var removed = ''
+      var removedIds = []
       existing.forEach(function (element) {
-        removed += element.textContent || ''
+        var id = element.getAttribute && element.getAttribute('data-annot-id')
+        if (id && removedIds.indexOf(id) < 0) removedIds.push(id)
         var parent = element.parentNode
         if (!parent) return
         while (element.firstChild) parent.insertBefore(element.firstChild, element)
         parent.removeChild(element)
         parent.normalize()
       })
+      // 按 id 删。旧实现按"文字包含"删：同一句话有两处批注时会一次删掉两条，
+      // 而且删的可能是别处那条——读者看到的是"取消一条，另一条也没了"。
       marks = marks.filter(function (mark) {
         if (mark.kind !== kind) return true
-        var anchorText = (mark.anchor && mark.anchor.text) || ''
-        return !(anchorText && removed.indexOf(anchorText) >= 0)
+        if (!mark.id) return true
+        return removedIds.indexOf(mark.id) < 0
       })
       saveMarks()
       selection.removeAllRanges()
@@ -492,7 +617,8 @@ export const READER_SCRIPT = '<script>' + String.raw`
     }
 
     var anchor = anchorOf(range)
-    var span = wrapRange(range, kind, true)
+    anchor.kind = kind
+    var span = wrapRange(range, kind, anchor.id, true)
     selection.removeAllRanges()
     if (!span) return
     marks.push({ kind: kind, anchor: anchor })
@@ -500,29 +626,141 @@ export const READER_SCRIPT = '<script>' + String.raw`
     hideSelbar()
   }
 
+  /**
+   * 按锚点把批注贴回正文。
+   *
+   * 四级定位（上下文 → 唯一出现 → 记录位置 → 空白归一）都在 anchors.mjs 里，这里只做
+   * "文本区间 → DOM 节点片段"的映射。两条铁律：
+   *   · 用了回退策略就标出来（data-reanchored + tooltip），读者知道这条批注的位置是猜的；
+   *   · **找不到就保留记录**，只在工具栏上提示有几条没贴回来——批注是读者自己写的东西，
+   *     不该因为一次正文改版被悄悄删掉。
+   */
   function restore () {
     if (!marks.length) return
     var article = document.querySelector('article')
     if (!article) return
+    var dirty = false
     marks.forEach(function (mark) {
-      var needle = (mark.anchor && mark.anchor.text) || ''
-      if (!needle) return
-      var walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT, null)
-      while (walker.nextNode()) {
-        var node = walker.currentNode
-        var value = node.nodeValue || ''
-        var at = value.indexOf(needle)
-        if (at < 0) continue
-        if (node.parentElement && node.parentElement.classList.contains('annot')) break
-        var range = document.createRange()
-        range.setStart(node, at)
-        range.setEnd(node, at + needle.length)
-        wrapRange(range, mark.kind, false)
-        break
+      if (!mark.id) { mark.id = A.annotationId(); mark.kind = mark.kind || 'mark'; dirty = true }
+      var anchor = A.normalizeAnchor(mark.anchor || {})
+      var root = (anchor.sectionId && document.getElementById(anchor.sectionId)) || article
+      var nodes = anchorNodes(root)
+      var collected = A.collectText(nodes.map(function (node) { return node.nodeValue || '' }))
+      var found = A.findAnchor(collected.text, anchor)
+      if (!found) {
+        if (unresolved.indexOf(mark.id) < 0) unresolved.push(mark.id)
+        mark.unresolved = true
+        dirty = true
+        return
       }
+      mark.unresolved = false
+      mark.reanchored = found.reanchored === true
+      var pieces = A.piecesForRange(collected.index, found.start, found.end)
+      pieces.slice().reverse().forEach(function (piece) {
+        var node = nodes[piece.nodeIndex]
+        if (!node || piece.end <= piece.start) return
+        var target = document.createRange()
+        target.setStart(node, piece.start)
+        target.setEnd(node, piece.end)
+        var span = document.createElement('span')
+        span.className = 'annot annot-' + (KINDS[mark.kind] || 'underline')
+        span.setAttribute('data-annot-id', mark.id)
+        if (found.reanchored) {
+          span.setAttribute('data-reanchored', '1')
+          span.title = '正文改过，这条批注按上下文重新定位'
+        }
+        try { target.surroundContents(span) } catch (error) {}
+      })
     })
+    if (dirty) saveMarks()
+    if (unresolved.length && tools) {
+      var note = document.createElement('span')
+      note.className = 'annot-note'
+      note.setAttribute('role', 'status')
+      note.textContent = unresolved.length + ' 条批注没能在这一版正文里定位（记录已保留）'
+      tools.appendChild(note)
+    }
   }
   restore()
+
+  /**
+   * 导出 / 导入批注。
+   *
+   * 批注只存在这台浏览器的 localStorage 里（**不上传**：这是读者自己的批注，服务端没有
+   * 也不该有）。换设备或清缓存之前可以导出一份 JSON 带走；导入按 id 合并，重复导入不会翻倍。
+   */
+  window.__courseAnnots = {
+    // 排障用：把每条批注的锚点原样吐出来（哪一节、什么区间、有没有 reanchored/未定位）
+    debug: function () {
+      return marks.map(function (mark) {
+        return {
+          id: mark.id,
+          kind: mark.kind,
+          text: (mark.anchor && mark.anchor.text) || '',
+          sectionId: (mark.anchor && mark.anchor.sectionId) || '',
+          start: mark.anchor && mark.anchor.start,
+          end: mark.anchor && mark.anchor.end,
+          prefix: (mark.anchor && mark.anchor.prefix) || '',
+          suffix: (mark.anchor && mark.anchor.suffix) || '',
+          reanchored: mark.reanchored === true,
+          unresolved: mark.unresolved === true
+        }
+      })
+    },
+    exportAll: function () {
+      var payload = {
+        kind: 'course-annotations',
+        version: 1,
+        page: location.pathname,
+        revision: REVISION,
+        exportedAt: new Date().toISOString(),
+        unresolved: unresolved.length,
+        marks: marks
+      }
+      var blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+      var url = URL.createObjectURL(blob)
+      var link = document.createElement('a')
+      link.href = url
+      link.download = 'course-annotations' + location.pathname.replace(/[^\w]+/g, '-').replace(/^-|-$/g, '') + '.json'
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      setTimeout(function () { URL.revokeObjectURL(url) }, 1000)
+    },
+    importAll: function () {
+      var input = document.createElement('input')
+      input.type = 'file'
+      input.accept = 'application/json,.json'
+      input.addEventListener('change', function () {
+        var file = input.files && input.files[0]
+        if (!file) return
+        var reader = new FileReader()
+        reader.onload = function () {
+          var payload = null
+          try { payload = JSON.parse(String(reader.result || '')) } catch (error) { payload = null }
+          var incoming = payload && Array.isArray(payload.marks) ? payload.marks : null
+          if (!incoming) { window.alert('这个文件里没有可导入的批注（期望 course-annotations 的 JSON）'); return }
+          var known = {}
+          marks.forEach(function (mark) { known[mark.id] = true })
+          var added = 0
+          incoming.forEach(function (mark) {
+            if (!mark || !mark.anchor) return
+            var id = mark.id || A.annotationId()
+            if (known[id]) return
+            known[id] = true
+            marks.push({ id: id, kind: mark.kind || 'mark', anchor: mark.anchor })
+            added += 1
+          })
+          saveMarks()
+          // 重新贴一遍：新导入的批注只有立即显示出来，读者才知道导入成功了几条
+          location.reload()
+          void added
+        }
+        reader.readAsText(file)
+      })
+      input.click()
+    }
+  }
 
   function hideSelbar () { if (selbar) selbar.classList.remove('show') }
   function showSelbar (rect) {

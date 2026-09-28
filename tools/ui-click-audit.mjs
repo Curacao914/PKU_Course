@@ -1093,6 +1093,178 @@ async function auditNotePage(page, site, noteUrl, failures) {
   await record('批注存在浏览器里', annotStore.count >= 3 && annotStore.kinds.length >= 3,
     'localStorage 里 ' + annotStore.count + ' 条，类型：' + annotStore.kinds.join('/'))
 
+  /**
+   * A5：锚点必须指回**原来那一处**。
+   *
+   * 旧实现恢复时在整篇里 indexOf(文字)，同一个词出现两次时第二次的批注会被贴到第一处——
+   * 这一步专门用浏览器里真实存在的重复短语来验：给第二处加高亮，刷新后它必须还在第二处。
+   */
+  // 只扫**正文**：目录/侧栏/工具条里的文字也带 id、也会重复，混进来会让"选第几处"
+  // 指向导航而不是笔记（第一次跑就踩到了：批注被正确地锚在目录那一条上）。
+  const pickRepeated = () => page.evaluate(() => {
+    const article = document.querySelector('article')
+    const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT, null)
+    const texts = []
+    while (walker.nextNode()) {
+      const parent = walker.currentNode.parentElement
+      if (!parent || ['A', 'CODE', 'SCRIPT', 'STYLE'].includes(parent.tagName)) continue
+      if (parent.closest('.annot, nav, .rail, .toc, #tools, #selbar')) continue
+      texts.push(walker.currentNode.nodeValue || '')
+    }
+    for (let size = 8; size >= 4; size -= 1) {
+      const seen = new Map()
+      for (let n = 0; n < texts.length; n += 1) {
+        const value = texts[n]
+        for (let i = 0; i + size <= value.length; i += 1) {
+          const chunk = value.slice(i, i + size)
+          if (/^[\d\s、。，；：]+$/.test(chunk)) continue
+          if (seen.has(chunk)) return { needle: chunk, occurrences: 2 }
+          seen.set(chunk, n)
+        }
+      }
+    }
+    return null
+  })
+
+  const selectNth = (needle, nth) => page.evaluate(({ needle, nth }) => {
+    const article = document.querySelector('article')
+    const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT, null)
+    const hits = []
+    while (walker.nextNode()) {
+      const node = walker.currentNode
+      const parent = node.parentElement
+      if (!parent || ['A', 'CODE', 'SCRIPT', 'STYLE'].includes(parent.tagName)) continue
+      if (parent.closest('.annot, nav, .rail, .toc, #tools, #selbar')) continue
+      const value = node.nodeValue || ''
+      let from = 0
+      while (true) {
+        const at = value.indexOf(needle, from)
+        if (at < 0) break
+        hits.push({ node, at })
+        from = at + 1
+      }
+    }
+    const hit = hits[nth]
+    if (!hit) return { found: false, total: hits.length }
+    const range = document.createRange()
+    range.setStart(hit.node, hit.at)
+    range.setEnd(hit.node, hit.at + needle.length)
+    // 记下"这一处的上下文"：恢复之后用同样的上下文比对，比对比字符偏移稳得多
+    // （读者的定位根可能是小节元素，审计扫的是整篇，两套偏移本来就不同）
+    const before = document.createRange()
+    before.selectNodeContents(article)
+    before.setEnd(hit.node, hit.at)
+    const after = document.createRange()
+    after.selectNodeContents(article)
+    after.setStart(hit.node, hit.at + needle.length)
+    const selection = window.getSelection()
+    selection.removeAllRanges()
+    selection.addRange(range)
+    hit.node.parentElement.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
+    return {
+      found: true,
+      total: hits.length,
+      before: before.toString().slice(-24),
+      after: after.toString().slice(0, 24)
+    }
+  }, { needle, nth })
+
+  /** 正文纯文本里，某段文字的第 n 次出现位置（用来判断批注贴在了哪一处）。 */
+  const occurrenceOffsets = needle => page.evaluate((needle) => {
+    const article = document.querySelector('article')
+    const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT, null)
+    let text = ''
+    const spans = []
+    while (walker.nextNode()) {
+      const node = walker.currentNode
+      const parent = node.parentElement
+      if (!parent || ['A', 'CODE', 'SCRIPT', 'STYLE'].includes(parent.tagName)) continue
+      if (parent.closest('.annot, nav, .rail, .toc, #tools, #selbar') && !parent.closest('.annot')) continue
+      spans.push({ start: text.length, node })
+      text += node.nodeValue || ''
+    }
+    const offsets = []
+    let from = 0
+    while (true) {
+      const at = text.indexOf(needle, from)
+      if (at < 0) break
+      offsets.push(at)
+      from = at + 1
+    }
+    // 被批注包住的片段：它在正文纯文本里的起点
+    const annotated = [...article.querySelectorAll('.annot')].map(span => {
+      const before = document.createRange()
+      before.selectNodeContents(article)
+      before.setEnd(span, 0)
+      return { id: span.getAttribute('data-annot-id'), text: span.textContent || '', offset: before.toString().length }
+    })
+    return { offsets, annotated }
+  }, needle)
+
+  const repeated = await pickRepeated()
+  if (!repeated) {
+    await record('批注锚点：正文里有可测的重复短语', false, '这份夹具里找不到出现两次的短语，A5 无法在浏览器里验收')
+  } else {
+    const second = await selectNth(repeated.needle, 1)
+    await record('能在正文里选中重复短语的第二处', second.found && second.total >= 2,
+      second.found ? `共找到 ${second.total} 处` : '没选中（夹具或选择器有问题）')
+    await page.keyboard.press('Meta+h')
+    await page.waitForTimeout(200)
+    await page.reload({ waitUntil: 'networkidle' })
+    await page.waitForTimeout(300)
+    const after = await occurrenceOffsets(repeated.needle)
+    const target = after.offsets[1]
+    const first = after.offsets[0]
+    const ours = after.annotated.filter(item => item.text === repeated.needle)
+    const best = ours
+      .map(item => ({ ...item, distance: Math.abs(item.offset - target), toFirst: Math.abs(item.offset - first) }))
+      .sort((left, right) => left.distance - right.distance)[0]
+    const anchors = await page.evaluate(needle => window.__courseAnnots
+      ? window.__courseAnnots.debug().filter(item => item.text === needle)
+      : [], repeated.needle)
+    void first; void target; void best
+    // 恢复后的批注（文字等于目标短语的那几个 span）各自的上下文
+    const restored = await page.evaluate(needle => {
+      const article = document.querySelector('article')
+      return [...article.querySelectorAll('.annot')]
+        .filter(span => (span.textContent || '') === needle)
+        .map(span => {
+          const before = document.createRange()
+          before.selectNodeContents(article)
+          before.setEnd(span, 0)
+          const after = document.createRange()
+          after.selectNodeContents(article)
+          after.setStart(span, span.childNodes.length)
+          return { before: before.toString().slice(-24), after: after.toString().slice(0, 24) }
+        })
+    }, repeated.needle)
+    const matched = restored.find(item => item.before === second.before && item.after === second.after)
+    await record('批注贴回原来那一处（同一个短语出现多次）',
+      Boolean(matched),
+      matched
+        ? `上下文对上了：…${matched.before}「${repeated.needle}」${matched.after}…`
+        : `选中的是 …${second.before}「${repeated.needle}」${second.after}…，恢复后有 ${restored.length} 条同文本批注但上下文都不是它｜锚点：${JSON.stringify(anchors)}`)
+
+    // 同文本的两条批注：删掉其中一条，另一条必须还在（按 id 删，不按文字删）
+    const firstSelect = await selectNth(repeated.needle, 0)
+    await page.keyboard.press('Meta+h')
+    await page.waitForTimeout(200)
+    const beforeDelete = await page.$$eval('article .annot-mark', nodes => nodes.length)
+    await selectNth(repeated.needle, 0)
+    await page.keyboard.press('Meta+h')
+    await page.waitForTimeout(200)
+    await page.reload({ waitUntil: 'networkidle' })
+    await page.waitForTimeout(300)
+    const afterDelete = await occurrenceOffsets(repeated.needle)
+    await record('同一句话的两条批注：取消一条不会连带删掉另一条',
+      firstSelect.found && beforeDelete >= 2 && afterDelete.annotated.length >= 1,
+      `取消前 ${beforeDelete} 条，取消并刷新后剩 ${afterDelete.annotated.length} 条`)
+  }
+
+  // 导出/导入入口在工具栏上（批注只存本地，换设备前要能带走）
+  const annotTools = await page.$$eval('#tools button[data-tool^="annot-"]', nodes => nodes.map(node => node.dataset.tool))
+  await record('工具栏有批注导出/导入入口', annotTools.length === 2, '按钮：' + annotTools.join(' / '))
+
   // 目录：点一条要跳到对应小节，且当前小节会被高亮
   await page.evaluate(() => window.scrollTo(0, 0))
   await page.waitForTimeout(300)
