@@ -57,7 +57,9 @@ export const TOOL_DEFINITIONS = [
         course: { type: 'string', minLength: 1, description: '课程名，如"国际法学"；可用部分名称，歧义时会返回候选' },
         limit: { type: 'integer', minimum: 1, maximum: 500, default: 100, description: '最多返回多少节，默认 100' },
         order: { type: 'string', enum: ['asc', 'desc'], default: 'asc', description: '按发布时间排序，asc=从早到晚（默认），desc=最近优先' },
-        includeOutline: { type: 'boolean', default: false, description: '是否带上每节的小节标题（便于之后按 section 取正文）' }
+        includeOutline: { type: 'boolean', default: false, description: '是否带上每节的小节标题（便于之后按 section 取正文）' },
+        outlineLimit: { type: 'integer', minimum: 1, maximum: 500, default: 60, description: 'includeOutline 时每节最多列几项；**不会静默截断**：返回里带 total/truncated，还有就用 outlineOffset 接着翻' },
+        outlineOffset: { type: 'integer', minimum: 0, default: 0, description: '小节清单的起始下标，配合 outlineLimit 翻页' }
       },
       required: ['course']
     },
@@ -74,14 +76,19 @@ export const TOOL_DEFINITIONS = [
       '查询可以是术语，也可以是**一整句话**或几个词（"交易成本 资产专用性""为什么企业会存在"）——' +
       '会先去掉疑问词与虚词再切词，命中按"词有多稀有"加权，专名比泛词更管用；' +
       '一个词写错（主义↔主意）时会在语料里找近似词并在结果里说明。' +
-      '默认只查索引（快、省 token）；索引一条都没命中时会自动再扫一遍正文，并在结果里标出 bodyScanned。',
+      '默认覆盖策略（coverage=auto）：先查索引（快、省 token），本地发布库的正文会顺带用上；' +
+      '一条都没命中时才下沉去读正文，并在结果里标出 escalated。coverage=index 只查索引、零下载；' +
+      'coverage=body（等价于 includeBody=true）一开始就在正文里找。' +
+      '命中会给出所在小节（location.id 就是页面锚点），一节课命中多处时按分数列出前几处。',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
       properties: {
         query: { type: 'string', minLength: 1, description: '检索词或一句话（可分多次给词，如"交易成本 资产专用性"；疑问词与"的/和"这类虚词会被自动去掉）' },
         course: { type: 'string', description: '可选：只在这一门课里检索' },
-        includeBody: { type: 'boolean', default: false, description: '是否连正文一起检索；远程数据源会逐篇下载 Markdown，本地发布库免费' },
+        includeBody: { type: 'boolean', description: '是否连正文一起检索（等价于 coverage=body）；不填就是 auto' },
+        coverage: { type: 'string', enum: ['auto', 'index', 'body'], description: '覆盖策略：auto=索引优先、必要时下沉正文（默认）；index=只查索引（远程数据源零下载）；body=连正文一起查' },
+        perNoteSections: { type: 'integer', minimum: 1, maximum: 5, default: 2, description: '一节课最多报几处小节命中，默认 2' },
         limit: { type: 'integer', minimum: 1, maximum: 50, default: 8, description: '最多返回多少条命中，默认 8' }
       },
       required: ['query']
@@ -104,7 +111,9 @@ export const TOOL_DEFINITIONS = [
         course: { type: 'string', description: '课程名；与 lesson 一起使用时可以替代 slug' },
         lesson: { type: 'string', description: '课次标题，如"第一课 国家责任的构成"' },
         section: { type: 'string', description: '可选：只取某一节（按小节标题或标题 id 匹配）' },
-        maxChars: { type: 'integer', minimum: 200, maximum: 60000, description: '返回正文的字符上限，默认 12000' }
+        maxChars: { type: 'integer', minimum: 200, maximum: 60000, description: '返回正文的字符上限，默认 12000' },
+        sectionsLimit: { type: 'integer', minimum: 1, maximum: 1000, default: 200, description: '返回正文时附带的小节清单最多几项（不会静默截断：带 sectionsTotal/sectionsTruncated）' },
+        sectionsOffset: { type: 'integer', minimum: 0, default: 0, description: '小节清单的起始下标，配合 sectionsLimit 翻页' }
       }
     },
     run: (service, args, context) => service.getNote(args, context).then(renderNote)

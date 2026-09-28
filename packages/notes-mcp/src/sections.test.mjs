@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import { extractHeadings, findSection, fingerprintOf, normalizeRecord, sectionIndex, splitSections } from './records.mjs'
 import { dedupeSnippets, searchRecords } from './search.mjs'
+import { createProtocolServer } from './protocol.mjs'
 import { createNotesService } from './service.mjs'
 
 /**
@@ -184,4 +185,16 @@ test('目录分页：全部小节都给，截断了要说清，offset 能接着�
   assert.equal(note.sections.length, 2)
   assert.equal(note.sectionsTruncated, true)
   assert.ok(note.sectionsTotal > 2)
+
+  // 工具层必须真的接受这些参数：服务层支持、inputSchema 却写着 additionalProperties:false
+  // 的话，模型传 outlineLimit 只会拿到"参数 不接受未知字段"——线上冒烟就是这么发现的。
+  const protocol = createProtocolServer({ service, logger: () => {} })
+  const call = (name, args) => protocol.handleMessage({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } })
+  const outlineCall = await call('get_course', { course: '测试', includeOutline: true, outlineLimit: 3 })
+  assert.equal(outlineCall.result.isError, false, outlineCall.result.content?.[0]?.text)
+  assert.match(outlineCall.result.content[0].text, /小节（3\/\d+）/)
+  const search = await call('search_notes', { query: '第1节', coverage: 'index', perNoteSections: 1 })
+  assert.equal(search.result.isError, false, search.result.content?.[0]?.text)
+  const sections = await call('get_note', { slug: 'notes/测试/第1讲', sectionsLimit: 1 })
+  assert.equal(sections.result.isError, false, sections.result.content?.[0]?.text)
 })
