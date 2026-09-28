@@ -201,7 +201,9 @@ export function createRequestHandler({
         apiKey: semanticKey,
         model: String(process.env.COURSE_EMBED_MODEL || 'text-embedding-v3'),
         timeoutMs: Number(process.env.COURSE_EMBED_TIMEOUT_MS || 1000),
-        minScore: Number(process.env.COURSE_EMBED_MIN_SCORE || 0.55)
+        minScore: Number(process.env.COURSE_EMBED_MIN_SCORE || 0.55),
+        // 第一次失败就写一行日志：线上排"回退为什么没生效"只能靠它（不然只能看到 used:false）
+        onFailure: reason => process.stderr.write(`[site] 语义回退失败：${reason}\n`)
       })
       process.stderr.write(`[site] 语义回退：${semantic.enabled ? '已启用' : '未启用（没配 COURSE_EMBED_API_KEY）'}；索引 ${semanticIndex}\n`)
       notesService = createNotesService({

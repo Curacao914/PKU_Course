@@ -307,16 +307,36 @@ function sectionTitleOf (record, sectionId) {
  * 把"索引 + 查询向量化 + 门槛"打包成检索层用的一个对象。
  * enabled=false 时 search() 直接返回空数组——调用方不必到处写 if。
  */
-export function createSemanticFallback ({ indexFile = '', apiKey = '', model = 'text-embedding-v3', timeoutMs = 1000, minScore = 0.55, limit = 5, fetchImpl } = {}) {
+export function createSemanticFallback ({
+  indexFile = '',
+  apiKey = '',
+  model = 'text-embedding-v3',
+  timeoutMs = 1000,
+  minScore = 0.55,
+  limit = 5,
+  fetchImpl,
+  /** 失败时的回调（每进程只报第一次）：线上排"为什么回退没生效"全靠它。 */
+  onFailure = () => {}
+} = {}) {
   const embedder = createQueryEmbedder({ apiKey, model, timeoutMs, ...(fetchImpl ? { fetchImpl } : {}) })
+  let reported = false
+  const report = reason => {
+    if (reported) return
+    reported = true
+    onFailure(reason)
+  }
   return {
     get enabled () { return embedder.enabled },
     stats: () => embedder.stats(),
     async search ({ query, records = [], snippetOf = null, limit: asked } = {}) {
       const loaded = loadEmbeddingIndex(indexFile)
-      if (!loaded.index) return []
+      if (!loaded.index) { report(`索引不可用（${loaded.reason}）：${indexFile}`); return [] }
       const vector = await embedder.embed(query)
-      if (!vector) return []
+      if (!vector) {
+        const stats = embedder.stats()
+        report(`查询向量化失败：${stats.lastError || '未知'}（调用 ${stats.calls} 次，失败 ${stats.failures} 次）`)
+        return []
+      }
       return semanticHits({ index: loaded.index, queryVector: vector, records, limit: asked || limit, minScore, snippetOf })
     }
   }
