@@ -784,6 +784,17 @@ export function createAdminHandler({
       // 正在运行的状态要暴露出来：否则用户点完按钮看不到反馈，
       // 又在别处点一次会撞上 409 却不明白为什么
       running: running ? { action: running.action, startedAt: running.startedAt } : null,
+      // 最近任务：**进程内**快照（最多 JOB_KEEP 条），服务重启就没了。页面上必须这么说，
+      // 不能让人以为这是完整的任务历史——已确认的阶段在账本里（每条课次的 stage）。
+      recentJobs: [...jobs.values()].slice(-8).reverse().map(job => ({
+        id: job.id,
+        action: job.action,
+        status: job.status,
+        startedAt: job.startedAt,
+        finishedAt: job.finishedAt || null,
+        exitCode: job.exitCode === null || job.exitCode === undefined ? null : job.exitCode,
+        error: job.error || ''
+      })),
       ledger: null,
       site: null,
       runs: []

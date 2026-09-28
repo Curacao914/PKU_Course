@@ -136,7 +136,12 @@ function buildFixture() {
   const noteFile = path.join(siteRoot, record.slug + '.html')
   fs.mkdirSync(path.dirname(noteFile), { recursive: true })
   fs.writeFileSync(noteFile, renderNotePage(record, { siteOrigin: '' }))
-  fs.writeFileSync(path.join(siteRoot, 'search.html'), renderSearchPage({ siteOrigin: '' }))
+  // 搜索页与真实建站一致：课程筛选在建站时算好（这一份夹具里只有上面那一篇笔记）。
+  // 目录形式（/search/）也要写：页面的查询是写进地址栏的，返回时按 /search/?q=… 回到这一页。
+  const searchHtml = renderSearchPage({ siteOrigin: '', courses: [{ name: record.courseName, count: 1 }] })
+  fs.writeFileSync(path.join(siteRoot, 'search.html'), searchHtml)
+  fs.mkdirSync(path.join(siteRoot, 'search'), { recursive: true })
+  fs.writeFileSync(path.join(siteRoot, 'search/index.html'), searchHtml)
   fs.writeFileSync(path.join(siteRoot, 'index.html'), '<!doctype html><title>站点</title>')
   fs.writeFileSync(path.join(siteRoot, 'notes.json'), JSON.stringify({
     siteName: '课程笔记',
@@ -1333,6 +1338,54 @@ async function auditNotePage(page, site, noteUrl, failures) {
   await record('目录可跳转', hash.length > 1, '地址 ' + decodeURIComponent(hash))
   await record('目录高亮当前小节', Boolean(active), active ? '高亮：' + (await active.textContent()) : '没有任何一条被高亮')
 
+  /**
+   * U4：我的标记。
+   *
+   * 批注做完了还要能**找回来**：右侧那一列要给出摘录、所在小节、类型，点一下回到原处，
+   * 删一条不能连坐别的（按 id 删）。定位不到的那几条也要留在列表里（标"待重新定位"），
+   * 而不是从读者眼前消失。
+   */
+  await page.reload({ waitUntil: 'networkidle' })
+  await page.waitForTimeout(400)
+  const marksPanel = await page.evaluate(() => {
+    const panel = document.getElementById('railMarks')
+    const items = [...document.querySelectorAll('#marksList li')]
+    const first = items[0]
+    return {
+      visible: panel ? !panel.hidden : false,
+      count: items.length,
+      kind: first ? (first.querySelector('.mark-kind') || {}).textContent || '' : '',
+      excerpt: first ? (first.querySelector('.mark-excerpt') || {}).textContent || '' : '',
+      where: first ? (first.querySelector('.mark-where') || {}).textContent || '' : '',
+      stored: (() => { try { return JSON.parse(localStorage.getItem('course.annots:' + location.pathname) || '[]').length } catch (error) { return -1 } })(),
+      heading: (document.getElementById('marksCount') || {}).textContent || '',
+      note: (document.querySelector('.rail-marks-note') || {}).textContent || ''
+    }
+  })
+  await record('我的标记：列出现有的标记', marksPanel.visible && marksPanel.count >= 1,
+    marksPanel.count + ' 条（标题计数 ' + marksPanel.heading + '）｜类型「' + marksPanel.kind + '」｜小节「' + marksPanel.where + '」｜摘录「' + marksPanel.excerpt.slice(0, 24) + '」')
+  await record('我的标记：写清只存在这台浏览器', /只存在这台浏览器/.test(marksPanel.note), '说明「' + marksPanel.note + '」')
+
+  await page.click('#marksList .mark-jump')
+  await page.waitForTimeout(700)
+  const jumped = await page.evaluate(() => {
+    const node = document.querySelector('article .annot[data-annot-id]')
+    const rect = node ? node.getBoundingClientRect() : null
+    return { inView: rect ? rect.top > -20 && rect.top < window.innerHeight : false }
+  })
+  await record('我的标记：点一条回到原处', jumped.inView, jumped.inView ? '目标标记在视野内' : '点了没滚到那条标记')
+
+  const beforeDrop = marksPanel.count
+  await page.click('#marksList .mark-drop')
+  await page.waitForTimeout(400)
+  const afterDrop = await page.evaluate(() => ({
+    count: document.querySelectorAll('#marksList li').length,
+    stored: (() => { try { return JSON.parse(localStorage.getItem('course.annots:' + location.pathname) || '[]').length } catch (error) { return -1 } })()
+  }))
+  await record('我的标记：删一条不动其他',
+    afterDrop.count === beforeDrop - 1 && afterDrop.stored === afterDrop.count,
+    beforeDrop + ' → ' + afterDrop.count + ' 条（localStorage ' + afterDrop.stored + ' 条）')
+
   return results
 }
 
@@ -1354,14 +1407,37 @@ async function auditSearch(page, site, failures) {
   await record('按 / 聚焦搜索框', focused === 'q', '当前焦点 id=' + focused)
 
   await page.fill('#q', '执行措施')
-  await page.waitForSelector('#results a.card', { timeout: 5000 }).catch(() => {})
-  const hits = (await page.$$('#results a.card')).length
+  await page.waitForSelector('#results .card.group', { timeout: 5000 }).catch(() => {})
+  const shape = await page.evaluate(() => {
+    const cards = [...document.querySelectorAll('#results .card.group')]
+    const rows = [...document.querySelectorAll('#results .hit-list .hit a')]
+    const first = rows[0]
+    return {
+      cards: cards.length,
+      rows: rows.length,
+      lesson: cards[0] ? (cards[0].querySelector('h3') || {}).textContent || '' : '',
+      section: first ? (first.querySelector('h4') || {}).textContent || '' : '',
+      href: first ? first.getAttribute('href') : '',
+      badges: [...document.querySelectorAll('#results .hit-badge')].map(node => node.textContent.trim()),
+      semantic: document.querySelectorAll('#results .hit-badge.semantic').length,
+      rail: document.querySelectorAll('#search-rail button[data-course]').length,
+      url: location.pathname + location.search
+    }
+  })
   const hint = await page.textContent('#hint')
-  await record('输入即出结果（服务端检索）', hits >= 1, '命中 ' + hits + ' 篇，提示「' + hint + '」')
-
-  // 结果卡片要指到命中的那一节（带锚点），而不只是整篇
-  const firstHref = await page.getAttribute('#results a.card', 'href')
-  await record('结果落点带小节锚点', Boolean(firstHref && firstHref.includes('#')), '首个链接：' + firstHref)
+  await record('输入即出结果（服务端检索）', shape.cards >= 1,
+    '命中 ' + shape.cards + ' 节课 / ' + shape.rows + ' 处小节，提示「' + hint + '」')
+  // 审计指出过：卡主标题是课次、小节只在次行——读者要的是"这句话在哪一节"
+  await record('卡片主标题是命中的小节', Boolean(shape.section) && shape.section !== shape.lesson,
+    '课次「' + shape.lesson + '」→ 小节「' + shape.section + '」')
+  // 结果落点要指到命中的那一节（带锚点），而不只是整篇
+  await record('结果落点带小节锚点', Boolean(shape.href && shape.href.includes('#')), '首个链接：' + shape.href)
+  // 公开端没启用语义时不许出现"语义近似"标签（假装有语义结果比没有更糟）
+  await record('精确命中标出来、不假装有语义',
+    shape.badges.some(text => text.indexOf('精确命中') === 0) && shape.semantic === 0,
+    '标签：' + (shape.badges.join(' / ') || '（无）'))
+  await record('查询写进地址栏（返回时能还原）', /[?&]q=/.test(shape.url), '地址：' + shape.url)
+  await record('课程筛选来自建站数据', shape.rail >= 2, shape.rail + ' 个筛选项')
 
   await page.keyboard.press('Escape')
   await page.waitForTimeout(250)
@@ -1445,6 +1521,66 @@ async function auditSearch(page, site, failures) {
     `组字中发了 ${duringCompose} 次，组完发了 ${searchRequests} 次`)
   await page.unroute('**/api/search**')
 
+  // ── 课程筛选：点一下只看这门课，筛选也写进 URL ──
+  await page.goto(site.url + '/search.html', { waitUntil: 'domcontentloaded' })
+  await page.waitForTimeout(300)
+  const courseName = await page.evaluate(() => {
+    const button = [...document.querySelectorAll('#search-rail button[data-course]')].find(node => node.getAttribute('data-course'))
+    return button ? button.getAttribute('data-course') : ''
+  })
+  if (courseName) {
+    await page.fill('#q', '执行措施')
+    await page.waitForTimeout(500)
+    await page.click('#search-rail button[data-course="' + courseName + '"]')
+    await page.waitForTimeout(600)
+    const scoped = await page.evaluate(() => ({
+      url: location.search,
+      pressed: (document.querySelector('#search-rail button[aria-pressed="true"]') || {}).textContent || '',
+      courses: [...document.querySelectorAll('#results .card-meta span')].map(node => node.textContent),
+      cards: document.querySelectorAll('#results .card.group').length
+    }))
+    await record('课程筛选收窄结果并写进地址栏',
+      scoped.url.includes('course=') && scoped.cards >= 1,
+      '地址 ' + scoped.url + '，选中「' + scoped.pressed.trim() + '」，' + scoped.cards + ' 张卡')
+  } else {
+    await record('课程筛选收窄结果并写进地址栏', false, '页面里没有课程筛选项')
+  }
+
+  // ── 返回搜索：query、筛选、滚动位置都要还在 ──
+  await page.fill('#q', '执行措施')
+  await page.waitForTimeout(600)
+  await page.evaluate(() => window.scrollTo(0, Math.min(300, document.body.scrollHeight - window.innerHeight)))
+  await page.waitForTimeout(200)
+  const beforeLeave = await page.evaluate(() => ({ q: document.getElementById('q').value, y: Math.round(window.scrollY) }))
+  const firstLink = await page.$('#results .hit-list .hit a')
+  if (firstLink) {
+    // 往下滚一点，让"滚动位置"这件事真的有一个非零的值可验
+    await page.evaluate(() => window.scrollTo(0, Math.max(120, Math.round(document.body.scrollHeight * 0.6 - window.innerHeight / 2))))
+    await page.waitForTimeout(200)
+    const scrolled = await page.evaluate(() => Math.round(window.scrollY))
+    await firstLink.click()
+    await page.waitForTimeout(700)
+    // 点结果链接时先记一份（返回时用它还原）
+    const savedRecord = await page.evaluate(() => sessionStorage.getItem('course.searchScroll'))
+    await page.goBack()
+    await page.waitForTimeout(1000)
+    const afterBack = await page.evaluate(() => ({
+      q: document.getElementById('q').value,
+      y: Math.round(window.scrollY),
+      cards: document.querySelectorAll('#results .card.group').length,
+      url: location.pathname + location.search,
+      left: sessionStorage.getItem('course.searchScroll')
+    }))
+    const recorded = savedRecord ? JSON.parse(savedRecord) : null
+    await record('返回搜索保留查询与滚动',
+      afterBack.q === beforeLeave.q && afterBack.cards >= 1 && afterBack.left === null &&
+        (!recorded || Math.abs(recorded.y - scrolled) <= 4) && Math.abs(afterBack.y - scrolled) <= 60,
+      '查询「' + afterBack.q + '」，离开时滚动 ' + scrolled + ' 记录为 ' + (recorded ? recorded.y : '（无）') +
+        '，返回后 ' + afterBack.y + '，记录已用掉=' + (afterBack.left === null) + '，' + afterBack.cards + ' 张卡')
+  } else {
+    await record('返回搜索保留查询与滚动', false, '结果里没有可点的链接')
+  }
+
   return results
 }
 
@@ -1461,6 +1597,36 @@ async function auditIndexPages(page, site, noteUrl, failures) {
   // 首页：一门课一张表，一行一节课，列是 课次 | 关键词 | 时长 | 日期
   await page.goto(site.url + '/index.html', { waitUntil: 'domcontentloaded' })
   await page.waitForSelector('.lesson-table', { timeout: 8000 })
+
+  /**
+   * U1：首页最多一个"继续阅读"入口。
+   *
+   * 前面刚在笔记页读过（位置记忆已写进 localStorage），所以这一页应当给出**一个**
+   * 能一键回到那节课的入口，并说清读到哪一小节。它说的是位置，不是"学会了多少"。
+   */
+  const resume = await page.evaluate(() => {
+    const box = document.getElementById('homeResume')
+    const links = box ? [...box.querySelectorAll('a')] : []
+    return {
+      visible: box ? !box.hidden : false,
+      count: links.length,
+      text: links[0] ? links[0].textContent.trim() : '',
+      href: links[0] ? links[0].getAttribute('href') : '',
+      mastery: /已学会|掌握度|完成度|积分|排行榜/.test(document.body.textContent || '')
+    }
+  })
+  await record('首页最多一个继续阅读入口',
+    resume.visible && resume.count === 1 && resume.href.includes('.html#') && !resume.mastery,
+    '入口「' + resume.text + '」→ ' + resume.href)
+  if (resume.visible) {
+    await page.click('#homeResume a')
+    await page.waitForTimeout(900)
+    const landed = await page.evaluate(() => ({ path: decodeURIComponent(location.pathname), hash: decodeURIComponent(location.hash) }))
+    await record('点它能回到上次那一节', landed.path.includes('.html') && landed.hash.length > 1,
+      '落在 ' + landed.path + landed.hash)
+    await page.goto(site.url + '/index.html', { waitUntil: 'domcontentloaded' })
+    await page.waitForSelector('.lesson-table', { timeout: 8000 })
+  }
   const bands = await page.$$eval('.band', nodes => nodes.map(node => ({
     course: node.getAttribute('data-course'),
     lessons: node.querySelectorAll('.lesson-table tbody tr:not(.onepage-row)').length,
@@ -1771,25 +1937,22 @@ async function auditIndexPages(page, site, noteUrl, failures) {
 }
 
 /**
- * 手机视口下的两处布局（真实浏览器、真视口）：
- *   1. 笔记页：目录必须在正文**之前**、课次导航在正文**之后**——手机读者一打开就能跳小节；
- *   2. 管理台通知记录：窄屏是卡片（两行 grid），拉丁串（course-note / failed / 日期）不逐字硬换行。
- */
-/**
- * A7：一页纸打印。
+ * A7/U2：一页纸的两种看法。
  *
- * "打印出来就是一张 A4"是页面对读者的承诺，所以这里**生成真 PDF 数页数**，
- * 而不是看 CSS 猜。两条验收：
- *   · 默认字号下：正好 1 页，且没有 data-overflow（没有静默裁切）；
- *   · 读者把全局字号调到 1.3 倍：仍然 1 页——一页纸的字号跟随全局但**不会**因为放大而
- *     悄悄丢内容（装不下时会缩、缩不动才标出"内容超出 A4"）。
+ * 旧实现（审计实测）：手机单栏但正文仍是 11.5px，fit 只在初始化与打印前跑且把用户字号
+ * 限制在 0.85—1.15，于是"页面里把字号调到 140%"对正文毫无影响。所以这里**在真实浏览器里量
+ * 计算字号**，而不是看 CSS 声明：
+ *   · 阅读模式（默认）：正文 17px 基准，字号随全局滑块**即时**变化，标题与表格一起响应，
+ *     且不靠裁切伪装放得下（没有 overflow:hidden）；
+ *   · 纸张模式（一次点击）：仍按 A4 缩放、缩到底如实标出超限，缩放随字号即时重算；
+ *   · 打印永远按纸张输出：即便当前是阅读模式，PDF 也正好 1 页 A4。
  */
 async function auditOnepagePrint (page, site, noteUrl, failures) {
   const results = []
   const record = async (name, ok, detail) => {
     results.push({ name, ok, detail })
     console.log('  ' + (ok ? '✔' : '✖') + ' ' + name.padEnd(22) + detail)
-    if (!ok) failures.push('一页纸打印 ' + name + '：' + detail)
+    if (!ok) failures.push('一页纸 ' + name + '：' + detail)
   }
   // 一页纸不是每节课都有（夹具里只有写了 onepage.markdown 的那一节）：
   // 从首页/索引页里找一个真实存在的一页纸链接，而不是拿笔记 URL 硬拼。
@@ -1799,66 +1962,115 @@ async function auditOnepagePrint (page, site, noteUrl, failures) {
     const link = document.querySelector('a[href*="/onepage/"]')
     return link ? link.getAttribute('href') : ''
   })
-  console.log('一页纸打印（真 PDF 数页数）')
+  console.log('一页纸（阅读模式 / 纸张模式 / 真 PDF 数页数）')
   if (!onepageHref) {
     await record('夹具里有一页纸可测', false, '首页与索引页都没有 /onepage/ 链接')
     return results
   }
   const onepageUrl = new URL(onepageHref, site.url).toString()
 
+  const measure = () => page.evaluate(() => {
+    const sheet = document.getElementById('sheet')
+    const body = document.getElementById('sheetBody')
+    const h2 = body.querySelector('h2')
+    const table = body.querySelector('table')
+    const stateNode = document.getElementById('sheetState')
+    return {
+      mode: sheet.getAttribute('data-mode'),
+      dataOverflow: sheet.getAttribute('data-overflow') === '1',
+      scale: getComputedStyle(sheet).getPropertyValue('--sheet-scale').trim(),
+      font: parseFloat(getComputedStyle(body).fontSize),
+      h2Font: h2 ? parseFloat(getComputedStyle(h2).fontSize) : 0,
+      tableFont: table ? parseFloat(getComputedStyle(table).fontSize) : 0,
+      bodyOverflow: getComputedStyle(body).overflow,
+      aspect: getComputedStyle(sheet).aspectRatio,
+      chars: (body.textContent || '').length,
+      scrollWidth: document.documentElement.scrollWidth,
+      viewport: window.innerWidth,
+      state: stateNode ? stateNode.textContent.trim() : ''
+    }
+  })
   const pdfPages = async () => {
     const buffer = await page.pdf({ format: 'A4', printBackground: true })
     const text = buffer.toString('latin1')
     // 只数页对象：/Type /Pages 是目录节点，不能算进去
     return { pages: (text.match(/\/Type\s*\/Page[^s]/g) || []).length, bytes: buffer.length }
   }
-
-  await page.goto(onepageUrl, { waitUntil: 'domcontentloaded' })
-  await page.waitForTimeout(400)
-  const sheet = await page.evaluate(() => {
-    const node = document.getElementById('sheet')
-    return node
-      ? {
-          overflow: node.getAttribute('data-overflow') === '1',
-          scale: getComputedStyle(node).getPropertyValue('--sheet-scale').trim(),
-          chars: (document.getElementById('sheetBody')?.textContent || '').length
-        }
-      : null
-  })
-  if (!sheet) {
-    const seen = await page.evaluate(() => ({ title: document.title, hasSheet: Boolean(document.getElementById('sheet')), url: location.pathname, text: (document.querySelector('main, article, .wrap') || {}).textContent?.slice(0, 40) || '' }))
-    await record('一页纸页面存在', false, '导航到 ' + onepageUrl + '，实际落在 ' + seen.url + '（标题「' + seen.title + '」）')
-    return results
+  const setFont = async value => {
+    await page.evaluate(scale => {
+      localStorage.setItem('course.fontScale', String(scale))
+      document.documentElement.style.setProperty('--font-scale', String(scale))
+    }, value)
+    await page.waitForTimeout(220)
   }
-  await record('一页纸没有静默裁切', sheet.overflow === false,
-    'data-overflow=' + sheet.overflow + '，sheet-scale=' + sheet.scale + '，正文 ' + sheet.chars + ' 字')
-  const first = await pdfPages()
-  await record('默认字号：打印正好一页 A4', first.pages === 1, `PDF ${first.pages} 页（${Math.round(first.bytes / 1024)}KB）`)
 
-  // 读者把全局字号调到 1.3：一页纸跟随（有上限），但**不许**因此溢出或掉内容
-  await page.evaluate(() => {
-    localStorage.setItem('course.fontScale', '1.3')
-    document.documentElement.style.setProperty('--font-scale', '1.3')
-  })
+  // ── 手机 390×844：默认就是阅读模式 ──
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto(onepageUrl, { waitUntil: 'domcontentloaded' })
+  await page.evaluate(() => { localStorage.removeItem('course.onepageMode') })
+  await setFont(1)
   await page.reload({ waitUntil: 'domcontentloaded' })
-  await page.waitForTimeout(500)
-  const larger = await page.evaluate(() => {
-    const node = document.getElementById('sheet')
-    return {
-      overflow: node.getAttribute('data-overflow') === '1',
-      scale: getComputedStyle(node).getPropertyValue('--sheet-scale').trim(),
-      chars: (document.getElementById('sheetBody')?.textContent || '').length
-    }
-  })
-  const second = await pdfPages()
-  await record('放大字号后仍是一页且没裁切',
-    second.pages === 1 && larger.overflow === false && larger.chars >= sheet.chars,
-    `PDF ${second.pages} 页，sheet-scale ${sheet.scale} → ${larger.scale}，正文 ${larger.chars} 字（原 ${sheet.chars}）`)
-  await page.evaluate(() => { localStorage.setItem('course.fontScale', '1') })
+  await page.waitForTimeout(400)
+  const mobile = await measure()
+  await record('手机默认阅读模式可读', mobile.mode === 'read' && mobile.font >= 17 && mobile.font <= 18,
+    'mode=' + mobile.mode + '，正文 ' + mobile.font + 'px，标题 ' + mobile.h2Font + 'px，表格 ' + mobile.tableFont + 'px')
+  await record('阅读模式不靠裁切伪装', mobile.bodyOverflow !== 'hidden' && mobile.aspect === 'auto',
+    'overflow=' + mobile.bodyOverflow + '，aspect-ratio=' + mobile.aspect)
+  await record('阅读模式整页不横移', mobile.scrollWidth <= mobile.viewport + 1,
+    'scrollWidth=' + mobile.scrollWidth + '，viewport=' + mobile.viewport)
 
+  // ── 字号即时响应：不刷新页面，直接改全局变量 ──
+  await setFont(1.4)
+  const bigger = await measure()
+  const scaled = Math.abs(bigger.font - mobile.font * 1.4) < 0.6
+  await record('字号随全局滑块即时变化', scaled && bigger.h2Font > mobile.h2Font,
+    '正文 ' + mobile.font + ' → ' + bigger.font + 'px，标题 ' + mobile.h2Font + ' → ' + bigger.h2Font + 'px')
+  await record('放大后仍不横移', bigger.scrollWidth <= bigger.viewport + 1,
+    'scrollWidth=' + bigger.scrollWidth + '，viewport=' + bigger.viewport)
+
+  // ── 纸张模式：一次点击，缩放随字号重算，缩不动就如实标出 ──
+  await page.click('button[data-sheet-mode="a4"]')
+  await page.waitForTimeout(220)
+  const paperAt140 = await measure()
+  const pressed = await page.evaluate(() => document.querySelector('button[data-sheet-mode="a4"]').getAttribute('aria-pressed'))
+  await record('可切到 A4 预览', paperAt140.mode === 'a4' && pressed === 'true' && paperAt140.aspect !== 'auto',
+    'mode=' + paperAt140.mode + '，aspect-ratio=' + paperAt140.aspect + '，' + paperAt140.state)
+  await setFont(1)
+  const paperAt100 = await measure()
+  await record('纸张缩放随字号即时重算', paperAt100.scale !== paperAt140.scale,
+    '--sheet-scale ' + paperAt140.scale + ' → ' + paperAt100.scale + '（' + paperAt100.state + '）')
+  await record('纸张模式没有静默裁切', paperAt100.dataOverflow === false,
+    'data-overflow=' + paperAt100.dataOverflow + '，正文 ' + paperAt100.chars + ' 字')
+  const first = await pdfPages()
+  await record('纸张模式：打印正好一页 A4', first.pages === 1,
+    'PDF ' + first.pages + ' 页（' + Math.round(first.bytes / 1024) + 'KB）')
+
+  // ── 打印兜底：当前是阅读模式，纸上也必须还是那张 A4 ──
+  await page.click('button[data-sheet-mode="read"]')
+  await page.waitForTimeout(200)
+  const readAgain = await measure()
+  const fromRead = await pdfPages()
+  await record('阅读模式下打印仍是一页 A4',
+    readAgain.mode === 'read' && fromRead.pages === 1,
+    'mode=' + readAgain.mode + '，PDF ' + fromRead.pages + ' 页')
+
+  // ── 桌面 1440×900：同一份内容，阅读模式依然是 17px 基准 ──
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.reload({ waitUntil: 'domcontentloaded' })
+  await page.waitForTimeout(400)
+  const desktop = await measure()
+  await record('桌面阅读模式同宽可读', desktop.mode === 'read' && Math.abs(desktop.font - 17) < 0.6,
+    'mode=' + desktop.mode + '，正文 ' + desktop.font + 'px，正文 ' + desktop.chars + ' 字')
+
+  await page.evaluate(() => { localStorage.setItem('course.fontScale', '1'); localStorage.removeItem('course.onepageMode') })
   return results
 }
 
+/**
+ * 手机视口下的两处布局（真实浏览器、真视口）：
+ *   1. 笔记页：目录必须在正文**之前**、课次导航在正文**之后**——手机读者一打开就能跳小节；
+ *   2. 管理台通知记录：窄屏是卡片（两行 grid），拉丁串（course-note / failed / 日期）不逐字硬换行。
+ */
 async function auditMobileLayout (page, site, noteUrl, failures) {
   const results = []
   const record = async (name, ok, detail) => {
@@ -1958,6 +2170,74 @@ async function auditMobileLayout (page, site, noteUrl, failures) {
   return results
 }
 
+/**
+ * 阅读样板的截图（只在 COURSE_AUDIT_SHOTS=<目录> 时跑）。
+ *
+ * 审计本身是断言，截图是给人和评审看的同一版证据：一节课的首页入口、正文、一页纸
+ * （阅读模式 100%/140%、纸张模式）、搜索结果，桌面与手机各一张。
+ * 默认不写文件——CI 里跑审计不该往仓库里丢图片。
+ */
+async function captureReadingShots (page, site, fixture, dir) {
+  fs.mkdirSync(dir, { recursive: true })
+  const shot = async (name, viewport) => {
+    await page.setViewportSize(viewport)
+    await page.waitForTimeout(400)
+    const target = path.join(dir, name + '.png')
+    await page.screenshot({ path: target })
+    console.log('  ▸ ' + target)
+  }
+  const desktop = { width: 1440, height: 900 }
+  const mobile = { width: 390, height: 844 }
+  const setFont = async value => {
+    await page.evaluate(scale => {
+      localStorage.setItem('course.fontScale', String(scale))
+      document.documentElement.style.setProperty('--font-scale', String(scale))
+    }, value)
+    await page.waitForTimeout(250)
+  }
+
+  console.log('阅读样板截图')
+  const noteUrl = fixture.noteUrl.startsWith('http') ? fixture.noteUrl : new URL(fixture.noteUrl, site.url).toString()
+  await page.goto(noteUrl, { waitUntil: 'domcontentloaded' })
+  await page.waitForTimeout(500)
+  await shot('lesson-note-desktop', desktop)
+  await shot('lesson-note-mobile', mobile)
+
+  await page.goto(site.url + '/index.html', { waitUntil: 'domcontentloaded' })
+  await page.waitForTimeout(400)
+  await shot('lesson-home-desktop', desktop)
+  await shot('lesson-home-mobile', mobile)
+
+  const onepageHref = await page.evaluate(() => {
+    const link = document.querySelector('a[href*="/onepage/"]')
+    return link ? link.getAttribute('href') : ''
+  })
+  if (onepageHref) {
+    await page.goto(new URL(onepageHref, site.url).toString(), { waitUntil: 'domcontentloaded' })
+    await page.evaluate(() => { localStorage.removeItem('course.onepageMode') })
+    await setFont(1)
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    await page.waitForTimeout(400)
+    await shot('lesson-onepage-read-mobile', mobile)
+    await shot('lesson-onepage-read-desktop', desktop)
+    await setFont(1.4)
+    await shot('lesson-onepage-read-140-mobile', mobile)
+    await page.click('button[data-sheet-mode="a4"]')
+    await page.waitForTimeout(300)
+    await shot('lesson-onepage-a4-desktop', desktop)
+    await shot('lesson-onepage-a4-mobile', mobile)
+    await page.evaluate(() => { localStorage.setItem('course.fontScale', '1'); localStorage.removeItem('course.onepageMode') })
+  }
+
+  await page.goto(site.url + '/search.html', { waitUntil: 'domcontentloaded' })
+  await page.waitForTimeout(300)
+  await page.fill('#q', '执行措施')
+  await page.waitForTimeout(700)
+  await shot('lesson-search-desktop', desktop)
+  await shot('lesson-search-mobile', mobile)
+  return []
+}
+
 async function main() {
   const fixture = buildFixture()
   const calls = []
@@ -2016,6 +2296,10 @@ async function main() {
     console.log('')
     await auditMobileLayout(page, site, fixture.noteUrl, failures)
     await auditOnepagePrint(page, site, fixture.noteUrl, failures)
+    if (process.env.COURSE_AUDIT_SHOTS) {
+      console.log('')
+      await captureReadingShots(page, site, fixture, process.env.COURSE_AUDIT_SHOTS)
+    }
   } finally {
     await browser.close()
     // 浏览器关掉后可能还有 keep-alive 连接挂在服务器上，close() 会一直等它们；

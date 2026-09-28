@@ -132,6 +132,30 @@ test('站内搜索走服务端：与 MCP 同一套检索，结果带小节与片
   }
 })
 
+test('课程筛选：/api/search 能收窄到一门课，锚点与页面链接指向同一小节', async () => {
+  const root = siteDir()
+  const site = await startSiteServer({ root, port: 0 })
+  try {
+    const scoped = await (await fetch(`${site.url}/api/search?q=${encodeURIComponent('共同行为')}&course=${encodeURIComponent('刑法分论')}`)).json()
+    assert.equal(scoped.ok, true)
+    assert.ok(scoped.hits.length >= 1, '限定本课之后仍有命中')
+    assert.ok(scoped.hits.every(hit => hit.courseName === '刑法分论'), '结果只来自这一门课')
+
+    // 锚点是百分号编码的小节 id：页面点击、MCP canonical URL、fetch 证据要对得上
+    const located = scoped.hits.find(hit => hit.sectionId)
+    assert.ok(located, '正文命中应当定位到小节')
+    assert.equal(located.anchor, `${located.url}#${encodeURIComponent(located.sectionId)}`)
+
+    // 不存在的课程：明确报错，而不是悄悄返回全部课程的结果
+    const unknown = await fetch(`${site.url}/api/search?q=${encodeURIComponent('共同行为')}&course=${encodeURIComponent('不存在的课')}`)
+    assert.equal(unknown.status, 400)
+    assert.equal((await unknown.json()).ok, false)
+  } finally {
+    await site.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('旧的平铺 md 链接 302 到规范路径；库里没有的不猜', async () => {
   // 路径规则改版前是 /md/<课次>.md，收藏与转发里还留着老地址。
   const root = siteDir()

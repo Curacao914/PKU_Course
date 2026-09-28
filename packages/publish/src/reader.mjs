@@ -229,6 +229,32 @@ export const PREF_MENU_SCRIPT = '<script>' + String.raw`
 </script>`
 
 /** 左栏：本课程全部课次，点着就能换课。 */
+/**
+ * 本课次的三个固定入口：原笔记 / 一页纸 / 我的标记。
+ *
+ * 三个入口在**同一位置**（标题下的同一行）出现，笔记页与一页纸页都一样——
+ * 读者不必先想"我现在在哪张页面上、另一个入口藏在哪"。当前所在的那个用 aria-current 标出。
+ * 一页纸还没生成时如实写"暂无"，不做成一个点了没反应的链接。
+ */
+export function lessonDock(record = {}, { current = 'note' } = {}) {
+  const slug = String(record.slug || '').replace(/^\/+/, '')
+  if (!slug) return ''
+  const noteHref = `/${slug}.html`
+  const onepageHref = `/${slug.replace(/^notes\//, 'onepage/')}.html`
+  const hasOnepage = Boolean(record.onepage && record.onepage.markdown)
+  const items = [
+    `<a href="${escapeAttr(noteHref)}"${current === 'note' ? ' aria-current="page"' : ''}>原笔记</a>`,
+    hasOnepage
+      ? `<a href="${escapeAttr(onepageHref)}"${current === 'onepage' ? ' aria-current="page"' : ''}>一页纸</a>`
+      : '<span class="dock-off">一页纸（暂无）</span>',
+    // 标记是拿正文里的句子做的，所以"我的标记"永远指向笔记页那一块（一页纸页转过去）
+    current === 'note'
+      ? '<button type="button" data-dock="marks">我的标记</button>'
+      : `<a href="${escapeAttr(noteHref)}#railMarks">我的标记</a>`
+  ]
+  return `<nav class="lesson-dock" aria-label="本课次入口">${items.join('')}</nav>`
+}
+
 export function courseNav(record = {}, courseLessons = []) {
   if (!courseLessons.length) return ''
   const items = courseLessons.map(item => {
@@ -269,6 +295,14 @@ export const READER_SCRIPT = '<script>' + ANCHOR_RUNTIME + String.raw`
    * 手机端"本页目录"的折叠状态：**默认折叠**（几十条链接展开着会把正文顶出屏幕一千多像素），
    * 但记住读者的选择——开过一次就一直开着，别每次进页面都替他合上。
    */
+  // 简报开合也记在浏览器里：收起过就一直收着（收起不改写内容，只是不占首屏）
+  var brief = document.getElementById('brief')
+  if (brief) {
+    var briefPref = store.get('course.briefOpen', '')
+    if (briefPref === '0') brief.open = false
+    else if (briefPref === '1') brief.open = true
+    brief.addEventListener('toggle', function () { store.set('course.briefOpen', brief.open ? '1' : '0') })
+  }
   var tocDetails = document.querySelector('.rail-toggle details')
   if (tocDetails) {
     var tocPref = store.get('course.tocOpen', '')
@@ -747,6 +781,95 @@ export const READER_SCRIPT = '<script>' + ANCHOR_RUNTIME + String.raw`
       note.textContent = unresolved.length + ' 条批注没能在这一版正文里定位（记录已保留）'
       tools.appendChild(note)
     }
+    renderMarkList()
+  }
+
+  /**
+   * 「我的标记」列表：这一页的批注在哪、是什么、怎么回去。
+   *
+   * 批注是读过一趟留下的东西，没有列表就只能在正文里碰运气找回来。三条规矩：
+   *   · 定位不到的那几条**照样列出来**（标"待重新定位"），它们仍在 localStorage 里，
+   *     不该因为一次正文改版从读者眼前消失；
+   *   · 删除按 id 走：同一句话在两处各有一条标记时，删一条不能连坐（旧实现按文字删过）；
+   *   · 摘录用锚点里记下的原话，不改写、不上传。
+   */
+  function escHtml (value) {
+    return String(value == null ? '' : value).replace(/[&<>"]/g, function (c) {
+      return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]
+    })
+  }
+  /** 标题里那个"#"是复制锚点的按钮，不是标题的一部分：取文字前先把它摘掉。 */
+  function headingText (node) {
+    if (!node) return ''
+    var clone = node.cloneNode(true)
+    var link = clone.querySelector ? clone.querySelector('a') : null
+    if (link && link.parentNode) link.parentNode.removeChild(link)
+    return String(clone.textContent || '').replace(/\s+/g, ' ').trim()
+  }
+  function sectionTitleById (id) {
+    return id ? headingText(document.getElementById(id)) : ''
+  }
+  function sectionTitleOf (mark) {
+    var node = document.querySelector('[data-annot-id="' + mark.id + '"]')
+    if (!node) return ''
+    var headings = document.querySelectorAll('article h2, article h3, article h4')
+    var found = null
+    for (var i = 0; i < headings.length; i += 1) {
+      if (headings[i].compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING) found = headings[i]
+    }
+    return headingText(found)
+  }
+  function renderMarkList () {
+    var panel = document.getElementById('railMarks')
+    var list = document.getElementById('marksList')
+    if (!panel || !list) return
+    if (!marks.length) { panel.hidden = true; list.innerHTML = ''; return }
+    panel.hidden = false
+    var count = document.getElementById('marksCount')
+    if (count) count.textContent = String(marks.length)
+    list.innerHTML = marks.map(function (mark) {
+      var anchor = mark.anchor || {}
+      var text = String(anchor.text || '').replace(/\s+/g, ' ').trim()
+      var excerpt = text.length > 48 ? text.slice(0, 48) + '…' : text
+      var where = mark.unresolved ? '待重新定位' : (sectionTitleOf(mark) || sectionTitleById(anchor.sectionId) || '本页')
+      return '<li' + (mark.unresolved ? ' class="mark-lost"' : '') + '>' +
+        '<button type="button" class="mark-jump" data-mark-id="' + escHtml(mark.id) + '">' +
+        '<span class="mark-kind">' + (mark.kind === 'mark' ? '高亮' : '下划线') + '</span>' +
+        '<span class="mark-excerpt">' + escHtml(excerpt || '（没有摘录）') + '</span>' +
+        '<span class="mark-where">' + escHtml(where) + '</span>' +
+        '</button>' +
+        '<button type="button" class="mark-drop" data-mark-id="' + escHtml(mark.id) + '" aria-label="删除这条标记">×</button>' +
+        '</li>'
+    }).join('')
+  }
+  function jumpToMark (id) {
+    var node = document.querySelector('[data-annot-id="' + id + '"]')
+    if (!node) { toast('这条标记还没能在这一版正文里定位，记录仍留在这台浏览器里'); return }
+    try { node.scrollIntoView({ block: 'center', behavior: 'smooth' }) } catch (error) { node.scrollIntoView() }
+    flash(node)
+  }
+  /** 删一条：按 id 删记录、按 id 拆 DOM，别的标记一条都不动。 */
+  function dropMark (id) {
+    var node = document.querySelector('[data-annot-id="' + id + '"]')
+    if (node && node.parentNode) {
+      // 保留正文本身：把标记用的 span 拆掉，文字还给段落
+      while (node.firstChild) node.parentNode.insertBefore(node.firstChild, node)
+      node.parentNode.removeChild(node)
+    }
+    marks = marks.filter(function (mark) { return mark.id !== id })
+    unresolved = unresolved.filter(function (item) { return item !== id })
+    saveMarks()
+    renderMarkList()
+    toast('已删除这条标记')
+  }
+  var marksPanel = document.getElementById('railMarks')
+  if (marksPanel) {
+    marksPanel.addEventListener('click', function (event) {
+      var jump = event.target.closest ? event.target.closest('.mark-jump') : null
+      if (jump) { jumpToMark(jump.getAttribute('data-mark-id')); return }
+      var drop = event.target.closest ? event.target.closest('.mark-drop') : null
+      if (drop) dropMark(drop.getAttribute('data-mark-id'))
+    })
   }
   restore()
 

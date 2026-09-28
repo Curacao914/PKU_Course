@@ -567,9 +567,16 @@ test('the one-page view is an A4 sheet that cannot overflow', () => {
     ]
   })
   assert.match(html, /<div class="onepage">/)
-  assert.match(html, /<article class="sheet" id="sheet">/)
+  // 默认是阅读模式：手机上先让人能读，纸张是另一次点击
+  assert.match(html, /<article class="sheet" id="sheet" data-mode="read">/)
+  assert.match(html, /<button type="button" data-sheet-mode="read" aria-pressed="true">阅读模式<\/button>/)
+  assert.match(html, /<button type="button" data-sheet-mode="a4" aria-pressed="false">A4 预览<\/button>/)
   assert.match(html, /id="sheetBody"/)
-  assert.match(html, /column-count: 3/, '一页纸按三栏排')
+  // 阅读模式：正文 17px 基准且**直接引用全局字号**（拖滑块即时生效，没有"监听字号"这一层可以漏）
+  assert.match(html, /.sheet\[data-mode="read"\] \.sheet-body \{ font-size: calc\(17px \* var\(--font-scale\)\)/)
+  assert.match(html, /.sheet\[data-mode="read"\] \.sheet-body h2 \{ font-size: calc\(19px \* var\(--font-scale\)\)/)
+  assert.match(html, /.sheet\[data-mode="read"\] \.sheet-body table \{ font-size: calc\(15px \* var\(--font-scale\)\)/)
+  assert.match(html, /column-count: 3/, '纸张模式按三栏排')
   assert.match(html, /@page \{ size: A4/, '打印就是一张 A4')
   assert.match(html, /aspect-ratio: 210 \/ 297/, '屏幕上也是 A4 比例')
   // 放不下时自动缩小，缩到底还放不下就如实标记（绝不允许悄悄截断）
@@ -590,6 +597,138 @@ test('the one-page view is an A4 sheet that cannot overflow', () => {
   assert.match(html, /href="\/md\/[^"]*-%E4%B8%80%E9%A1%B5%E7%BA%B8\.md"/, '下载的是一页纸本身')
   // 一页纸页面没有 #reading（专注模式），点了不能抛错
   assert.match(html, /if \(!reading\) return/)
+})
+
+test('课次入口：主题先行，原笔记/一页纸/我的标记固定在同一位置（两种页面都一样）', () => {
+  const built = buildNoteRecord({
+    slug: 'notes/刑法分论/第10-12节-共犯与罪数',
+    courseName: '刑法分论',
+    lessonTitle: '第10-12节 共犯与罪数',
+    markdown: '## 一、成立条件\n\n共同故意与共同行为都要有。',
+    onepage: { title: '共犯的条件', markdown: '## 一、成立条件', chars: 12 }
+  })
+  built.theme = '共同犯罪为什么要求共同故意'
+  const note = renderNotePage(built, { siteOrigin: '' })
+  // 本讲主题在标题下面（日期与时长排在它后面）
+  assert.match(note, /<p class="lesson-title-theme">共同犯罪为什么要求共同故意<\/p>/)
+  const dock = note.match(/<nav class="lesson-dock" aria-label="本课次入口">([\s\S]*?)<\/nav>/)[1]
+  assert.match(dock, /<a href="\/notes\/刑法分论\/第10-12节-共犯与罪数\.html" aria-current="page">原笔记<\/a>/)
+  assert.match(dock, /<a href="\/onepage\/刑法分论\/第10-12节-共犯与罪数\.html">一页纸<\/a>/)
+  assert.match(dock, /<button type="button" data-dock="marks">我的标记<\/button>/)
+  // 没有生成一页纸时就如实写"暂无"，不做成一个点了没反应的链接
+  const withoutOnepage = renderNotePage(buildNoteRecord({
+    slug: 'notes/刑法分论/第9节', courseName: '刑法分论', lessonTitle: '第9节', markdown: '## 甲\n\n乙。'
+  }), { siteOrigin: '' })
+  assert.match(withoutOnepage, /<span class="dock-off">一页纸（暂无）<\/span>/)
+  // 一页纸页上是同一排入口：一页纸当前，回得去正文与自己的标记
+  const onepagePage = renderOnepagePageHtml(built, { siteOrigin: '' })
+  const dock2 = onepagePage.match(/<nav class="lesson-dock" aria-label="本课次入口">([\s\S]*?)<\/nav>/)[1]
+  assert.match(dock2, /<a href="\/onepage\/刑法分论\/第10-12节-共犯与罪数\.html" aria-current="page">一页纸<\/a>/)
+  assert.match(dock2, /<a href="\/notes\/刑法分论\/第10-12节-共犯与罪数\.html#railMarks">我的标记<\/a>/)
+})
+
+test('首页：最多一个"继续阅读"入口，只记位置不写"学会"，没记录就不出现', () => {
+  const html = renderIndexPage([record({
+    slug: 'notes/刑法分论/第10-12节',
+    courseName: '刑法分论',
+    lessonTitle: '第10-12节',
+    theme: '共同犯罪为什么要求"共同"',
+    markdown: '## 一\n\n共同故意。',
+    onepage: null
+  })], { siteOrigin: '' })
+  assert.match(html, /<div class="home-resume" id="homeResume" hidden><\/div>/, '空壳 + 默认隐藏')
+  assert.match(html, /localStorage\.getItem\('course\.lastRead'\)/)
+  assert.match(html, /resumeBox\.hidden = false;/, '有记录才显示')
+  assert.match(html, /function samePath \(left, right\)/)
+  // 粒度是"读到哪一小节"，不出现任何"已学会/完成度"这类说法
+  assert.doesNotMatch(html, /已学会|掌握度|完成度|积分|排行榜/)
+  const note = renderNotePage(buildNoteRecord({
+    slug: 'notes/刑法分论/第10-12节', courseName: '刑法分论', lessonTitle: '第10-12节', markdown: '## 一\n\n共同故意。'
+  }), { siteOrigin: '' })
+  assert.match(note, /localStorage\.setItem\('course\.lastRead'/)
+  assert.match(note, /sectionId: sectionId \|\| ''/)
+  assert.match(note, /data-dock="marks"/)
+})
+
+test('我的标记：课次页有列表（摘录/小节/类型），按 id 删除，定位不到就写待重新定位', () => {
+  const built = buildNoteRecord({
+    slug: 'notes/刑法分论/第10-12节-共犯与罪数',
+    courseName: '刑法分论',
+    lessonTitle: '第10-12节 共犯与罪数',
+    markdown: '## 一、成立条件\n\n共同故意与共同行为都要有。'
+  })
+  const html = renderNotePage(built, { siteOrigin: '' })
+  assert.match(html, /<div class="rail-marks" id="railMarks" hidden>/)
+  assert.match(html, /<ol class="marks-list" id="marksList"><\/ol>/)
+  assert.match(html, /只存在这台浏览器里；导出\/导入在顶栏工具里/)
+  // 列表内容由脚本按 localStorage 里的批注填：摘录、所在小节、类型
+  assert.match(html, /function renderMarkList \(\)/)
+  assert.match(html, /'<span class="mark-kind">' \+ \(mark\.kind === 'mark' \? '高亮' : '下划线'\)/)
+  assert.match(html, /'<span class="mark-where">' \+ escHtml\(where\)/)
+  assert.match(html, /mark\.unresolved \? '待重新定位' : \(sectionTitleOf\(mark\)/)
+  // 删除按 id：不按文字删（同一句话两处各有一条时，删一条不能连坐）
+  assert.match(html, /marks = marks\.filter\(function \(mark\) \{ return mark\.id !== id \}\)/)
+  assert.match(html, /function jumpToMark \(id\)/)
+  // 正文里没有标记时不出现这一块，也不留空标题
+  assert.match(html, /if \(!marks\.length\) \{ panel\.hidden = true; list\.innerHTML = ''; return \}/)
+})
+
+test('搜索页：主标题是命中的小节，同课多处命中收在一张卡里，精确/语义有标签', () => {
+  const html = renderSearchPage({
+    siteOrigin: 'https://course.law-tech.dev',
+    courses: [{ name: '刑法分论', count: 2 }, { name: '犯罪学', count: 1 }]
+  })
+  // 课程筛选在页面里（不再只有首页有），查询与筛选都进 URL
+  assert.match(html, /id="search-rail" data-kind="search"/)
+  assert.match(html, /data-course="刑法分论" aria-pressed="false">刑法分论<span class="filter-count">2<\/span>/)
+  assert.match(html, /params.push\('course=' \+ encodeURIComponent\(course\)\)/)
+  // 结果卡：一节课一张卡，卡内列出命中小节（旧版每条命中各印一张卡，同一节课的摘要被复制几遍）
+  assert.match(html, /function groupHits \(hits\)/)
+  assert.match(html, /'<h4>' \+ esc\(hit\.section \|\| hit\.lessonTitle\) \+ '<\/h4>'/)
+  assert.match(html, /'<ol class="hit-list">' \+ rows \+ '<\/ol>'/)
+  // 精确命中 / 语义近似分开标；相似度只作参考，不写成正确率
+  assert.match(html, /<span class="hit-badge exact">精确命中<\/span>/)
+  assert.match(html, /<span class="hit-badge semantic">语义近似/)
+  assert.match(html, /hit-badge semantic/)
+  // 返回搜索：查询与筛选在 URL 里，滚动位置单独记一份
+  assert.match(html, /SCROLL_KEY = 'course.searchScroll'/)
+  assert.match(html, /function restoreScroll \(\)/)
+  assert.match(html, /results\.addEventListener\('click', function \(event\) \{/)
+  // 三种"没结果"分开说：字面没有 / 语义入口没启用 / 服务不可用
+  assert.match(html, /本站未启用语义检索，所以也不能按意思找相近的小节/)
+  assert.match(html, /检索服务暂时不可用，稍后再试/)
+  // 窄屏：筛选栏收到输入框上方，不横向溢出
+  assert.match(html, /@media \(max-width: 720px\) \{ \.search-shell \{ grid-template-columns: minmax\(0, 1fr\); gap: 16px; \} \}/)
+})
+
+test('一页纸：两种看法共用一份内容，字号即时响应，打印永远按纸张输出', () => {
+  const built = buildNoteRecord({
+    slug: 'notes/刑法分论/第10-12节-共犯与罪数',
+    courseName: '刑法分论',
+    lessonTitle: '第10-12节 共犯与罪数',
+    markdown: '## 一、成立条件\n\n- 共同故意\n- 共同行为',
+    onepage: { title: '共犯成立的条件', markdown: '## 一、成立条件\n\n- 共同故意', chars: 12 }
+  })
+  const html = renderOnepagePageHtml(built, { siteOrigin: '' })
+  // 切换显示方式只改 data-mode，不重新取内容：正文只出现一次
+  assert.equal(html.match(/id="sheetBody"/g).length, 1)
+  // 选择记在浏览器里：下次进来还是你上次选的那种看法
+  assert.match(html, /localStorage\.setItem\(KEY, value\)/)
+  assert.match(html, /course\.onepageMode/)
+  // 纸张模式的状态要能看见"为什么字变小了"，而且缩到底要如实说放不下
+  assert.match(html, /纸张缩放 /)
+  assert.match(html, /内容超出 A4，请精简/)
+  assert.match(html, /想按自己的字号读请用阅读模式/)
+  // 字号变了要重新量：盯 documentElement 的属性（顶栏与设置浮层各有一个滑块）
+  assert.match(html, /new MutationObserver\(schedule\)/)
+  assert.match(html, /addEventListener\('resize', schedule\)/)
+  // 打印：无论当前是哪种模式，纸上都是那张 A4（beforeprint 切纸张、afterprint 还回去）
+  assert.match(html, /addEventListener\('beforeprint', function \(\) \{/)
+  assert.match(html, /addEventListener\('afterprint', function \(\) \{/)
+  assert.match(html, /@media print \{[\s\S]*?column-count: 3 !important/)
+  assert.match(html, /@media print \{[\s\S]*?\.sheet-tools, \.sheet-state \{ display: none !important/)
+  // 长表格只在自己那块里横滚，整页不横移
+  assert.match(html, /display: block; overflow-x: auto; max-width: 100%;/)
 })
 
 test('writeSite writes a one-page file only for lessons that have one', () => {

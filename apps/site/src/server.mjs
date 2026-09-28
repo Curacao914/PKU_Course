@@ -415,6 +415,8 @@ export function createRequestHandler({
      */
     if (pathname === '/api/search') {
       const query = String(url.searchParams.get('q') || '').trim()
+      // 课程筛选：与 MCP 的 search_notes 一样按课程名收窄（搜索页左侧筛选栏用它）
+      const course = String(url.searchParams.get('course') || '').trim()
       const rawLimit = Number(url.searchParams.get('limit'))
       const limit = Math.min(Math.max(Number.isFinite(rawLimit) && rawLimit > 0 ? Math.floor(rawLimit) : 12, 1), 30)
       if (!query) {
@@ -449,7 +451,7 @@ export function createRequestHandler({
         // 超时 / 客户端断开都会中止检索本身（signal 一路传到检索的记录循环）
         // 不再写死 includeBody:true：覆盖策略由检索层统一决定（coverage='auto'），
         // 站点搜索与 MCP 所以及标准 search 三个入口因此拿到**同一批结果**。
-        const outcome = await lifecycle.race(service.searchNotes({ query, limit }, { signal: slot.signal }))
+        const outcome = await lifecycle.race(service.searchNotes({ query, course, limit }, { signal: slot.signal }))
         if (outcome.kind === 'gone') return
         if (outcome.kind === 'timeout') {
           if (lifecycle.canWrite()) {
@@ -480,7 +482,10 @@ export function createRequestHandler({
           hits: found.hits.map(hit => ({
             slug: hit.slug,
             url: `/${String(hit.slug).replace(/^\/+/, '')}.html`,
-            anchor: hit.location?.id ? `/${String(hit.slug).replace(/^\/+/, '')}.html#${hit.location.id}` : '',
+            // 小节锚点统一百分号编码：站点链接、MCP canonical URL、fetch 证据指向同一处
+            anchor: hit.location?.id
+              ? `/${String(hit.slug).replace(/^\/+/, '')}.html#${encodeURIComponent(hit.location.id)}`
+              : '',
             courseName: hit.courseName,
             lessonTitle: hit.lessonTitle,
             lessonDate: hit.lessonDate,

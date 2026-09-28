@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import { escapeHtml, extractHeadings, renderMarkdown, sectionIndex, slugify, summarizeMarkdown } from './markdown.mjs'
-import { PREF_MENU_SCRIPT, READER_SCRIPT, courseNav, settingsMenu, svgIcon, toolBar } from './reader.mjs'
+import { PREF_MENU_SCRIPT, READER_SCRIPT, courseNav, lessonDock, settingsMenu, svgIcon, toolBar } from './reader.mjs'
 import { ONEPAGE_CSS, renderOnepagePage } from './onepage.mjs'
 import { renderDocPage, renderLlmsTxt, usePageShell } from './docs.mjs'
 // 时间语义（lessonDate / firstPublishedAt / updatedAt）与 Markdown 路径各有一个唯一实现，
@@ -175,6 +175,8 @@ a:hover { color: var(--accent-ink); }
 header.site { padding-bottom: 18px; margin-bottom: 30px; border-bottom: 1px solid var(--line); }
 header.site .eyebrow { font-size: 13px; color: var(--muted); letter-spacing: .04em; }
 header.site h1 { margin: 8px 0 0; font-size: 32px; line-height: 1.25; font-weight: 650; letter-spacing: -.015em; }
+.lesson-title-theme { margin: 6px 0 0; font-family: var(--sans); font-size: 16px; line-height: 1.55;
+  color: var(--ink-soft); }
 .meta { color: var(--muted); font-size: 14px; margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; }
 .pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px;
   background: var(--bg-soft); border: 1px solid var(--line); color: var(--ink-soft); font-size: 13px; }
@@ -201,11 +203,31 @@ article pre code { background: none; padding: 0; }
 article pre:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 article .brief { font-family: var(--sans); background: var(--bg-soft); border: 1px solid var(--line);
   border-radius: var(--radius-lg); padding: 20px 24px; margin: 0 0 30px; box-shadow: var(--shadow-sm); }
-article .brief h2 { margin: 0 0 10px; font-size: 13px; letter-spacing: .12em; text-transform: uppercase;
-  border: 0; padding: 0; color: var(--muted); }
+article .brief summary { margin: 0 0 10px; font-size: 13px; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--muted); cursor: pointer; padding: 4px 0; min-height: 28px; }
+article .brief summary:hover { color: var(--ink); }
+article .brief[open] summary { margin-bottom: 12px; }
 article .brief p { margin: 0 0 10px; font-size: 16px; line-height: 1.8; }
 article .brief ul { margin: 0; padding-left: 20px; font-size: 15px; }
 article .brief li { margin: 5px 0; }
+/* ── 我的标记：能找回、知道存在哪、删得掉 ── */
+.rail-marks { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--line); font-family: var(--sans); }
+.rail-marks h2 { margin: 0 0 8px; font-size: 12px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+.rail-marks .marks-count { margin-left: 6px; letter-spacing: 0; color: var(--accent-ink); }
+.marks-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.marks-list li { display: flex; align-items: stretch; gap: 2px; }
+.marks-list .mark-jump { flex: 1; min-width: 0; text-align: left; font: inherit; font-size: 13px;
+  padding: 7px 8px; min-height: 40px; border: 0; border-radius: 8px; background: none; color: var(--ink-soft);
+  cursor: pointer; }
+.marks-list .mark-jump:hover { background: var(--bg-soft); color: var(--ink); }
+.marks-list .mark-kind { display: block; font-size: 11.5px; color: var(--muted); }
+.marks-list .mark-excerpt { display: block; margin: 2px 0; line-height: 1.5; }
+.marks-list .mark-where { display: block; font-size: 11.5px; color: var(--muted); }
+.marks-list li.mark-lost .mark-where { color: var(--warn); }
+.marks-list .mark-drop { border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 15px;
+  padding: 0 7px; border-radius: 8px; }
+.marks-list .mark-drop:hover { background: var(--bg-soft); color: var(--danger); }
+.rail-marks-note { margin: 10px 0 0; font-size: 11.5px; color: var(--muted); line-height: 1.6; }
 .diagram { margin: 22px 0; padding: 12px 8px; overflow-x: auto; background: var(--bg-soft);
   border: 1px solid var(--line); border-radius: var(--radius); }
 .diagram svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
@@ -265,6 +287,22 @@ article .brief li { margin: 5px 0; }
 /* 主题句：一行说清这节课在讲什么，关键词跟在它后面 */
 .lesson-theme { display: block; color: var(--ink); font-size: .84em; margin-bottom: 5px; }
 /* 一页纸入口：一张带折角的纸。原来写的是「一页纸」三个字，在这张表里会被挤成两行 */
+/* ── 本课次入口：笔记页与一页纸页在同一位置给出同样三项 ── */
+.lesson-dock { display: flex; flex-wrap: wrap; gap: 6px; margin: 14px 0 2px; font-family: var(--sans); }
+.lesson-dock a, .lesson-dock button, .lesson-dock .dock-off { display: inline-flex; align-items: center;
+  font: inherit; font-size: 13px; padding: 6px 12px; min-height: 34px; border: 1px solid var(--line);
+  border-radius: 999px; background: var(--card-bg); color: var(--ink-soft); text-decoration: none; cursor: pointer; }
+.lesson-dock a:hover, .lesson-dock button:hover { border-color: var(--accent); color: var(--accent-ink); }
+.lesson-dock [aria-current="page"] { background: var(--accent-soft); border-color: var(--accent);
+  color: var(--accent-ink); font-weight: 600; }
+.lesson-dock .dock-off { border-style: dashed; color: var(--muted); cursor: default; }
+/* 首页的"继续阅读"：有记录才出现，最多一个 */
+.home-resume { margin: 0 0 18px; }
+.home-resume a { display: inline-flex; align-items: center; gap: 8px; font-family: var(--sans); font-size: .92em;
+  padding: 9px 14px; min-height: 40px; border: 1px solid var(--line-strong); border-radius: var(--radius);
+  background: var(--card-bg); color: var(--ink); text-decoration: none; box-shadow: var(--shadow-sm); }
+.home-resume a:hover { border-color: var(--accent); color: var(--accent-ink); }
+.home-resume .resume-where { color: var(--muted); font-size: .9em; }
 .onepage-link { display: inline-flex; align-items: center; vertical-align: -3px; margin-left: 6px; color: var(--accent); }
 .onepage-link:hover { color: var(--accent-ink); }
 .onepage-link svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 1.7;
@@ -312,6 +350,24 @@ details.note-meta pre { background: var(--bg-soft); border-radius: var(--radius)
 .card h3 { margin: 0 0 6px; font-size: 1.06em; color: var(--ink); }
 .card p { margin: 0; color: var(--muted); font-size: .9em; line-height: 1.7; }
 .card .card-meta { margin-top: 10px; color: var(--muted); font-size: .81em; display: flex; gap: 12px; flex-wrap: wrap; }
+/* ── 搜索：左边挑课程，右边一节课一张卡，卡里列真正命中的小节 ── */
+.search-shell { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 30px; align-items: start; }
+.search-body { min-width: 0; }
+.card.group { margin: 14px 0; }
+.card.group h3 { margin: 0 0 4px; }
+.card .card-theme { margin: 0 0 6px; color: var(--ink-soft); font-size: .92em; }
+.hit-list { list-style: none; margin: 10px 0 0; padding: 0; }
+.hit-list .hit { border-top: 1px solid var(--line); }
+.hit-list .hit:first-child { border-top: 0; }
+.hit-list a { display: block; padding: 10px 4px; color: inherit; text-decoration: none; border-radius: 8px; }
+.hit-list a:hover { background: var(--bg-soft); }
+.hit-list h4 { margin: 0 0 4px; font-size: .98em; color: var(--accent-ink); }
+.hit-list p { margin: 0 0 8px; color: var(--ink-soft); font-size: .9em; line-height: 1.75; }
+.hit-badge { display: inline-block; font-family: var(--sans); font-size: 12px; padding: 2px 8px;
+  border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+.hit-badge.semantic { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-ink); }
+.hit-badge.exact { border-color: var(--line-strong); color: var(--ink-soft); }
+@media (max-width: 720px) { .search-shell { grid-template-columns: minmax(0, 1fr); gap: 16px; } }
 .search { width: 100%; padding: 12px 16px; font-size: 1em; font-family: var(--sans);
   border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--bg); color: var(--ink); }
 .search:focus { outline: 3px solid var(--accent-soft); outline-offset: 1px; border-color: var(--accent); }
@@ -1074,6 +1130,24 @@ const NOTE_SCRIPT = `<script>
       if (node) node.scrollIntoView({ behavior: 'smooth', block: 'start' })
     })
   }
+  /**
+   * 记下"读到哪一课、哪一小节"——首页那个"继续阅读"入口读的就是这一份。
+   *
+   * 粒度明确是**小节**：它说的是位置，不是"已经学会"。滚动到底不会写任何"完成"标记。
+   */
+  function rememberWhere (sectionId) {
+    try {
+      var title = document.querySelector('header.site h1')
+      var link = sectionId ? document.querySelector('.rail nav.toc a[href="#' + sectionId + '"]') : null
+      localStorage.setItem('course.lastRead', JSON.stringify({
+        path: decodeURIComponent(location.pathname),
+        title: title ? String(title.textContent || '').trim() : document.title,
+        sectionId: sectionId || '',
+        sectionTitle: link ? String(link.textContent || '').trim() : ''
+      }))
+    } catch (e) {}
+  }
+  rememberWhere(saved && links.has(saved) ? saved : '')
   var lastSaved = ''
   setInterval(function () {
     var active = document.querySelector('.rail nav.toc a.active')
@@ -1082,7 +1156,18 @@ const NOTE_SCRIPT = `<script>
     if (!id || id === lastSaved) return
     lastSaved = id
     try { localStorage.setItem(POS_KEY, id) } catch (e) {}
+    rememberWhere(id)
   }, 1500)
+
+  // 「我的标记」入口：从标题下那一排直接跳到这一页的标记列表；没有标记时如实说，不给一个死链接
+  var dockMarks = document.querySelector('[data-dock="marks"]')
+  if (dockMarks) dockMarks.addEventListener('click', function () {
+    var panel = document.getElementById('railMarks')
+    if (!panel || panel.hidden) { toast('这一页还没有标记：选中正文里的一句话就能做标记'); return }
+    try { panel.scrollIntoView({ block: 'center', behavior: 'smooth' }) } catch (error) { panel.scrollIntoView() }
+    var first = panel.querySelector('.mark-jump')
+    if (first) first.focus()
+  })
 
   // 小节锚点：悬停显示 #，点一下把「页面地址 + 小节」复制到剪贴板
   headings.forEach(function (h) {
@@ -1107,12 +1192,14 @@ const NOTE_SCRIPT = `<script>
 /** 简报块：笔记页顶部的一段"先看这里"，含三条要点。 */
 function renderBriefBlock(brief = {}) {
   const points = (brief.keyPoints || []).filter(Boolean)
+  // 简报是"先看这里"，不是正文的替代品：默认展开，读者可以收起，但**内容一个字都不动**
+  // （待核、教师观点这些标签在正文里，收起简报不影响它们）。
   return [
-    '<section class="brief">',
-    '<h2>本课简报</h2>',
+    '<details class="brief" id="brief" open>',
+    '<summary>本课简报</summary>',
     `<p>${escapeHtml(brief.briefing || '')}</p>`,
     points.length ? `<ul>${points.map(point => `<li>${escapeHtml(point)}</li>`).join('')}</ul>` : '',
-    '</section>'
+    '</details>'
   ].filter(Boolean).join('\n')
 }
 
@@ -1156,7 +1243,10 @@ export function renderNotePage(record, { siteOrigin = '', neighbours = {}, cours
       '<header class="site">',
       record.courseName ? `<div class="eyebrow">${escapeHtml(record.courseName)}</div>` : '',
       `<h1>${escapeHtml(record.lessonTitle)}</h1>`,
+      // 本讲主题比日期重要：先说这节课讲什么，日期/时长排在后面当辅助信息
+      record.theme ? `<p class="lesson-title-theme">${escapeHtml(record.theme)}</p>` : '',
       meta ? `<div class="meta">${meta}</div>` : '',
+      lessonDock(record, { current: 'note' }),
       '</header>',
       '<article>',
       // 位置记忆：进来时给一个"继续上次阅读"的入口，点了才滚（自动滚会让人失去方位感）
@@ -1171,6 +1261,13 @@ export function renderNotePage(record, { siteOrigin = '', neighbours = {}, cours
       // （审计实测：目录 top=72、正文 top=1104）。读者手动展开过就一直开着（见阅读脚本里的偏好）。
       `<div class="rail-toggle"><details><summary>本页目录</summary>${toc}</details></div>`,
       `<div class="rail-desktop">${toc}</div>`,
+      // 我的标记：这一页的批注列表，点击回到原处、按 id 删除。没有标记时整块不出现
+      // （脚本填内容，服务端渲染的这份是空壳）。
+      '<div class="rail-marks" id="railMarks" hidden>',
+      '<h2>我的标记<span class="marks-count" id="marksCount"></span></h2>',
+      '<ol class="marks-list" id="marksList"></ol>',
+      '<p class="rail-marks-note">只存在这台浏览器里；导出/导入在顶栏工具里</p>',
+      '</div>',
       railExtra ? `<div class="rail-extra">${railExtra}</div>` : '',
       '</aside>',
       `<button class="totop" id="totop" type="button" title="回到顶部" aria-label="回到顶部">${svgIcon('arrowUp')}</button>`,
@@ -1440,9 +1537,56 @@ export function renderTermIndexPage({ title, description, kind, notes = [], site
   })
 }
 
-/** 首页的课程过滤：与索引页同一套交互（点一下只看这门课，选择记在本地）。 */
+/**
+ * 首页脚本：一个"继续阅读"入口 + 课程过滤。
+ *
+ * 继续阅读只做一件事：把上次读到的那一小节还给读者。三条自律——
+ *   · **有记录才出现**（没读过就是不显示，不编一个假的进度）；
+ *   · **那篇还在库里才出现**（课次被撤下就不指向不存在的页面）；
+ *   · 说的是"读到哪里"，不是"学会了多少"。
+ */
 const HOME_SCRIPT = `<script>
 (function () {
+  var resumeBox = document.getElementById('homeResume');
+  if (resumeBox) {
+    var savedRead = null;
+    try { savedRead = JSON.parse(localStorage.getItem('course.lastRead') || 'null') } catch (error) { savedRead = null }
+    // 链接在首页是相对路径（notes/…），存下来的是 location.pathname（/notes/…）：
+    // 逐个解码后比对，而不是拼字符串猜 href 长什么样。那篇不在库里就什么都不显示。
+    var link = null;
+    if (savedRead && savedRead.path) {
+      var wanted = savedRead.path;
+      var links = document.querySelectorAll('.index-body a[href]');
+      for (var i = 0; i < links.length; i += 1) {
+        var raw = links[i].getAttribute('href') || '';
+        var decoded = raw;
+        try { decoded = decodeURIComponent(raw) } catch (error) {}
+        if (samePath(decoded, wanted)) { link = links[i]; break }
+      }
+    }
+    if (link) {
+      var href = savedRead.path + (savedRead.sectionId ? '#' + savedRead.sectionId : '');
+      resumeBox.innerHTML = '<a href="' + escapeText(href) + '">继续阅读：' + escapeText(String(link.textContent || '').trim()) +
+        (savedRead.sectionTitle ? '<span class="resume-where">· ' + escapeText(savedRead.sectionTitle) + '</span>' : '') +
+        '</a>';
+      resumeBox.hidden = false;
+    }
+  }
+  function escapeText (value) {
+    return String(value == null ? '' : value).replace(/[&<>"]/g, function (c) {
+      return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c];
+    });
+  }
+  /** "notes/x.html" 与 "/notes/x.html" 是同一篇：只差开头那一个斜杠。 */
+  function samePath (left, right) {
+    var a = String(left || '');
+    var b = String(right || '');
+    if (a.charAt(0) === '.') a = a.slice(1);
+    if (b.charAt(0) === '.') b = b.slice(1);
+    if (a.charAt(0) !== '/') a = '/' + a;
+    if (b.charAt(0) !== '/') b = '/' + b;
+    return a === b;
+  }
   var rail = document.getElementById('course-rail');
   var body = document.getElementById('course-body');
   if (!rail || !body) return;
@@ -1534,17 +1678,38 @@ export function publicIndexFields(record = {}) {
   }
 }
 
-/** 站内搜索页：纯客户端，索引就是 notes.json（不含正文，体积可控）。 */
-export function renderSearchPage({ siteOrigin = '' } = {}) {
+/**
+ * 站内搜索页：纯客户端，索引就是 notes.json（不含正文，体积可控）。
+ *
+ * 页面结构按读者真正要回答的问题排：**这一句在哪个小节的哪一段出现过**。
+ * 所以结果卡的主标题是命中的小节（不是课次名），同一节课的多处命中收在一张卡里——
+ * 旧版每条命中各印一张卡，于是同一节课的主题、关键词、摘要被复制好几遍。
+ */
+export function renderSearchPage({ siteOrigin = '', courses = [] } = {}) {
+  const rail = [
+    '<aside class="filter-rail" id="search-rail" data-kind="search" aria-label="按课程筛选">',
+    '<button type="button" data-course="" aria-pressed="true">全部课程<span class="filter-count">' +
+      String(courses.reduce((sum, item) => sum + (item.count || 0), 0)) + '</span></button>',
+    courses.map(item =>
+      '<button type="button" data-course="' + escapeHtml(item.name) + '" aria-pressed="false">' +
+      escapeHtml(item.name) + '<span class="filter-count">' + String(item.count || 0) + '</span></button>'
+    ).join('\n'),
+    '</aside>'
+  ].join('\n')
   const body = [
     '<header class="site">',
     '<h1>搜索笔记</h1>',
     '</header>',
+    '<div class="search-shell">',
+    rail,
+    '<div class="search-body">',
     // 无障碍：只靠 placeholder 的输入框对读屏软件等于没有名字；检索状态要能被播报
     '<label class="sr-only" for="q">检索全部课程笔记</label>',
     '<input class="search" id="q" type="search" placeholder="例如：众数、第 25 条、抽样、共犯" autocomplete="off" aria-describedby="hint">',
     '<div class="search-hint" id="hint" role="status" aria-live="polite"></div>',
     '<div id="results"></div>',
+    '</div>',
+    '</div>',
     SEARCH_SCRIPT
   ].join('\n')
   return pageShell({
@@ -1556,44 +1721,106 @@ export function renderSearchPage({ siteOrigin = '' } = {}) {
 }
 
 /**
-/**
  * 搜索脚本：只负责展示，检索在服务端做（/api/search）。
  *
  * 为什么不再在浏览器里算：以前这里自己算 bigram 覆盖度——没有 IDF，泛词会把专名压下去，
  * 多词查询与整句问句也处理不了，而且浏览器里只有元数据、搜不了正文。
  * 现在页面把查询交给服务端，服务端用的是**与 MCP 完全相同的那套检索**：
  * 同一个服务实例、同一个打分。同一句话在页面上和在 AI 那边给出同一批结果，人才知道该信哪个。
+ *
+ * 查询与课程筛选都写进 URL（?q=&course=）：从结果点进笔记再返回，浏览器把这一页原样带回来，
+ * 滚动位置由 sessionStorage 里的那份记录恢复（点结果链接时先记一次）。
  */
 const SEARCH_SCRIPT = `<script>
 (function () {
   var input = document.getElementById('q');
   var results = document.getElementById('results');
   var hint = document.getElementById('hint');
+  var rail = document.getElementById('search-rail');
   var timer = null;
   var controller = null;
   var seq = 0;
+  var course = '';
+  var SCROLL_KEY = 'course.searchScroll';
 
   function esc (v) { return String(v == null ? '' : v).replace(/[&<>"]/g, function (c) { return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c] }) }
 
-  function card (hit) {
-    var meta = [hit.courseName, hit.lessonDate, hit.section].filter(Boolean)
-      .map(function (text) { return '<span>' + esc(text) + '</span>' }).join('');
-    var snippets = (hit.snippets || []).slice(0, 2)
-      .map(function (text) { return '<p>' + esc(text) + '</p>' }).join('');
-    var keywords = (hit.keywords || []).slice(0, 6).join('、');
-    return '<a class="card" href="' + esc(hit.anchor || hit.url) + '">' +
-      '<h3>' + esc(hit.lessonTitle) + '</h3>' +
-      (hit.theme ? '<p>' + esc(hit.theme) + '</p>' : '') +
-      '<div class="card-meta">' + meta + '</div>' +
-      snippets +
-      (keywords ? '<div class="card-meta"><span>' + esc(keywords) + '</span></div>' : '') +
-      '</a>';
-  }
-
   function show (message) { hint.textContent = message || '' }
 
-  function sync (text) {
-    try { history.replaceState(null, '', text ? '/search/?q=' + encodeURIComponent(text) : '/search/') } catch (error) {}
+  function sync () {
+    var text = input.value.trim();
+    var params = [];
+    if (text) params.push('q=' + encodeURIComponent(text));
+    if (course) params.push('course=' + encodeURIComponent(course));
+    try { history.replaceState(null, '', params.length ? '/search/?' + params.join('&') : '/search/') } catch (error) {}
+  }
+
+  function markCourse (name) {
+    course = name || '';
+    if (!rail || !rail.querySelectorAll) return;
+    var buttons = rail.querySelectorAll('button[data-course]');
+    for (var i = 0; i < buttons.length; i += 1) {
+      buttons[i].setAttribute('aria-pressed', buttons[i].getAttribute('data-course') === course ? 'true' : 'false');
+    }
+  }
+
+  /** 精确命中 / 语义近似：这两种命中不是一回事，读者要一眼看出来；相似度只作参考，不当正确率。 */
+  function badge (hit) {
+    if (hit.semantic) return '<span class="hit-badge semantic">语义近似' + (hit.similarity ? ' ' + hit.similarity : '') + '</span>';
+    return '<span class="hit-badge exact">精确命中</span>';
+  }
+
+  /** 一组 = 一节课里的所有命中；同一小节只出现一次。 */
+  function groupHits (hits) {
+    var order = [];
+    var index = {};
+    hits.forEach(function (hit) {
+      var key = hit.slug || hit.url || '';
+      if (!index[key]) { index[key] = { head: hit, items: [] }; order.push(index[key]) }
+      var items = index[key].items;
+      var duplicate = items.some(function (item) {
+        return hit.sectionId ? item.sectionId === hit.sectionId : item.section === hit.section;
+      });
+      if (!duplicate) items.push(hit);
+    });
+    return order;
+  }
+
+  function card (group) {
+    var head = group.head;
+    var meta = [head.courseName, head.lessonDate, head.lessonTitle].filter(Boolean)
+      .map(function (text) { return '<span>' + esc(text) + '</span>' }).join('');
+    var rows = group.items.map(function (hit) {
+      var snippets = (hit.snippets || []).slice(0, 2)
+        .map(function (text) { return '<p>' + esc(text) + '</p>' }).join('');
+      return '<li class="hit"><a href="' + esc(hit.anchor || hit.url) + '">' +
+        '<h4>' + esc(hit.section || hit.lessonTitle) + '</h4>' +
+        snippets + badge(hit) +
+        '</a></li>';
+    }).join('');
+    return '<section class="card group">' +
+      '<h3>' + esc(head.lessonTitle) + '</h3>' +
+      (head.theme ? '<p class="card-theme">' + esc(head.theme) + '</p>' : '') +
+      '<div class="card-meta">' + meta + '</div>' +
+      '<ol class="hit-list">' + rows + '</ol>' +
+      '</section>';
+  }
+
+  function rememberScroll () {
+    try {
+      sessionStorage.setItem(SCROLL_KEY, JSON.stringify({ q: input.value.trim(), course: course, y: window.scrollY || 0 }));
+    } catch (error) {}
+  }
+
+  /** 从结果点进笔记再返回：查询与课程筛选在 URL 里，滚动位置照这份记录还回去（用完即弃）。 */
+  function restoreScroll () {
+    var saved = null;
+    try { saved = JSON.parse(sessionStorage.getItem(SCROLL_KEY) || 'null') } catch (error) { saved = null }
+    if (!saved) return;
+    try { sessionStorage.removeItem(SCROLL_KEY) } catch (error) {}
+    if (String(saved.q || '') !== input.value.trim()) return;
+    if (String(saved.course || '') !== course) return;
+    if (saved.y) window.scrollTo(0, saved.y);
   }
 
   /** 清空/取消：把在途请求作废并中止，别让它 200ms 后把结果贴回一个已经空掉的框里。 */
@@ -1609,12 +1836,13 @@ const SEARCH_SCRIPT = `<script>
   function run (value) {
     var text = String(value || '').trim();
     if (!text) { reset(''); return }
-    sync(text);
+    sync();
     var mine = (seq += 1);
     if (controller) controller.abort();
     controller = new AbortController();
     show('检索中…');
-    fetch('/api/search?q=' + encodeURIComponent(text) + '&limit=20', { signal: controller.signal })
+    var url = '/api/search?q=' + encodeURIComponent(text) + '&limit=20' + (course ? '&course=' + encodeURIComponent(course) : '');
+    fetch(url, { signal: controller.signal })
       // 先看 HTTP 状态再解析：429（太频繁）、400（查询过长）、504（超时）都会带可读的
       // message，照实说给读者听，比一律"稍后再试"有用得多。
       .then(function (response) {
@@ -1631,15 +1859,22 @@ const SEARCH_SCRIPT = `<script>
         if (mine !== seq) return;
         if (!data.ok) { results.innerHTML = ''; show(data.message || '检索失败。'); return }
         var hits = data.hits || [];
+        var semantic = data.semantic || {};
         if (!hits.length) {
           results.innerHTML = '';
-          show('没有找到。换个更具体的术语、法条或人名试试（问句里的疑问词会被自动去掉）。');
+          // "没有这条" / "服务没答上来" / "语义入口没开"是三件事，不能都说成"知识库没有"
+          var message = '字面没有找到「' + text + '」';
+          message += semantic.enabled === false
+            ? '；本站未启用语义检索，所以也不能按意思找相近的小节。'
+            : '；按意思找也没有相近的小节。';
+          show(message + '换个更具体的术语、法条或人名试试（问句里的疑问词会被自动去掉）。');
           return;
         }
+        var groups = groupHits(hits);
         var notes = [];
-        // 语义回退：字面没命中、这几条是按意思找的——必须说清楚，并给出相似度
-        if (data.semantic && data.semantic.used) {
-          notes.push('字面没有命中，以下按**语义近似**召回' + (hits[0] && hits[0].similarity ? '（最像的一条相似度 ' + hits[0].similarity + '）' : ''));
+        // 语义回退：字面没命中、这些是按意思找的——必须说清楚，并给出相似度
+        if (semantic.used) {
+          notes.push('以下按**语义近似**召回' + (hits[0] && hits[0].similarity ? '（最像的一条相似度 ' + hits[0].similarity + '）' : ''));
         }
         if (data.fuzzy && data.fuzzy.length) {
           notes.push('按近似词检索：' + data.fuzzy.map(function (item) { return item.from + '→' + item.to }).join('、'));
@@ -1647,10 +1882,11 @@ const SEARCH_SCRIPT = `<script>
         // 用 escalated（索引答不上来才翻正文）而不是 bodyScanned：本地库的正文就在内存里，
         // auto 每句都会顺带用它，用 bodyScanned 会让每句话都提示"连正文一起检索"。
         if (data.escalated || (data.escalated === undefined && data.bodyScanned)) notes.push('本次连正文一起检索');
-        var multi = hits.filter(function (hit) { return (hit.sections || []).length > 1 }).length;
+        var multi = groups.filter(function (group) { return group.items.length > 1 }).length;
         if (multi) notes.push(multi + ' 篇在多个小节命中');
-        show(hits.length + ' 条命中' + (notes.length ? '（' + notes.join('；') + '）' : ''));
-        results.innerHTML = hits.map(card).join('');
+        show('命中 ' + groups.length + ' 节课、' + hits.length + ' 处小节' + (notes.length ? '（' + notes.join('；') + '）' : ''));
+        results.innerHTML = groups.map(card).join('');
+        restoreScroll();
       })
       .catch(function (error) {
         if (error && error.name === 'AbortError') return;
@@ -1662,8 +1898,25 @@ const SEARCH_SCRIPT = `<script>
 
   function schedule (value) { clearTimeout(timer); timer = setTimeout(function () { timer = null; run(value) }, 160) }
 
-  var initial = new URLSearchParams(location.search).get('q');
+  if (rail) {
+    rail.addEventListener('click', function (event) {
+      var button = event.target.closest ? event.target.closest('button[data-course]') : null;
+      if (!button) return;
+      markCourse(button.getAttribute('data-course') || '');
+      // 换课程是要看"这门课里有没有"，即使框里没词也重跑一次（空查询不请求）
+      if (input.value.trim()) run(input.value);
+      else { results.innerHTML = ''; show(course ? '已切到「' + course + '」，输入关键词开始检索。' : ''); sync() }
+    });
+  }
+  results.addEventListener('click', function (event) {
+    if (event.target.closest && event.target.closest('a[href]')) rememberScroll();
+  });
+
+  var params = new URLSearchParams(location.search);
+  var initial = params.get('q');
+  markCourse(params.get('course') || '');
   if (initial) { input.value = initial; run(initial) }
+  else if (course) show('已限定「' + course + '」，输入关键词开始检索。');
 
   // 中文输入法组字期间不检索：候选每变一次都会触发 input，中途搜出来的是半成品，
   // 而且会把「刚才那条完整查询」的结果顶掉。组字结束再排一次。
@@ -1734,6 +1987,8 @@ export function renderIndexPage(records, { siteOrigin = '' } = {}) {
   ].join('')
 
   const body = [
+    // 继续阅读（有记录才显示，最多一个）
+    '<div class="home-resume" id="homeResume" hidden></div>',
     '<div class="index-shell">',
     rail,
     '<div class="index-body" id="course-body">',
@@ -1966,7 +2221,16 @@ export function writeSite({ records = [], outputDir, siteOrigin = '', docs = [] 
   // 文档页与 llms.txt：AI 的第一站。文档内容来自仓库里的 docs/public/*.md
   for (const relative of writeDocs({ outputDir: root, siteOrigin, pages: docs })) written.push(relative)
   write('llms.txt', renderLlmsTxt({ records: sorted, siteOrigin, pages: docs }))
-  write('search/index.html', renderSearchPage({ siteOrigin }))
+  // 搜索页的课程筛选在建站时算好：课程列表跟着发布走，页面里不必再取一次数据
+  const courseCounts = new Map()
+  for (const record of sorted) {
+    const name = record.courseName || '未分类'
+    courseCounts.set(name, (courseCounts.get(name) || 0) + 1)
+  }
+  write('search/index.html', renderSearchPage({
+    siteOrigin,
+    courses: [...courseCounts].map(([name, count]) => ({ name, count }))
+  }))
   write('feed.xml', renderFeed(sorted, { siteOrigin }))
   write('notes.json', `${JSON.stringify({
     siteName: SITE_NAME,

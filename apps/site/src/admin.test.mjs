@@ -502,6 +502,44 @@ async function waitJob (handler, jobId, tries = 50) {
   throw new Error('job 一直没有结束：' + jobId)
 }
 
+test('最近任务：四态如实给出，并写明这是进程内快照（重启就没了）', async () => {
+  const { handler } = fixture()
+  const before = await call(handler, { url: '/api/admin/status' })
+  assert.deepEqual(before.body.recentJobs, [], '这一版服务还没跑过命令时，最近任务是空的')
+
+  const started = await call(handler, {
+    method: 'POST', url: '/api/admin/run', body: JSON.stringify({ action: 'doctor' })
+  })
+  assert.equal(started.res.state.status, 202)
+  await waitJob(handler, started.body.jobId)
+
+  const after = await call(handler, { url: '/api/admin/status' })
+  const job = after.body.recentJobs.find(item => item.id === started.body.jobId)
+  assert.ok(job, '跑完的任务要出现在最近任务里')
+  assert.equal(job.status, 'done')
+  assert.equal(job.exitCode, 0)
+  assert.equal(job.action, 'doctor')
+  assert.ok(job.finishedAt, '完成时间要给出，页面上要显示"什么时候跑的"')
+
+  // 界面侧：状态用词与账本一致，且旁边就写着"重启会丢"的边界
+  assert.match(ADMIN_HTML, /var JOB_STATUS_TEXT = \{ queued: '排队', running: '运行中', done: '完成', failed: '失败' \}/)
+  assert.match(ADMIN_HTML, /进程内快照，服务重启后这里就空了/)
+  assert.match(ADMIN_HTML, /已确认的课程阶段在账本里/)
+})
+
+test('管理台不假装能生成整合材料：标"规划中"，并写清已有原型的真实范围', () => {
+  assert.doesNotMatch(ADMIN_HTML, /整合材料生成还没做/, '不能留着"点了才报错"的按钮')
+  assert.match(ADMIN_HTML, /<span class="meta">规划中<\/span>/)
+  assert.match(ADMIN_HTML, /以上几类尚未实现，先如实标出来，不提供会报错的按钮。/)
+  assert.match(ADMIN_HTML, /已有原型（控制台未接线）/)
+  assert.match(ADMIN_HTML, /只做确定性抽取，不调用模型、不推送。这一页还没接上它。/)
+  // 动作名字写清代价：会不会调用模型、会不会推微信、可不可逆
+  assert.match(ADMIN_HTML, /republish: '重新发布页面（用现有笔记，不调用模型）'/)
+  assert.match(ADMIN_HTML, /revise: '用模型重写这个模块（调用模型，产生费用）'/)
+  assert.match(ADMIN_HTML, /notify: '投递通知（会发微信）'/)
+  assert.match(ADMIN_HTML, /'prune-apply': '清理并删除原件（不可逆）'/)
+})
+
 test('run 立刻返回 jobId，结果由 job 接口查（不再挂着一个请求等几分钟）', async () => {
   const { handler, calls } = fixture()
   const { res, body } = await call(handler, {

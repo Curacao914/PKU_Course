@@ -1,14 +1,19 @@
 import { escapeHtml, renderMarkdown } from './markdown.mjs'
-import { svgIcon } from './reader.mjs'
+import { lessonDock, svgIcon } from './reader.mjs'
 
 /**
- * 一页纸视图：左侧同一课程的课次（点着换页），右侧一张 A4。
+ * 一页纸视图：左侧同一课程的课次（点着换页），右侧同一份内容，两种看法。
  *
  * 三条硬要求（都来自用户）：
- *   1. **放得下**：只能是一张 A4 的量。模型那边按字数写，页面这边再做一次自动缩放兜底，
- *      两边都不许出现"内容被裁掉半截"。
- *   2. **不是一篇文章**：列表、表格为主，所以正文按三栏排（窄屏两栏），像复习卡而不像稿纸。
- *   3. **打印出来就是一张 A4**：@page 尺寸写死 A4，打印时隐掉导航与工具，纸上只有这一页。
+ *   1. **阅读模式是默认**：手机上自然纵排、正文 17px 基准，字号**跟随全局滑块即时变化**。
+ *      一页纸首先是给人读的；把手机上读的字缩成 11.5px 去凑一张纸的版式，是把版式的重要性
+ *      放在了读者前面。
+ *   2. **A4 预览是另一种看法，不是唯一看法**：纸张尺寸写死 A4、按纸张自动缩放，
+ *      缩到底还放不下就**如实标出来**（该回去删内容，而不是继续缩成蚂蚁字，也不是裁掉半截）。
+ *   3. **两者共用同一份内容**：切换显示方式不重新请求、不改写正文，只换样式与量尺。
+ *
+ * 旧实现的问题（审计实测）：手机单栏但正文仍是 11.5px * --sheet-scale，fit() 只在初始化与
+ * 打印前跑，且把用户字号限制在 0.85—1.15。于是"页面里把字号调到 140%"对正文毫无影响。
  */
 export function renderOnepagePage(record = {}, { siteOrigin = '', courseLessons = [] } = {}) {
   const onepage = record.onepage || {}
@@ -29,7 +34,15 @@ export function renderOnepagePage(record = {}, { siteOrigin = '', courseLessons 
     rail || `<div class="rail-title">${escapeHtml(record.courseName || '')}</div>`,
     '</aside>',
     '<div class="sheet-wrap">',
-    '<article class="sheet" id="sheet">',
+    // 与笔记页同一位置的三个入口：在这一页也能原路回正文、回到自己的标记
+    lessonDock(record, { current: 'onepage' }),
+    // 显示方式开关：默认阅读模式，纸张模式是一次明确的点击（并记住选择）
+    '<div class="sheet-tools" id="sheetTools" role="group" aria-label="一页纸显示方式">',
+    '<button type="button" data-sheet-mode="read" aria-pressed="true">阅读模式</button>',
+    '<button type="button" data-sheet-mode="a4" aria-pressed="false">A4 预览</button>',
+    '<span class="sheet-state" id="sheetState" aria-live="polite"></span>',
+    '</div>',
+    '<article class="sheet" id="sheet" data-mode="read">',
     `<h1 class="sheet-title">${escapeHtml(sheetTitle)}</h1>`,
     `<div class="sheet-body" id="sheetBody">${renderMarkdown(onepage.markdown || '')}</div>`,
     `<div class="sheet-foot">${escapeHtml(record.courseName || '')} · ${escapeHtml(record.lessonTitle || '')}</div>`,
@@ -42,25 +55,37 @@ export function renderOnepagePage(record = {}, { siteOrigin = '', courseLessons 
 }
 
 /**
- * 自动缩放：以"放得下"为第一优先级。
+ * 显示方式与量尺。
  *
- * 三栏排版里内容溢出时会在右边"长出第四栏"（scrollWidth 变大），所以宽高都要看。
- * 缩到 0.72 还放不下就停手并标记出来——那时候该做的是回去删内容，而不是继续缩成蚂蚁字。
+ * 阅读模式**不需要脚本**：字号就是 `calc(17px * var(--font-scale))`，读者拖滑块时浏览器
+ * 自己就重算了，没有"监听字号变化"这一层可以漏。
+ *
+ * 纸张模式才有算术：A4 是固定的，内容要迁就纸——缩到 0.72 还放不下就停手并标记出来。
+ * 字号变、窗口大小变、打印前都要重新量一次；打印时无论当前是哪种模式，都按纸张输出。
  */
 export const ONEPAGE_SCRIPT = `<script>
 (function () {
   var sheet = document.getElementById('sheet')
   var body = document.getElementById('sheetBody')
+  var tools = document.getElementById('sheetTools')
+  var state = document.getElementById('sheetState')
   if (!sheet || !body) return
+  var KEY = 'course.onepageMode'
+  var mode = 'read'
+  try { if (localStorage.getItem(KEY) === 'a4') mode = 'a4' } catch (error) {}
+  var pending = null
+
+  function save (value) { try { localStorage.setItem(KEY, value) } catch (error) {} }
   function overflows () {
     return body.scrollWidth > body.clientWidth + 2 || body.scrollHeight > body.clientHeight + 2
   }
+  function userScale () {
+    return parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--font-scale')) || 1
+  }
+
+  /** 纸张模式：起始字号跟随全局字号（限制在 0.85—1.15），放不下继续缩，缩不动就标记。 */
   function fit () {
-    // 起始字号跟随全局字号（读者在工具栏调的），但**限制在 0.85—1.15**：
-    // 一页纸是"一页 A4"，读者把它调到 1.4 倍时不该假装还能一页装下——
-    // 这时候正确的行为是照常自动缩、缩不动就标出"内容超出 A4"，而不是静默裁掉。
-    var user = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--font-scale')) || 1
-    var scale = Math.max(0.85, Math.min(1.15, user))
+    var scale = Math.max(0.85, Math.min(1.15, userScale()))
     sheet.style.setProperty('--sheet-scale', scale.toFixed(2))
     var guard = 0
     while (overflows() && scale > 0.72 && guard < 24) {
@@ -74,58 +99,173 @@ export const ONEPAGE_SCRIPT = `<script>
     else sheet.removeAttribute('data-overflow')
     return { scale: scale, tight: tight }
   }
-  fit()
-  // 打印前重新量一次：纸上的列宽与屏幕不同，屏幕上刚好放得下不代表纸上也是
-  window.addEventListener('beforeprint', fit)
+
+  /** 纸张模式的状态：缩放多少、放不放得下——读者要能看见"为什么字变小了"。 */
+  function report (result) {
+    if (!state) return
+    if (mode !== 'a4') { state.textContent = ''; return }
+    var parts = ['纸张缩放 ' + Math.round(result.scale * 100) + '%']
+    if (result.tight) parts.push('内容超出 A4，请精简这一页')
+    else if (userScale() !== 1) parts.push('纸张固定 A4，字号按纸缩放；想按自己的字号读请用阅读模式')
+    state.textContent = parts.join(' · ')
+  }
+
+  function repaint () {
+    sheet.setAttribute('data-mode', mode)
+    if (tools) {
+      [].slice.call(tools.querySelectorAll('button[data-sheet-mode]')).forEach(function (button) {
+        button.setAttribute('aria-pressed', button.getAttribute('data-sheet-mode') === mode ? 'true' : 'false')
+      })
+    }
+    if (mode === 'a4') report(fit())
+    else if (state) state.textContent = ''
+  }
+
+  /** 一批变化里只量一次：拖字号滑块会连着触发几十次。 */
+  function schedule () {
+    if (pending) return
+    pending = requestAnimationFrame(function () { pending = null; repaint() })
+  }
+
+  repaint()
+  if (tools) {
+    tools.addEventListener('click', function (event) {
+      var button = event.target.closest('button[data-sheet-mode]')
+      if (!button) return
+      mode = button.getAttribute('data-sheet-mode') === 'a4' ? 'a4' : 'read'
+      save(mode)
+      repaint()
+    })
+  }
+  // 字号改动：工具栏滑块改的是 documentElement 上的 --font-scale，盯属性比盯着某个控件稳
+  // （顶栏与设置浮层各有一个滑块）。
+  if (window.MutationObserver) {
+    new MutationObserver(schedule).observe(document.documentElement, { attributes: true, attributeFilter: ['style', 'class'] })
+  }
+  window.addEventListener('resize', schedule)
+  // 打印前重新量一次，并**按纸张输出**：屏幕上选的是阅读模式，纸上也必须是那张 A4。
+  var restore = null
+  window.addEventListener('beforeprint', function () {
+    if (restore === null) restore = mode
+    mode = 'a4'
+    repaint()
+  })
+  window.addEventListener('afterprint', function () {
+    if (restore !== null) { mode = restore; restore = null }
+    repaint()
+  })
 })();
 </script>`
 
-/** 一页纸专用样式：A4 比例、三栏、打印就是一页纸。 */
+/**
+ * 一页纸样式：一套内容，两种看法。
+ *
+ * 共享的只有变量（--font-scale / --line / --card-bg…），排版数值两边各写一套——
+ * 让"纸上的 11.5px 三栏"和"屏幕上的 17px 单栏"互相迁就，结果只会是两个都不好用。
+ */
 export const ONEPAGE_CSS = `
-/* ── 一页纸：左侧课次 + 右侧一张 A4 ── */
+/* ── 一页纸：左侧课次 + 右侧同一份内容 ── */
 .onepage { display: grid; grid-template-columns: var(--rail-w) minmax(0, 1fr); gap: 26px;
   max-width: 1320px; margin: 0 auto; padding: 22px 22px 60px; align-items: start; }
 .onepage .rail { position: sticky; top: calc(var(--header-h) + 18px); align-self: start;
   max-height: calc(100vh - var(--header-h) - 36px); overflow-y: auto; }
 .onepage-chars { color: var(--muted); font-size: 11.5px; margin-left: 6px; }
 .sheet-wrap { min-width: 0; }
-.sheet { --sheet-scale: 1; width: 100%; max-width: 210mm; margin: 0 auto; aspect-ratio: 210 / 297;
-  background: var(--card-bg); border: 1px solid var(--line); border-radius: 6px; box-shadow: var(--shadow-md);
-  padding: 12mm 11mm 9mm; display: flex; flex-direction: column; overflow: hidden; font-family: var(--sans); }
-.sheet-title { margin: 0 0 4mm; font-size: calc(17px * var(--sheet-scale)); line-height: 1.35; letter-spacing: -.01em; }
-.sheet-body { flex: 1; min-height: 0; column-count: 3; column-gap: 6mm; font-size: calc(11.5px * var(--sheet-scale));
-  line-height: 1.62; overflow: hidden; }
-.sheet-body h2 { font-size: calc(13px * var(--sheet-scale)); margin: 0 0 2mm; padding-bottom: 1mm;
-  border-bottom: 1px solid var(--line); break-after: avoid; }
-.sheet-body h3 { font-size: calc(12px * var(--sheet-scale)); margin: 2.5mm 0 1mm; color: var(--ink-soft); break-after: avoid; }
-.sheet-body p { margin: 0 0 1.6mm; }
-.sheet-body ul, .sheet-body ol { margin: 0 0 2mm; padding-left: 4.6mm; }
-.sheet-body li { margin: 0 0 .8mm; }
-.sheet-body table { width: 100%; border-collapse: collapse; margin: 0 0 2.4mm; font-size: calc(10.5px * var(--sheet-scale)); }
-.sheet-body th, .sheet-body td { border: 1px solid var(--line); padding: .9mm 1.4mm; text-align: left; vertical-align: top; }
+
+/* 显示方式开关：两个按钮 + 一行状态，不做成大按钮工具栏 */
+.sheet-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; max-width: 210mm;
+  margin: 0 auto 12px; }
+.sheet-tools button { font: inherit; font-size: 13px; padding: 6px 12px; min-height: 34px; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 999px; background: var(--card-bg); color: var(--ink-soft); }
+.sheet-tools button[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent);
+  color: var(--accent-ink); font-weight: 600; }
+.sheet-state { font-size: 12.5px; color: var(--muted); }
+
+.sheet { width: 100%; margin: 0 auto; padding: 12mm 11mm 9mm; display: flex; flex-direction: column;
+  font-family: var(--sans); background: var(--card-bg); border: 1px solid var(--line); border-radius: 6px;
+  box-shadow: var(--shadow-md); }
+
+/* ── 阅读模式（默认）：字号跟随全局滑块，正文 17px 基准 ── */
+.sheet[data-mode="read"] { max-width: 74ch; padding: 0; gap: 0; display: block; background: transparent;
+  border: 0; box-shadow: none; overflow: visible; }
+.sheet[data-mode="read"] .sheet-title { margin: 0 0 18px; font-size: calc(22px * var(--font-scale));
+  line-height: 1.35; letter-spacing: -.01em; }
+.sheet[data-mode="read"] .sheet-body { font-size: calc(17px * var(--font-scale)); line-height: 1.78;
+  overflow: visible; column-count: auto; column-gap: normal; }
+.sheet[data-mode="read"] .sheet-body h2 { font-size: calc(19px * var(--font-scale)); margin: 26px 0 10px;
+  padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+.sheet[data-mode="read"] .sheet-body h3 { font-size: calc(17px * var(--font-scale)); margin: 20px 0 8px;
+  color: var(--ink-soft); }
+.sheet[data-mode="read"] .sheet-body p { margin: 0 0 12px; }
+.sheet[data-mode="read"] .sheet-body ul, .sheet[data-mode="read"] .sheet-body ol { margin: 0 0 14px;
+  padding-left: 24px; }
+.sheet[data-mode="read"] .sheet-body li { margin: 0 0 6px; }
+.sheet[data-mode="read"] .sheet-body blockquote { margin: 0 0 14px; padding: 10px 16px;
+  font-size: calc(16px * var(--font-scale)); }
+.sheet[data-mode="read"] .sheet-body code { font-size: .92em; }
+.sheet[data-mode="read"] .sheet-foot { margin-top: 26px; padding-top: 12px;
+  font-size: calc(13px * var(--font-scale)); }
+/* 长表格只在自己这块里横滚，整页不横移 */
+.sheet-body table { width: 100%; border-collapse: collapse; margin: 0 0 18px;
+  display: block; overflow-x: auto; max-width: 100%; }
+.sheet-body th, .sheet-body td { border: 1px solid var(--line); padding: 6px 10px; text-align: left;
+  vertical-align: top; }
 .sheet-body th { background: var(--bg-soft); font-weight: 600; }
-.sheet-body blockquote { margin: 0 0 2mm; padding: 1.4mm 2.4mm; background: var(--bg-soft);
+.sheet[data-mode="read"] .sheet-body table { font-size: calc(15px * var(--font-scale)); }
+
+/* ── A4 预览：纸张固定，内容迁就纸 ── */
+.sheet[data-mode="a4"] { --sheet-scale: 1; max-width: 210mm; aspect-ratio: 210 / 297; overflow: hidden; }
+.sheet[data-mode="a4"] .sheet-title { margin: 0 0 4mm; font-size: calc(17px * var(--sheet-scale));
+  line-height: 1.35; letter-spacing: -.01em; }
+.sheet[data-mode="a4"] .sheet-body { flex: 1; min-height: 0; column-count: 3; column-gap: 6mm;
+  font-size: calc(11.5px * var(--sheet-scale)); line-height: 1.62; overflow: hidden; }
+.sheet[data-mode="a4"] .sheet-body h2 { font-size: calc(13px * var(--sheet-scale)); margin: 0 0 2mm;
+  padding-bottom: 1mm; border-bottom: 1px solid var(--line); break-after: avoid; }
+.sheet[data-mode="a4"] .sheet-body h3 { font-size: calc(12px * var(--sheet-scale)); margin: 2.5mm 0 1mm;
+  color: var(--ink-soft); break-after: avoid; }
+.sheet[data-mode="a4"] .sheet-body p { margin: 0 0 1.6mm; }
+.sheet[data-mode="a4"] .sheet-body ul, .sheet[data-mode="a4"] .sheet-body ol { margin: 0 0 2mm;
+  padding-left: 4.6mm; }
+.sheet[data-mode="a4"] .sheet-body li { margin: 0 0 .8mm; }
+.sheet[data-mode="a4"] .sheet-body table { font-size: calc(10.5px * var(--sheet-scale)); display: table;
+  table-layout: fixed; }
+.sheet[data-mode="a4"] .sheet-body th, .sheet[data-mode="a4"] .sheet-body td { padding: .9mm 1.4mm; }
+.sheet[data-mode="a4"] .sheet-body blockquote { margin: 0 0 2mm; padding: 1.4mm 2.4mm; background: var(--bg-soft);
   border-left: 2px solid var(--accent); font-size: calc(11px * var(--sheet-scale)); }
-.sheet-body code { font-family: ui-monospace, Menlo, monospace; background: var(--bg-sunken); padding: 0 1mm; border-radius: 3px; }
-.sheet-foot { margin-top: 3mm; padding-top: 1.6mm; border-top: 1px solid var(--line);
+.sheet[data-mode="a4"] .sheet-body code { font-family: ui-monospace, Menlo, monospace;
+  background: var(--bg-sunken); padding: 0 1mm; border-radius: 3px; }
+.sheet[data-mode="a4"] .sheet-foot { margin-top: 3mm; padding-top: 1.6mm; border-top: 1px solid var(--line);
   color: var(--muted); font-size: calc(10px * var(--sheet-scale)); }
 /* 缩到底还是放不下：如实标出来（该回去删内容，而不是继续缩成蚂蚁字） */
-.sheet[data-overflow="1"] { border-color: var(--warn); }
-.sheet[data-overflow="1"] .sheet-foot::after { content: " · 内容超出 A4，请精简"; color: var(--warn); }
-@media (max-width: 1100px) { .sheet-body { column-count: 2; } }
+.sheet[data-mode="a4"][data-overflow="1"] { border-color: var(--warn); }
+.sheet[data-mode="a4"][data-overflow="1"] .sheet-foot::after { content: " · 内容超出 A4，请精简";
+  color: var(--warn); }
+@media (max-width: 1100px) { .sheet[data-mode="a4"] .sheet-body { column-count: 2; } }
 @media (max-width: 900px) {
   .onepage { grid-template-columns: minmax(0, 1fr); gap: 16px; padding: 16px 14px 60px; }
   .onepage .rail { position: static; max-height: none; order: 2; }
-  .sheet { aspect-ratio: auto; }
-  .sheet-body { column-count: 1; }
+  .sheet-tools { justify-content: flex-start; }
+  /* 手机上的纸张模式仍是一张真 A4 的缩样（保持比例，放不下就标记），只是提醒读者
+     日常阅读该用阅读模式——把"纸张"拉长成一条不算预览。 */
+  .sheet[data-mode="a4"] .sheet-body { column-count: 1; }
 }
 @media print {
   @page { size: A4; margin: 8mm; }
-  .topbar, .rail, .tools, .totop { display: none !important; }
+  .topbar, .rail, .tools, .totop, .sheet-tools, .sheet-state { display: none !important; }
   .onepage { display: block; max-width: none; padding: 0; }
-  .sheet { max-width: none; width: auto; aspect-ratio: auto; border: 0; box-shadow: none; padding: 0;
-    background: #fff; }
-  .sheet-body { column-count: 3; overflow: visible; }
+  .sheet, .sheet[data-mode="read"], .sheet[data-mode="a4"] { max-width: none !important; width: auto;
+    aspect-ratio: auto !important; border: 0 !important; box-shadow: none !important; padding: 0 !important;
+    background: #fff !important; display: block !important; overflow: visible !important; }
+  .sheet-title { font-size: calc(17px * var(--sheet-scale, 1)) !important; margin: 0 0 4mm !important; }
+  .sheet-body { font-size: calc(11.5px * var(--sheet-scale, 1)) !important; line-height: 1.62 !important;
+    column-count: 3 !important; column-gap: 6mm !important; overflow: visible !important; }
+  .sheet-body h2 { font-size: calc(13px * var(--sheet-scale, 1)) !important; margin: 0 0 2mm !important; }
+  .sheet-body h3 { font-size: calc(12px * var(--sheet-scale, 1)) !important; }
+  .sheet-body p { margin: 0 0 1.6mm !important; }
+  .sheet-body table { display: table !important; table-layout: fixed; font-size: calc(10.5px * var(--sheet-scale, 1)) !important; }
+  .sheet-body th, .sheet-body td { padding: .9mm 1.4mm !important; }
+  .sheet-body blockquote { font-size: calc(11px * var(--sheet-scale, 1)) !important; }
+  .sheet-foot { font-size: calc(10px * var(--sheet-scale, 1)) !important; }
   body { background: #fff; }
 }
 `;

@@ -327,7 +327,9 @@ export function createNotesService({ source, siteOrigin = '', semantic = null } 
       return {
         id: anchorId ? `${hit.slug}#${encodeURIComponent(anchorId)}` : hit.slug,
         title: [course, lesson, section].filter(Boolean).join(' · '),
-        url: noteUrl(hit.slug)
+        // url 也带上小节锚点：人点开链接落在同一小节，而不是课次页顶部再自己找。
+        // 审计指出过这里的不一致——id 有小节、url 却没有，调用方只能自己拼。
+        url: anchorId ? `${noteUrl(hit.slug)}#${encodeURIComponent(anchorId)}` : noteUrl(hit.slug)
       }
     })
     return { query: text, scanned: found.scanned || records.length, results }
@@ -346,13 +348,16 @@ export function createNotesService({ source, siteOrigin = '', semantic = null } 
     const section = sectionPart ? decodeURIComponent(sectionPart) : ''
     const note = await getNote({ slug: slugPart, section, maxChars: NOTE_MAX_CHARS_LIMIT }, context)
     const text = note.markdown || ''
+    // url 与 search 的结果指向同一处：按小节取回的文档，链接也带到那一节
+    // （否则 search 给 id.section、fetch 给的链接却落在课次顶部，两端对不上）。
+    const anchorId = section ? String(note.section?.id || '') : ''
     return {
       id: raw,
       title: section
         ? `${note.courseName} · ${note.lessonTitle} · ${note.section?.title || section}`
         : `${note.courseName} · ${note.lessonTitle}`,
       text,
-      url: noteUrl(note.slug),
+      url: anchorId ? `${noteUrl(note.slug)}#${encodeURIComponent(anchorId)}` : noteUrl(note.slug),
       metadata: {
         course: note.courseName || '',
         lesson: note.lessonTitle || '',

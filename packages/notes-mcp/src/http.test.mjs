@@ -224,7 +224,9 @@ test('Remote MCP：一次 HTTP 往返就能 initialize 并列出七个工具', a
       jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'search', arguments: { query: '归因' } }
     })).json()
     const payload = JSON.parse(search.result.content[0].text)
-    assert.equal(payload.results[0].url, 'https://course.law-tech.dev/notes/国际法学/第一课.html')
+    // 命中落在小节时，url 也要带到那一节——与 results[].id 指同一处，调用方不必自己拼锚点
+    assert.equal(payload.results[0].url, 'https://course.law-tech.dev/notes/国际法学/第一课.html#%E4%B8%80-%E5%BD%92%E5%9B%A0')
+    assert.ok(payload.results[0].id.endsWith('#%E4%B8%80-%E5%BD%92%E5%9B%A0'), 'id 与 url 指向同一小节')
 
     const fetched = await (await rpc(site.url, {
       jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'fetch', arguments: { id: payload.results[0].id } }

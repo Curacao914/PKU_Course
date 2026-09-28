@@ -270,8 +270,14 @@ button.item:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
   <section id="tab-settings" hidden></section>
   <div class="card" style="padding:6px 22px">
     <details class="d" id="outCard" style="border-top:0" data-fold="out">
-      <summary><span class="ttl">运行输出</span><span class="muted small">最近一次命令的完整结果</span></summary>
-      <div class="body"><pre id="out">（尚未运行）</pre></div>
+      <summary><span class="ttl">运行输出</span><span class="muted small" id="outHint">最近一次命令的完整结果</span></summary>
+      <div class="body">
+        <div class="block" style="border:0;padding:0 0 10px">
+          <h3>最近任务<span class="muted small" id="jobsBoundary" style="font-weight:400">（进程内快照，服务重启后这里就空了；已确认的课程阶段在账本里，见「课程」页每条课次）</span></h3>
+          <div id="recentJobs"><span class="small muted">暂无</span></div>
+        </div>
+        <pre id="out">（尚未运行）</pre>
+      </div>
     </details>
   </div>
 </main>
@@ -296,11 +302,17 @@ try {
   if (savedSel && typeof savedSel === 'object') state.sel = Object.assign(state.sel, savedSel)
 } catch (e) {}
 
+// 动作名字要写清"会不会花钱、会不会推送到微信、可不可逆"：
+// 这些都靠名字与副标题说，而不是等用户点下去再看结果。
 var LABELS = {
-  discover: '扫描教学网', cycle: '跑一轮完整链路', 'cycle-all': '跑一轮完整链路',
-  notify: '投递通知', doctor: '体检', backup: '备份账本', prune: '清理预演',
-  'prune-apply': '清理并删除原件', retry: '放回队列', republish: '重新发布',
-  revise: '按新要求重写模块', 'notify-retry': '重发失败通知'
+  discover: '扫描教学网（不调用模型）', cycle: '跑一轮完整链路（调用模型、可能推送）',
+  'cycle-all': '跑一轮完整链路（调用模型、可能推送）',
+  notify: '投递通知（会发微信）', doctor: '体检（不调用模型）', backup: '备份账本（不调用模型）',
+  prune: '清理预演（只看，不删）', 'prune-apply': '清理并删除原件（不可逆）',
+  retry: '放回队列（重跑这条课次，会调用模型）',
+  republish: '重新发布页面（用现有笔记，不调用模型）',
+  revise: '用模型重写这个模块（调用模型，产生费用）',
+  'notify-retry': '重发失败通知（会发微信）'
 }
 var MODULE_TEXT = { approved: '已通过', draft: '草稿', reviewing: '审查中', revising: '重写中', pending: '待写', failed: '失败' }
 // 阶段名要说人话：光看"待处理 · 尝试 0 次"没人知道它卡在哪一步
@@ -448,6 +460,28 @@ function refreshBalance () {
 function renderRunState () {
   var running = state.status && state.status.running
   setRunState(running ? '正在运行 ' + running.action : '空闲', running ? 'warn' : 'ok')
+  var hint = $('outHint')
+  if (hint) hint.textContent = running ? ('正在运行：' + (LABELS[running.action] || running.action)) : '最近一次命令的完整结果'
+  renderRecentJobs()
+}
+/** 最近任务：**进程内**的四态（排队/运行中/完成/失败）。重启会丢，所以旁边就写着这句话。 */
+var JOB_STATUS_TEXT = { queued: '排队', running: '运行中', done: '完成', failed: '失败' }
+function renderRecentJobs () {
+  var box = $('recentJobs')
+  if (!box) return
+  var jobs = (state.status && state.status.recentJobs) || []
+  if (!jobs.length) { box.innerHTML = '<span class="small muted">暂无（这一版服务启动后还没跑过命令）</span>'; return }
+  box.innerHTML = jobs.map(function (job) {
+    var cls = job.status === 'done' ? 'status ok' : (job.status === 'failed' ? 'status bad' : 'status warn')
+    var when = job.finishedAt || job.startedAt
+    var clock = ''
+    try { clock = new Date(when).toLocaleString() } catch (error) { clock = String(when || '') }
+    return '<div class="row small" style="gap:8px;align-items:center;margin:2px 0">' +
+      '<span class="' + cls + '">' + (JOB_STATUS_TEXT[job.status] || job.status) + '</span>' +
+      '<span>' + esc(LABELS[job.action] || job.action) + '</span>' +
+      '<span class="muted">' + esc(clock) + (job.status === 'failed' && job.error ? ' · ' + esc(String(job.error).slice(0, 60)) : '') + '</span>' +
+      '</div>'
+  }).join('')
 }
 /** 重绘前把 DOM 里的折叠状态抄回来：程序性改 open 不一定及时触发 toggle 事件。 */
 function captureFolds () {
@@ -782,14 +816,27 @@ function previewHtml (task) {
     '</div>'
 }
 
+/**
+ * 整合材料：这些类型**都还没接线**，所以只列出来、标"规划中"，不给可点的按钮——
+ * 让用户先点一个看起来能用的按钮，再收到"还没做"的报错，是把未完成当成已完成报给使用者。
+ *
+ * 仓库里已有的原型是另一件事：「course integrate」按章做确定性抽取（结构 + 出处 +
+ * 待核继承，不调用模型），控制台还没接上它。所以单独一块写清它的真实范围。
+ */
 function integrationHtml () {
   var course = state.sel.course
   var items = INTEGRATION_KINDS.map(function (kind) {
-    return '<div class="item" data-act="integrate" data-value="' + esc(kind.key) + '">' +
-      '<span class="name">' + esc(kind.label) + '</span><span class="meta">未生成</span></div>'
+    return '<div class="item" aria-disabled="true" style="opacity:.72">' +
+      '<span class="name">' + esc(kind.label) + '</span><span class="meta">规划中</span></div>'
   }).join('')
   return '<h2>' + esc(course) + ' · 多节课程</h2><p class="sub">' + tasks().filter(function (item) { return item.courseName === course }).length + ' 节 · 整合材料</p>' +
-    '<div class="block"><h3>整合材料</h3>' + items + '</div>' +
+    '<div class="block"><h3>整合材料</h3>' + items +
+    '<p class="tiny muted" style="margin:8px 0 0">以上几类尚未实现，先如实标出来，不提供会报错的按钮。</p></div>' +
+    '<div class="block"><h3>已有原型（控制台未接线）</h3>' +
+    '<div class="item" aria-disabled="true" style="opacity:.72">' +
+    '<span class="name">章级整合 · 确定性抽取</span><span class="meta">命令行可用</span></div>' +
+    '<p class="tiny muted" style="margin:8px 0 0">命令行 <code>course integrate</code> 按章汇总跨课次的论证推进、概念对照与待核继承，' +
+    '每一行带出处；只做确定性抽取，不调用模型、不推送。这一页还没接上它。</p></div>' +
     '<div class="block"><h3>课程标签</h3>' + courseTagHtml(course) + '</div>'
 }
 
@@ -1339,10 +1386,6 @@ function handleAct (act, btn) {
   if (act === 'remove-tag') return removeTag(key, btn.dataset.tag, 'lesson')
   if (act === 'add-course-tag') { var cbox = document.querySelector('[data-newcoursetag="' + btn.dataset.course + '"]'); return addTag('', cbox && cbox.value, 'course', btn.dataset.course) }
   if (act === 'remove-course-tag') return removeTag('', btn.dataset.tag, 'course', btn.dataset.course)
-  if (act === 'integrate') {
-    toast('整合材料生成还没做，下一步实现', 'error')
-    return
-  }
   if (act === 'retry') return doAction('retry', { replayKey: key }, btn)
   if (act === 'republish') {
     var task = taskByKey(key)
