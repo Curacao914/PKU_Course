@@ -266,6 +266,20 @@ export const READER_SCRIPT = '<script>' + ANCHOR_RUNTIME + String.raw`
   if (navMenu) navMenu.addEventListener('toggle', function () { if (navMenu.open) closePops() })
 
   /**
+   * 手机端"本页目录"的折叠状态：**默认折叠**（几十条链接展开着会把正文顶出屏幕一千多像素），
+   * 但记住读者的选择——开过一次就一直开着，别每次进页面都替他合上。
+   */
+  var tocDetails = document.querySelector('.rail-toggle details')
+  if (tocDetails) {
+    var tocPref = store.get('course.tocOpen', '')
+    if (tocPref === '1') tocDetails.open = true
+    else if (tocPref === '0') tocDetails.open = false
+    tocDetails.addEventListener('toggle', function () {
+      store.set('course.tocOpen', tocDetails.open ? '1' : '0')
+    })
+  }
+
+  /**
    * 临时提示条：异步动作（复制 / 导出 / 导入）必须当场有反馈——点了没反应，读者只会怀疑
    * "是不是没点到"。需要人工兜底时（剪贴板被浏览器拒绝）把文本放进一个**已选中**的
    * textarea：按 ⌘C 就能拿走，不用再点一次。

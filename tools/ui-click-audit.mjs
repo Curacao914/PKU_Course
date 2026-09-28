@@ -1775,6 +1775,90 @@ async function auditIndexPages(page, site, noteUrl, failures) {
  *   1. 笔记页：目录必须在正文**之前**、课次导航在正文**之后**——手机读者一打开就能跳小节；
  *   2. 管理台通知记录：窄屏是卡片（两行 grid），拉丁串（course-note / failed / 日期）不逐字硬换行。
  */
+/**
+ * A7：一页纸打印。
+ *
+ * "打印出来就是一张 A4"是页面对读者的承诺，所以这里**生成真 PDF 数页数**，
+ * 而不是看 CSS 猜。两条验收：
+ *   · 默认字号下：正好 1 页，且没有 data-overflow（没有静默裁切）；
+ *   · 读者把全局字号调到 1.3 倍：仍然 1 页——一页纸的字号跟随全局但**不会**因为放大而
+ *     悄悄丢内容（装不下时会缩、缩不动才标出"内容超出 A4"）。
+ */
+async function auditOnepagePrint (page, site, noteUrl, failures) {
+  const results = []
+  const record = async (name, ok, detail) => {
+    results.push({ name, ok, detail })
+    console.log('  ' + (ok ? '✔' : '✖') + ' ' + name.padEnd(22) + detail)
+    if (!ok) failures.push('一页纸打印 ' + name + '：' + detail)
+  }
+  // 一页纸不是每节课都有（夹具里只有写了 onepage.markdown 的那一节）：
+  // 从首页/索引页里找一个真实存在的一页纸链接，而不是拿笔记 URL 硬拼。
+  await page.goto(site.url + '/', { waitUntil: 'domcontentloaded' })
+  await page.waitForTimeout(300)
+  const onepageHref = await page.evaluate(() => {
+    const link = document.querySelector('a[href*="/onepage/"]')
+    return link ? link.getAttribute('href') : ''
+  })
+  console.log('一页纸打印（真 PDF 数页数）')
+  if (!onepageHref) {
+    await record('夹具里有一页纸可测', false, '首页与索引页都没有 /onepage/ 链接')
+    return results
+  }
+  const onepageUrl = new URL(onepageHref, site.url).toString()
+
+  const pdfPages = async () => {
+    const buffer = await page.pdf({ format: 'A4', printBackground: true })
+    const text = buffer.toString('latin1')
+    // 只数页对象：/Type /Pages 是目录节点，不能算进去
+    return { pages: (text.match(/\/Type\s*\/Page[^s]/g) || []).length, bytes: buffer.length }
+  }
+
+  await page.goto(onepageUrl, { waitUntil: 'domcontentloaded' })
+  await page.waitForTimeout(400)
+  const sheet = await page.evaluate(() => {
+    const node = document.getElementById('sheet')
+    return node
+      ? {
+          overflow: node.getAttribute('data-overflow') === '1',
+          scale: getComputedStyle(node).getPropertyValue('--sheet-scale').trim(),
+          chars: (document.getElementById('sheetBody')?.textContent || '').length
+        }
+      : null
+  })
+  if (!sheet) {
+    const seen = await page.evaluate(() => ({ title: document.title, hasSheet: Boolean(document.getElementById('sheet')), url: location.pathname, text: (document.querySelector('main, article, .wrap') || {}).textContent?.slice(0, 40) || '' }))
+    await record('一页纸页面存在', false, '导航到 ' + onepageUrl + '，实际落在 ' + seen.url + '（标题「' + seen.title + '」）')
+    return results
+  }
+  await record('一页纸没有静默裁切', sheet.overflow === false,
+    'data-overflow=' + sheet.overflow + '，sheet-scale=' + sheet.scale + '，正文 ' + sheet.chars + ' 字')
+  const first = await pdfPages()
+  await record('默认字号：打印正好一页 A4', first.pages === 1, `PDF ${first.pages} 页（${Math.round(first.bytes / 1024)}KB）`)
+
+  // 读者把全局字号调到 1.3：一页纸跟随（有上限），但**不许**因此溢出或掉内容
+  await page.evaluate(() => {
+    localStorage.setItem('course.fontScale', '1.3')
+    document.documentElement.style.setProperty('--font-scale', '1.3')
+  })
+  await page.reload({ waitUntil: 'domcontentloaded' })
+  await page.waitForTimeout(500)
+  const larger = await page.evaluate(() => {
+    const node = document.getElementById('sheet')
+    return {
+      overflow: node.getAttribute('data-overflow') === '1',
+      scale: getComputedStyle(node).getPropertyValue('--sheet-scale').trim(),
+      chars: (document.getElementById('sheetBody')?.textContent || '').length
+    }
+  })
+  const second = await pdfPages()
+  await record('放大字号后仍是一页且没裁切',
+    second.pages === 1 && larger.overflow === false && larger.chars >= sheet.chars,
+    `PDF ${second.pages} 页，sheet-scale ${sheet.scale} → ${larger.scale}，正文 ${larger.chars} 字（原 ${sheet.chars}）`)
+  await page.evaluate(() => { localStorage.setItem('course.fontScale', '1') })
+
+  return results
+}
+
 async function auditMobileLayout (page, site, noteUrl, failures) {
   const results = []
   const record = async (name, ok, detail) => {
@@ -1812,7 +1896,27 @@ async function auditMobileLayout (page, site, noteUrl, failures) {
   }))
   await record('顺序：目录 < 正文 < 课次导航', Number(orders.toc) < Number(orders.article) && Number(orders.article) < Number(orders.courseNav),
     'order 目录=' + orders.toc + '，正文=' + orders.article + '，课次导航=' + orders.courseNav)
-  await record('目录默认展开可点', geometry.detailOpen, '折叠块 open=' + geometry.detailOpen)
+  // A7：手机端目录**默认折叠**——它是几十条链接，展开着会把正文顶到屏幕外一千多像素。
+  // 折叠了仍然要"够得着"：summary 可见、可点、点开之后列表出现。
+  await record('目录默认折叠（不再把正文顶下去）', geometry.detailOpen === false,
+    '折叠块 open=' + geometry.detailOpen + '，正文 top=' + (geometry.article?.top ?? -1))
+  await record('折叠着的目录仍然够得着', await page.evaluate(() => {
+    const summary = document.querySelector('.rail-toggle details summary')
+    if (!summary) return false
+    const rect = summary.getBoundingClientRect()
+    return rect.height >= 36 && rect.top >= 0 && rect.width > 40
+  }), '摘要行高度 ≥36px 且在视口内')
+  const toggled = await page.evaluate(() => {
+    const details = document.querySelector('.rail-toggle details')
+    const summary = details.querySelector('summary')
+    summary.click()
+    return { open: details.open, links: details.querySelectorAll('nav.toc a').length }
+  })
+  await page.waitForTimeout(200)
+  await record('点一下能展开目录', toggled.open === true && toggled.links > 0,
+    '展开后 open=' + toggled.open + '，链接 ' + toggled.links + ' 条')
+  const remembered = await page.evaluate(() => localStorage.getItem('course.tocOpen'))
+  await record('目录开合状态被记住', remembered === '1', 'localStorage course.tocOpen=' + remembered)
   await record('目录链接可点区域足够大', await page.evaluate(() => {
     const link = document.querySelector('.rail nav.toc a')
     return Boolean(link && link.getBoundingClientRect().height >= 36)
@@ -1911,6 +2015,7 @@ async function main() {
     await auditIndexPages(page, site, fixture.noteUrl, failures)
     console.log('')
     await auditMobileLayout(page, site, fixture.noteUrl, failures)
+    await auditOnepagePrint(page, site, fixture.noteUrl, failures)
   } finally {
     await browser.close()
     // 浏览器关掉后可能还有 keep-alive 连接挂在服务器上，close() 会一直等它们；

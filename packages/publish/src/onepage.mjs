@@ -56,8 +56,12 @@ export const ONEPAGE_SCRIPT = `<script>
     return body.scrollWidth > body.clientWidth + 2 || body.scrollHeight > body.clientHeight + 2
   }
   function fit () {
-    var scale = 1
-    sheet.style.setProperty('--sheet-scale', '1')
+    // 起始字号跟随全局字号（读者在工具栏调的），但**限制在 0.85—1.15**：
+    // 一页纸是"一页 A4"，读者把它调到 1.4 倍时不该假装还能一页装下——
+    // 这时候正确的行为是照常自动缩、缩不动就标出"内容超出 A4"，而不是静默裁掉。
+    var user = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--font-scale')) || 1
+    var scale = Math.max(0.85, Math.min(1.15, user))
+    sheet.style.setProperty('--sheet-scale', scale.toFixed(2))
     var guard = 0
     while (overflows() && scale > 0.72 && guard < 24) {
       scale -= 0.03

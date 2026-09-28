@@ -160,7 +160,11 @@ a:hover { color: var(--accent-ink); }
   .shell > .col { order: 2; }
   .rail .rail-extra { order: 3; display: block; margin-top: 4px; padding-top: 16px; border-top: 1px solid var(--line); }
   .rail details { background: var(--bg-soft); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 16px; }
-  .rail details summary { cursor: pointer; font-size: 14px; color: var(--accent-ink); font-weight: 600; }
+  /* 摘要行也是"手指点得到"的目标：手机上至少 40px 高（审计按 36px 起判），
+     否则折叠之后读者反而更难展开它——折叠与可达要一起成立。 */
+  .rail details summary { cursor: pointer; font-size: 14px; color: var(--accent-ink); font-weight: 600;
+    display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 40px;
+    padding: 2px 0; }
   .rail details nav.toc { margin-top: 12px; }
   body { font-size: 17px; }
   /* 移动端点击区稍大：目录与课次链接至少 40px 高 */
@@ -1163,7 +1167,9 @@ export function renderNotePage(record, { siteOrigin = '', neighbours = {}, cours
       '</div>',
       // 右：本页目录
       '<aside class="rail rail-right">',
-      `<div class="rail-toggle"><details open><summary>本页目录</summary>${toc}</details></div>`,
+      // 手机端的"本页目录"**默认折叠**：它是几十条链接，展开着会把正文顶到屏幕外一千多像素
+      // （审计实测：目录 top=72、正文 top=1104）。读者手动展开过就一直开着（见阅读脚本里的偏好）。
+      `<div class="rail-toggle"><details><summary>本页目录</summary>${toc}</details></div>`,
       `<div class="rail-desktop">${toc}</div>`,
       railExtra ? `<div class="rail-extra">${railExtra}</div>` : '',
       '</aside>',
