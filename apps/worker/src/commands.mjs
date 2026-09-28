@@ -11,6 +11,9 @@ import {
 } from '@course/materials'
 import { cacheUrlsFor, purgeCloudflareCache } from '@course/publish'
 
+import { NOTIFY_POLICY, clearPending, pendingNotifications, planNotification, resolveNotifyPolicy } from './notify-outbox.mjs'
+import { acquirePublishLock, checkRevisionUnchanged, libraryRevision, publishLockPath } from './publish-guard.mjs'
+
 import { hashPassword, validatePassword } from '@course/core'
 
 import {
@@ -1038,6 +1041,40 @@ export function createCommands(context) {
     const libraryForRebuild = path.join(siteRoot, 'library.json')
 
     /**
+     * 发布互斥（见 publish-guard.mjs 的说明）：两个发布同时跑会互相覆盖——
+     * 后写的那个把先写的整条记录从发布库里抹掉，站点上少一整节课且没有报错。
+     * --rebuild 同样持锁：它重写整个 site 目录，与正常发布并行会把产物写花。
+     */
+    /**
+     * 便宜的输入检查放在取锁之前：参数就不对的话，不该建目录、也不该留下一把锁。
+     * （取锁会 mkdir 出站点目录的父目录——在只读环境或路径写错时那会变成一句
+     * "EPERM: mkdir …" 而不是"找不到 notes-run-summary.json"，让人查错方向。）
+     */
+    if (options.flags?.has('rebuild')) {
+      if (!fs.existsSync(libraryForRebuild)) throw new Error(`找不到发布库 ${libraryForRebuild}；先发布过至少一篇笔记再 --rebuild`)
+    } else {
+      const checkFrom = path.resolve(requireOption(options.options, 'from', 'publish'))
+      if (!fs.existsSync(path.join(checkFrom, 'notes-run-summary.json'))) {
+        throw new Error(`找不到 ${path.join(checkFrom, 'notes-run-summary.json')}；--from 应指向 course notes 的输出目录`)
+      }
+    }
+
+    const lock = acquirePublishLock({
+      lockPath: publishLockPath(siteRoot),
+      info: { slug: options.options.lesson || options.options.from || '', kind: options.flags?.has('rebuild') ? 'rebuild' : 'publish' },
+      warnings: line => stderr(line)
+    })
+    if (!lock.ok) throw new Error(lock.message)
+    try {
+      return await publishLocked(options, { siteRoot, libraryForRebuild })
+    } finally {
+      lock.release()
+    }
+  }
+
+  async function publishLocked(options, { siteRoot, libraryForRebuild }) {
+
+    /**
      * --rebuild：只按发布库把站点重写一遍。
      *
      * 换模板、改样式、修页面脚本之后都要重新生成 HTML，而这些改动跟笔记内容无关：
@@ -1088,6 +1125,8 @@ export function createCommands(context) {
 
     // 老发布库只有 publishedAt：读进来时整体迁移成三个时间字段（幂等，见 migrateRecordTime），
     // 写回时全库一致——不会出现"老记录还带 publishedAt、新记录只有 lessonDate"的混合状态。
+    // 读库前先记下版本指纹：提交前再比一次，防止"读进来之后被别的发布改过"被覆盖
+    const revisionBefore = libraryRevision(libraryForRebuild)
     const library = (fs.existsSync(libraryForRebuild) ? JSON.parse(fs.readFileSync(libraryForRebuild, 'utf8')) : [])
       .map(migrateRecordTime)
     const slug = noteSlug({ courseName: course, lessonTitle })
@@ -1246,9 +1285,50 @@ export function createCommands(context) {
      * 发布其中一节时把另一节从发布库里抹掉——站点上少一整节课，而且没有任何报错。
      */
     const staleByRename = !previousBySlug && previousByReplayKey ? previousByReplayKey : null
+    /**
+     * 通知策略与意图（见 notify-outbox.mjs）。
+     *
+     * 策略：--no-notify / --notify 显式指定；没指定时**沿用上一次的选择**——
+     * 批量换排版时"这次先别推"是人的决定，不该被下一次自动重跑悄悄推翻。
+     * 意图：notifyPending 跟内容在同一次原子写里落地（library.json 是提交点），
+     * 提交之后才真正入队——中间崩了，下一次任何一次 publish 都会看到它并补发。
+     */
+    const notifyPolicy = resolveNotifyPolicy({
+      flag: options.flags?.has('no-notify') ? NOTIFY_POLICY.NONE : (options.flags?.has('notify') ? NOTIFY_POLICY.CHANGED : undefined),
+      stored: previous?.notifyPolicy
+    })
+    const origin = options.options.origin || 'https://course.law-tech.dev'
+    const alreadyNotified = (() => {
+      const probe = openStore(config.ledgerPath)
+      try { return Boolean(probe.findDelivery(`course-note:${record.slug}:${contentChecksum.slice(0, 12)}`)) } finally { probe.close() }
+    })()
+    const planned = planNotification({
+      changed,
+      policy: notifyPolicy.policy,
+      slug: record.slug,
+      checksum: contentChecksum,
+      // 正文用简报（一段说明 + 三条要点），不用笔记截断：截断出来的是半句话，
+      // 读者无法判断这节课讲了什么。简报与当前正文对不上时这里就没有它（见 resolveDerived），
+      // 退回原来的摘要——宁可退一步，也不推一条与笔记内容不符的消息。
+      bodyText: briefResolution.value?.briefing
+        ? renderBriefMessage({ courseName: record.courseName, lessonTitle: record.lessonTitle, brief: briefResolution.value })
+        : `${record.courseName} · ${record.lessonTitle}\n${record.summary}`,
+      objectUrl: `${origin}/${record.slug}.html`,
+      alreadyNotified
+    })
+    /**
+     * 还没入队的通知意图**必须带着走**：它记录的是"上一次崩在提交之后、入队之前"。
+     * 重建记录时如果只放新计划、把旧的丢掉，崩溃恢复就永远看不到它——那正是这个设计要防的事。
+     */
+    const carriedPending = !planned && previous?.notifyPending ? previous.notifyPending : null
     const nextLibrary = [
       ...library.filter(item => item.slug !== record.slug && (!staleByRename || item.slug !== staleByRename.slug)),
-      { ...record, checksum: contentChecksum }
+      {
+        ...record,
+        checksum: contentChecksum,
+        ...(notifyPolicy.reason === 'flag' ? { notifyPolicy: notifyPolicy.policy } : {}),
+        ...(planned ? { notifyPending: planned } : (carriedPending ? { notifyPending: carriedPending } : {}))
+      }
     ]
     fs.mkdirSync(siteRoot, { recursive: true })
 
@@ -1266,32 +1346,50 @@ export function createCommands(context) {
       siteOrigin: options.options.origin || 'https://course.law-tech.dev',
       docs: readPublicDocs()
     })
-    // 页面写完才动发布库（提交点，见上面的说明）：tmp + fsync + rename 原子替换
+    // 页面写完才动发布库（提交点，见上面的说明）：tmp + fsync + rename 原子替换。
+    // 提交前做一次乐观版本检查：读库到现在被改过就中止——重跑一次是幂等的，
+    // 覆盖别人的改动却是不可恢复的（整条记录消失）。
+    const revisionCheck = checkRevisionUnchanged({ file: libraryForRebuild, expected: revisionBefore.revision })
+    if (!revisionCheck.ok) throw new Error(revisionCheck.message)
     writeJsonAtomic(libraryForRebuild, nextLibrary)
     const index = readSiteIndex(siteRoot)
     const purge = purgeCache(options, { reason: `发布 ${record.slug}`, files: site.written || [] })
 
-    // 同一条笔记只通知一次；内容变化时才重新通知
+    // 同一条内容只通知一次（去重键带内容指纹：改好之后重发要能再推一次）
     let delivery = null
+    let recovered = []
     const store = openStore(config.ledgerPath)
     try {
       const task = replayKey ? store.getTask(replayKey) : null
-      // --no-notify：只更新站点、不排队推送。换排版之后批量重发时用得上——
-      // 内容确实变了，但"每一篇都推一条"对读者是骚扰，而读者要的是站点上新。
-      if (changed && !options.flags?.has('no-notify')) {
-        delivery = store.enqueueDelivery({
-          // 幂等键带上内容指纹：同一课次内容变了要重新推一次，
-          // 否则"改好之后再发一遍"会被去重规则静默吃掉（旧实现就是只按 slug 去重）。
-          dedupeKey: `course-note:${record.slug}:${contentChecksum.slice(0, 12)}`,
-          purpose: 'course-note',
-          // 正文用简报（一段说明 + 三条要点），不用笔记截断：截断出来的是半句话，
-          // 读者无法判断这节课讲了什么。简报与当前正文对不上时这里就没有它（见 resolveDerived），
-          // 退回原来的摘要——宁可退一步，也不推一条与笔记内容不符的消息。
-          bodyText: briefResolution.value?.briefing
-            ? renderBriefMessage({ courseName: record.courseName, lessonTitle: record.lessonTitle, brief: briefResolution.value })
-            : `${record.courseName} · ${record.lessonTitle}\n${record.summary}`,
-          objectUrl: `${options.options.origin || 'https://course.law-tech.dev'}/${record.slug}.html`
+      // 提交之后才入队：内容与"要通知"已经一起落地，这里失败也不会丢（下次发布补发）
+      if (planned) delivery = store.enqueueDelivery(planned)
+      /**
+       * 崩溃恢复：库里凡是"挂了通知意图但还没入队"的记录，这一次一并补发。
+       * enqueueDelivery 按 dedupeKey 去重，所以重复补发不会多发一条——
+       * 这里承诺的是**至少一次 + 去重**，不是 exactly-once。
+       */
+      const pendingAll = pendingNotifications(nextLibrary)
+      const queuedSlugs = new Set([...(delivery ? [record.slug] : []), ...pendingAll.map(item => item.slug)])
+      for (const slug of queuedSlugs) {
+        // 这一篇刚刚已经入队过，不必再走一遍（dedupeKey 相同，重复也只是命中已有行）
+        if (slug === record.slug && delivery) { recovered.push(slug); continue }
+        const item = pendingAll.find(entry => entry.slug === slug)
+        if (!item) continue
+        store.enqueueDelivery({
+          dedupeKey: item.dedupeKey,
+          purpose: item.purpose || 'course-note',
+          bodyText: item.bodyText,
+          objectUrl: item.objectUrl
         })
+        recovered.push(slug)
+      }
+      if (recovered.length) {
+        // 入队成功才抹掉意图；抹掉失败（进程被杀）也没关系——下次补发会被去重吃掉
+        const cleared = clearPending(nextLibrary, [...new Set(recovered)], { at: clockNow().toISOString() })
+        if (cleared.changed) {
+          writeJsonAtomic(libraryForRebuild, cleared.records)
+          if (recovered.some(slug => slug !== record.slug)) stderr(`补发了 ${recovered.length} 条此前未入队的通知：${[...new Set(recovered)].join('、')}`)
+        }
       }
       if (task && task.stage !== 'published' && task.stage !== 'completed') {
         store.reportStage({
@@ -1317,7 +1415,15 @@ export function createCommands(context) {
         // 派生物这一轮有没有被采纳；reason 说清为什么没挂（stale_source / missing_checksum …）
         brief: { applied: briefResolution.applied, reason: briefResolution.reason },
         onepage: { applied: onepageResolution.applied, reason: onepageResolution.reason },
-        delivery: delivery ? { inserted: delivery.inserted, dedupeKey: `course-note:${record.slug}` } : null,
+        // 三件事分开报，别混成一句"已发布"：
+        //   contentChanged —— 内容有没有变（决定要不要通知）
+        //   notifyPolicy   —— 这次用的是哪条策略（flag / stored），为什么没发一看就知道
+        //   delivery       —— 到底有没有排进队列（inserted=false 表示同样的内容早就排过）
+        contentChanged: changed,
+        notifyPolicy: notifyPolicy.policy,
+        notifyPolicySource: notifyPolicy.reason,
+        recoveredNotifications: [...new Set(recovered)],
+        delivery: delivery ? { inserted: delivery.inserted, dedupeKey: delivery.delivery?.dedupeKey || null } : null,
         task: task ? { id: task.id, to: task.stage === 'published' || task.stage === 'completed' ? task.stage : 'published' } : null,
         // 首页 / 索引页每发一篇都会变，清了边缘缓存读者才立刻看得到
         cachePurged: (await purge).ok === true,

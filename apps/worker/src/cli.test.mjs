@@ -1116,6 +1116,112 @@ test('publish --no-notify updates the site without queueing another push', async
   assert.ok(fs.existsSync(path.join(siteDir, 'notes/刑法分论/第10-12节.html')), '站点照样要更新')
 })
 
+test('通知 outbox：写完库还没入队就崩了，下一次发布会补发（且去重不重复）', async () => {
+  // 崩溃窗口：library.json 已经提交、delivery 还没入队。旧实现这里什么都留不下——
+  // 站点上有、微信上没有，而且没有任何痕迹。现在意图写在记录上（notifyPending），
+  // 下一次任何一次 publish 都会看到它并补发。
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const notesDir = path.join(dir, 'notes')
+  fs.mkdirSync(notesDir, { recursive: true })
+  const markdown = '# 第1-2节\n\n## 课程概览\n\n正文。'
+  fs.writeFileSync(path.join(notesDir, 'notes-run-summary.json'), JSON.stringify({ course: '刑法分论', lesson: '第1-2节', status: 'completed' }))
+  fs.writeFileSync(path.join(notesDir, '第1-2节.md'), markdown)
+  const siteDir = path.join(dir, 'site')
+  const libraryFile = path.join(siteDir, 'library.json')
+  const { deps, lines, ledger } = harness()
+
+  assert.equal(await runCli(['publish', '--from', notesDir, '--out', siteDir], deps), 0)
+  const first = parse(lines.at(-1))
+  assert.equal(first.contentChanged, true)
+  assert.equal(first.delivery.inserted, true, '正常路径：提交之后立刻入队')
+  const afterFirst = JSON.parse(fs.readFileSync(libraryFile, 'utf8'))
+  assert.equal('notifyPending' in afterFirst[0], false, '入队成功后要把意图抹掉')
+  assert.ok(afterFirst[0].notifiedAt, '留下"什么时候排进队列"的痕迹')
+
+  // 伪造"崩在提交之后、入队之前"：把意图塞回记录里（这正是崩溃那一刻库里的样子）
+  const crippled = JSON.parse(fs.readFileSync(libraryFile, 'utf8'))
+  crippled[0].notifyPending = {
+    dedupeKey: `course-note:${crippled[0].slug}:${String(crippled[0].checksum).slice(0, 12)}`,
+    purpose: 'course-note',
+    bodyText: '补发的正文',
+    objectUrl: 'https://course.law-tech.dev/x.html'
+  }
+  fs.writeFileSync(libraryFile, JSON.stringify(crippled, null, 2))
+
+  // 内容没变：不会生成新通知，但补发必须发生
+  assert.equal(await runCli(['publish', '--from', notesDir, '--out', siteDir], deps), 0)
+  const recovered = parse(lines.at(-1))
+  assert.equal(recovered.contentChanged, false)
+  assert.equal(recovered.delivery, null, '内容没变不生成新的通知意图')
+  assert.deepEqual(recovered.recoveredNotifications, [crippled[0].slug], '补发被记账')
+  const afterRecovery = JSON.parse(fs.readFileSync(libraryFile, 'utf8'))
+  assert.equal('notifyPending' in afterRecovery[0], false, '补发成功后清掉意图')
+
+  // 再跑一次：没有可补的了（说明去重生效，不会越补越多）
+  assert.equal(await runCli(['publish', '--from', notesDir, '--out', siteDir], deps), 0)
+  assert.deepEqual(parse(lines.at(-1)).recoveredNotifications, [])
+  const rows = ledger.listDeliveries({ limit: 50 })
+  assert.equal(rows.length, 1, '同一条内容只排了一次（dedupeKey 生效）')
+})
+
+test('通知策略：--no-notify 会留下来，下一次不带参数重发也不会偷偷推', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const notesDir = path.join(dir, 'notes')
+  fs.mkdirSync(notesDir, { recursive: true })
+  fs.writeFileSync(path.join(notesDir, 'notes-run-summary.json'), JSON.stringify({ course: '商法概论', lesson: '第5-6节', status: 'completed' }))
+  fs.writeFileSync(path.join(notesDir, '第5-6节.md'), '# 第5-6节\n\n## 课程概览\n\n第一版。')
+  const siteDir = path.join(dir, 'site')
+  const { deps, lines } = harness()
+
+  assert.equal(await runCli(['publish', '--from', notesDir, '--out', siteDir, '--no-notify'], deps), 0)
+  const first = parse(lines.at(-1))
+  assert.equal(first.notifyPolicy, 'none')
+  assert.equal(first.notifyPolicySource, 'flag')
+  assert.equal(first.delivery, null)
+
+  // 改内容后不带参数重发：策略是"上次说的算"，仍然不推
+  fs.writeFileSync(path.join(notesDir, '第5-6节.md'), '# 第5-6节\n\n## 课程概览\n\n第二版。')
+  assert.equal(await runCli(['publish', '--from', notesDir, '--out', siteDir], deps), 0)
+  const second = parse(lines.at(-1))
+  assert.equal(second.contentChanged, true)
+  assert.equal(second.notifyPolicy, 'none')
+  assert.equal(second.notifyPolicySource, 'stored', '策略是持久化的，不是只在这一次生效')
+  assert.equal(second.delivery, null)
+
+  // 显式 --notify 才恢复推送
+  fs.writeFileSync(path.join(notesDir, '第5-6节.md'), '# 第5-6节\n\n## 课程概览\n\n第三版。')
+  assert.equal(await runCli(['publish', '--from', notesDir, '--out', siteDir, '--notify'], deps), 0)
+  const third = parse(lines.at(-1))
+  assert.equal(third.notifyPolicy, 'changed')
+  assert.equal(third.delivery.inserted, true)
+})
+
+test('并发发布：另一个发布还在跑就直接拒绝，说清是谁在跑', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const notesDir = path.join(dir, 'notes')
+  fs.mkdirSync(notesDir, { recursive: true })
+  fs.writeFileSync(path.join(notesDir, 'notes-run-summary.json'), JSON.stringify({ course: '刑法分论', lesson: '第3-4节', status: 'completed' }))
+  fs.writeFileSync(path.join(notesDir, '第3-4节.md'), '# 第3-4节\n\n## 课程概览\n\n正文。')
+  const siteDir = path.join(dir, 'site')
+  const { deps, lines, errors } = harness()
+
+  // 另一个发布留下的一把新鲜锁（同进程也算：锁的身份是 token，不是 pid）
+  fs.writeFileSync(`${siteDir}.publish.lock`, JSON.stringify({ pid: 4242, host: 'other', slug: 'notes/别的课/第9节', startedAt: new Date().toISOString() }))
+  const code = await runCli(['publish', '--from', notesDir, '--out', siteDir], deps)
+  assert.notEqual(code, 0)
+  const said = lines.join('\n') + '\n' + errors.join('\n')
+  assert.match(said, /另一个发布正在进行中/)
+  assert.match(said, /4242/)
+  assert.equal(fs.existsSync(path.join(siteDir, 'library.json')), false, '被拒绝时不许动发布库')
+
+  // 陈旧锁（进程早就没了）应当被接管，发布照常
+  const old = Date.now() - 30 * 60 * 1000
+  fs.utimesSync(`${siteDir}.publish.lock`, old / 1000, old / 1000)
+  assert.equal(await runCli(['publish', '--from', notesDir, '--out', siteDir], deps), 0)
+  assert.ok(fs.existsSync(path.join(siteDir, 'library.json')))
+  assert.equal(fs.existsSync(`${siteDir}.publish.lock`), false, '发布结束要释放锁')
+})
+
 test('重新发布一节旧课：课次日期与首次进站时间不变、updatedAt 变新，首页顺序不动', async () => {
   // 用户报的正是这件事：旧课改个错字重新发布，它就变成"最新一课"。
   // 现在排序只看 lessonDate，发布时间另有两个字段各管一件事。
