@@ -188,11 +188,7 @@ a:hover { color: var(--accent-ink); }
   body { font-size: 17px; }
   /* 移动端点击区稍大：目录与课次链接至少 40px 高 */
   .rail nav.toc a, .rail .rail-extra a { display: block; padding: 10px; min-height: 40px; }
-  /* 手机首屏：大标题与说明各收一档，让"这一段讲什么"尽快出现在第一屏 */
-  header.site { padding-bottom: 14px; margin-bottom: 22px; }
-  header.site h1 { font-size: 25px; }
-  .lesson-title-theme { font-size: 15px; }
-  article h2 { margin-top: 34px; }
+
 }
 
 /* ── 正文：这里是唯一用衬线的地方 ── */
@@ -559,6 +555,14 @@ details.note-meta pre { background: var(--bg-soft); border-radius: var(--radius)
   .topbar nav { gap: 10px; font-size: 12.5px; }
   .navmenu .nav-pop { max-width: calc(100vw - 24px); }
   .prefmenu .pref-pop { min-width: 0; width: min(170px, calc(100vw - 24px)); }
+  /* 手机首屏：大标题与说明各收一档，让"这一段讲什么"尽快出现在第一屏。
+     这几条必须在**样式表末尾**：基础规则（header.site h1 32px）写在后面，
+     放前面的媒体查询会被它按"同权重后者胜"盖掉。 */
+  header.site { padding-bottom: 14px; margin-bottom: 22px; }
+  header.site h1 { font-size: 25px; }
+  .lesson-title-theme { font-size: 15px; }
+  article h2 { margin-top: 34px; }
+  article h1 { font-size: 24px; }
 }
 .tools .pop a { width: auto; height: auto; border-radius: 8px; padding: 6px 8px; justify-content: flex-start; gap: 8px; font-size: 13.5px; color: var(--ink-soft); }
 
