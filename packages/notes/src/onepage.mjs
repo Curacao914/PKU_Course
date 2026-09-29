@@ -56,7 +56,7 @@ export const SOURCE_MAP_SCHEMA = {
   }]
 }
 
-export function buildSourceMapSource({ courseName = '', lessonTitle = '', noteMarkdown = '', onepageMarkdown = '', sections = [] } = {}) {
+export function buildSourceMapSource({ courseName = '', lessonTitle = '', noteMarkdown = '', onepageMarkdown = '', sections = [], blocks = null } = {}) {
   return [
     `课程：${courseName}`,
     `课次：${lessonTitle}`,
@@ -64,8 +64,16 @@ export function buildSourceMapSource({ courseName = '', lessonTitle = '', noteMa
     '## 可用小节清单（sections[].id 只能从这里挑，逐字照抄）',
     ...sections.map(section => `- ${section.id}｜${section.title}`),
     '',
-    '## 这一页纸（要为它的每个要点挑来源）',
+    '## 这一页纸',
     String(onepageMarkdown || '').trim(),
+    // 分批时只列这一批要标的块：一次回答几十块，输出容易被截断，回包就废了（实测踩到）
+    ...(Array.isArray(blocks) && blocks.length
+      ? [
+        '',
+        `## 本次只要标注这 ${blocks.length} 块（其余块已经标好，不要重复）`,
+        ...blocks.map(block => `- ${block.label}`)
+      ]
+      : []),
     '',
     '## 笔记全文（摘录只能从这些正文里逐字复制）',
     String(noteMarkdown || '').trim()

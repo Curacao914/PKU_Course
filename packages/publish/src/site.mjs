@@ -502,11 +502,18 @@ details.note-meta pre { background: var(--bg-soft); border-radius: var(--radius)
   max-width: calc(100vw - 20px); padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line);
   background: var(--card-bg); box-shadow: var(--shadow-md); display: none; z-index: 70; }
 .tools .open .pop { display: block; animation: popIn var(--t-panel) var(--ease); }
+/* 收起：脚本先加 .closing 播 180ms，动画播完才真正 display:none——
+   闭着的浮层留在布局里会把手机页面撑出横向滚动，所以隐藏方式不变、只是推迟 */
+.tools .open.closing .pop { animation: popOut 180ms var(--ease) forwards; }
 @keyframes popIn {
   from { opacity: 0; transform: translateX(-50%) translateY(-4px); }
   to { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
-@media (prefers-reduced-motion: reduce) { .tools .open .pop { animation: none; } }
+@keyframes popOut {
+  from { opacity: 1; transform: translateX(-50%) translateY(0); }
+  to { opacity: 0; transform: translateX(-50%) translateY(-4px); }
+}
+@media (prefers-reduced-motion: reduce) { .tools .open .pop, .tools .open.closing .pop { animation: none; } }
 .tools .dot-row { display: flex; gap: 8px; }
 .tools .paper { width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--line-strong); cursor: pointer; padding: 0; }
 .tools .paper[aria-pressed="true"] { outline: 2px solid var(--accent); outline-offset: 2px; }

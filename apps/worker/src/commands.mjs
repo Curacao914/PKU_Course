@@ -75,6 +75,7 @@ import {
   migrateRecordTime,
   noteSlug,
   onepageBlocks,
+  plainBlockText,
   readSiteIndex,
   refreshRecord,
   resolveSourceMapEntries,
@@ -1319,39 +1320,67 @@ export function createCommands(context) {
       let modelEntries = []
       let usage = null
       if (useModel && !costStopped) {
-        const blocks = onepageBlocks(record.onepage.markdown).filter(block => block.kind !== 'heading' && !covered.has(block.id))
-        if (blocks.length) {
-          const result = await callForMap({
-            config: modelConfig,
-            role: 'sourcemap',
-            prompt: buildPrompt({
-              role: 'sourcemap',
-              courseSpec: { courseName: record.courseName },
-              lessonBlueprint: { title: record.lessonTitle },
-              sourceText: buildSourceMapSource({
-                courseName: record.courseName,
-                lessonTitle: record.lessonTitle,
-                noteMarkdown,
-                onepageMarkdown: record.onepage.markdown,
-                sections: sectionList
-              }),
-              schema: SOURCE_MAP_SCHEMA
-            })
-          })
-          usage = result?.trace?.usage || null
-          spentCny += noteCostCny({
-            inputTokens: usage?.prompt_tokens ?? usage?.input_tokens ?? 0,
-            cachedTokens: usage?.prompt_cache_hit_tokens ?? usage?.prompt_cache_tokens ?? 0,
-            outputTokens: usage?.completion_tokens ?? usage?.output_tokens ?? 0,
-            pricing
-          })
-          // 与"新一页纸"那条路同一套：先把模型给的"块提示"解析成真正的块 ID、
-          // 筛掉这一篇里不存在的小节，再交给下面的逐字核对
-          const stamped = stampSourceMap(
-            normalizeSourceMapDraft(result?.parsed?.entries || result?.parsed?.sourceMap || []),
-            { slug: record.slug, noteMarkdown, onepageMarkdown: record.onepage.markdown }
-          )
-          modelEntries = stamped ? stamped.entries : []
+        const pending = onepageBlocks(record.onepage.markdown)
+          .filter(block => block.kind !== 'heading' && !covered.has(block.id))
+        /**
+         * **分批**：一次让它标 12 块左右。
+         *
+         * 为什么：一节课 40—50 块时，一次回答的输出太长会被截断（回包解析不出来），
+         * 那一次调用的钱就白花了（实测 3 个课次踩到）。分批之后每批的输出很短，
+         * 截断风险小；某一批失败只重试那一批，不影响已经拿到的部分。
+         */
+        const chunkSize = Math.max(1, Number(options.options['chunk'] || 12))
+        for (let start = 0; start < pending.length; start += chunkSize) {
+          const chunk = pending.slice(start, start + chunkSize)
+          for (let attempt = 1; attempt <= 2; attempt += 1) {
+            let result = null
+            try {
+              result = await callForMap({
+                config: modelConfig,
+                role: 'sourcemap',
+                prompt: buildPrompt({
+                  role: 'sourcemap',
+                  courseSpec: { courseName: record.courseName },
+                  lessonBlueprint: { title: record.lessonTitle },
+                  sourceText: buildSourceMapSource({
+                    courseName: record.courseName,
+                    lessonTitle: record.lessonTitle,
+                    noteMarkdown,
+                    onepageMarkdown: record.onepage.markdown,
+                    sections: sectionList,
+                    blocks: chunk.map(block => ({ label: plainBlockText(block.text).slice(0, 40) }))
+                  }),
+                  schema: SOURCE_MAP_SCHEMA
+                })
+              })
+            } catch (error) {
+              // 单批失败不拖垮整节课：记一笔，继续下一批（已经拿到的条目照旧保留）
+              stderr(`  来源映射这一批失败（${record.slug} 第 ${Math.floor(start / chunkSize) + 1} 批，第 ${attempt} 次）：${error instanceof Error ? error.message : String(error)}`)
+              continue
+            }
+            const chunkUsage = result?.trace?.usage || null
+            if (chunkUsage) {
+              usage = chunkUsage
+              spentCny += noteCostCny({
+                inputTokens: chunkUsage.prompt_tokens ?? chunkUsage.input_tokens ?? 0,
+                cachedTokens: chunkUsage.prompt_cache_hit_tokens ?? chunkUsage.prompt_cache_tokens ?? 0,
+                outputTokens: chunkUsage.completion_tokens ?? chunkUsage.output_tokens ?? 0,
+                pricing
+              })
+            }
+            // 与"新一页纸"那条路同一套：块提示 → 块 ID，筛掉不存在的小节，再交给逐字核对
+            const stamped = stampSourceMap(
+              normalizeSourceMapDraft(result?.parsed?.entries || result?.parsed?.sourceMap || []),
+              { slug: record.slug, noteMarkdown, onepageMarkdown: record.onepage.markdown }
+            )
+            const ids = new Set(chunk.map(block => block.id))
+            const kept = (stamped ? stamped.entries : []).filter(entry => ids.has(entry.block))
+            if (kept.length) {
+              modelEntries.push(...kept)
+              break
+            }
+          }
+          if (useModel && spentCny >= capCny) break
         }
       }
       const built = {
@@ -1359,6 +1388,7 @@ export function createCommands(context) {
         entries: [...freeMap.entries, ...modelEntries],
         generatedBy: modelEntries.length ? 'lexical-overlap+model' : freeMap.generatedBy
       }
+      void usage
       const sectionsWithBody = sectionTexts(noteMarkdown)
       const verified = verifySourceMap(built, {
         slug: record.slug,

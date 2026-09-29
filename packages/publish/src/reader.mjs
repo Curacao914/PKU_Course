@@ -285,8 +285,21 @@ export const READER_SCRIPT = '<script>' + ANCHOR_RUNTIME + String.raw`
   var tools = document.getElementById('tools')
 ` + PREF_CORE + String.raw`
 
-  function closePops () {
-    document.querySelectorAll('.tool-wrap.open').forEach(function (node) { node.classList.remove('open') })
+  /**
+   * 收起浮层。**先播 180ms 的收起过渡再真正隐藏**：
+   * 闭着的浮层若留在布局里（opacity:0）会把手机整页撑出横向滚动，所以隐藏仍然是
+   * display:none，只是推迟到动画播完；"少动"偏好下直接隐藏。
+   */
+  function reduceMotion () {
+    try { return Boolean(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) } catch (error) { return false }
+  }
+  function closePops (immediate) {
+    document.querySelectorAll('.tool-wrap.open').forEach(function (node) {
+      clearTimeout(node.__closeTimer)
+      if (immediate || reduceMotion()) { node.classList.remove('open', 'closing'); return }
+      node.classList.add('closing')
+      node.__closeTimer = setTimeout(function () { node.classList.remove('open', 'closing') }, 180)
+    })
   }
   // 顶栏的站点导航是个 <details>：原生不会"点别处就收起"，点开之后会一直盖在
   // 工具栏的小框上。这里手动收——点外面、按 Esc、或打开别的浮层时都收起。
@@ -435,9 +448,13 @@ export const READER_SCRIPT = '<script>' + ANCHOR_RUNTIME + String.raw`
       }
       if (tool === 'paper' || tool === 'font') {
         var open = wrap.classList.contains('open')
-        closePops()
+        closePops(true)
         closeNav()
-        if (!open) wrap.classList.add('open')
+        if (!open) {
+          clearTimeout(wrap.__closeTimer)
+          wrap.classList.remove('closing')
+          wrap.classList.add('open')
+        }
       }
     }, true)
   }

@@ -1013,6 +1013,8 @@ async function auditNotePage(page, site, noteUrl, failures) {
     '页面底色 ' + paperState.body)
   await record('选中的颜色有标记', paperState.pressed === 'true', 'aria-pressed=' + paperState.pressed)
   // 选完颜色浮层会自动收起（免得盖住别的按钮），所以再选一次要重新点开调色盘
+  // 收起是 180ms 的短过渡：等它播完再判断"收起了没有"
+  await page.waitForTimeout(260)
   const closedAfterPick = await page.evaluate(() => {
     const n = document.getElementById('paperPop')
     if (!n) return true
@@ -2400,6 +2402,20 @@ async function captureReadingShots (page, site, fixture, dir) {
   await page.evaluate(() => {
     localStorage.setItem('course.theme', 'light')
     document.documentElement.setAttribute('data-theme', 'light')
+  })
+  await page.waitForTimeout(200)
+  // 四档底色各来一张：换底色之后卡片/表格/提示/工具栏都不能残留另一套底色
+  for (const paper of ['green', 'kraft', 'gray']) {
+    await page.evaluate(value => {
+      localStorage.setItem('course.paper', value)
+      document.documentElement.setAttribute('data-paper', value)
+    }, paper)
+    await page.waitForTimeout(250)
+    await shot('lesson-note-paper-' + paper + '-mobile', mobile)
+  }
+  await page.evaluate(() => {
+    localStorage.setItem('course.paper', '')
+    document.documentElement.removeAttribute('data-paper')
   })
   await page.waitForTimeout(200)
 
