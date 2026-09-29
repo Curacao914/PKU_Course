@@ -1044,7 +1044,9 @@ test('来源映射：模拟模型回包 → 校验 → onepage.json → 发布�
   assert.match(page, /本页有 \d+ 个要点未能定位到具体小节/)
   assert.match(page, /<a href="\/notes\/法律实证分析\/2026-09-23第1-2节\.html">查看整篇笔记<\/a>/)
   // 纸张模式与打印里没有这些入口（不许把能放下的纸撑成多页）
-  assert.match(page, /\.sheet\[data-mode="a4"\] \.ob-source, \.sheet\[data-mode="a4"\] \.ob-unmapped \{ display: none; \}/)
+  assert.match(page, /\.sheet\[data-mode="a4"\] \.ob-source,/)
+  assert.match(page, /\[data-sheet-mode="a4"\] \.ob-unmapped \{ display: none; \}/)
+  assert.match(page, /@media print \{[\s\S]*?\.ob-source, \.ob-unmapped \{ display: none !important; \}/)
 })
 
 test('来源映射：正文改过之后整份失效，页面退回整篇入口（不留精确来源的假象）', async () => {
@@ -1076,6 +1078,42 @@ test('来源映射：正文改过之后整份失效，页面退回整篇入口�
   // 版本对不上：整份不用，一个 .ob-link 都不该出现
   assert.doesNotMatch(html, /class="ob-link"/)
   assert.match(html, /查看整篇笔记/, '退回整篇入口，并说明未定位')
+})
+
+test('course sourcemap：给已发布的一页纸补映射（免费路径），--write 才写回发布库', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const siteDir = path.join(dir, 'site')
+  fs.mkdirSync(path.join(siteDir, 'md/甲'), { recursive: true })
+  const quoted = '共同犯罪要求共同故意与共同行为同时具备'
+  const noteText = ['# 第1节', '', '## 甲节', '', quoted + '，缺一不可。'].join('\n')
+  fs.writeFileSync(path.join(siteDir, 'md/甲/第1节.md'), noteText)
+  const onepageMarkdown = ['## 一、体系', '', '- ' + quoted + '。', '', '- 另一条概括出来的说法。'].join('\n')
+  fs.writeFileSync(path.join(siteDir, 'library.json'), JSON.stringify([{
+    slug: 'notes/甲/第1节', courseName: '甲', lessonTitle: '第1节',
+    sections: [{ id: '甲节', title: '甲节', level: 2, chars: 30, fingerprint: '00000000' }],
+    onepage: { title: '一页', markdown: onepageMarkdown, chars: 60 }
+  }]))
+
+  const { deps, lines: output, errors } = harness()
+  // 干跑：只报告，不写回
+  assert.equal(await runCli(['sourcemap', '--site-root', siteDir, '--show'], deps), 0, 'stderr: ' + errors.join(' | '))
+  const dry = parse(output.at(-1))
+  assert.equal(dry.written, false)
+  assert.equal(dry.lessons, 1)
+  assert.equal(dry.located, 1, '逐字引用的那一条要定位到')
+  assert.ok(dry.unmapped >= 1, '概括出来的那条保持未定位（覆盖率与定位数分开报）')
+  assert.equal(JSON.parse(fs.readFileSync(path.join(siteDir, 'library.json'), 'utf8'))[0].onepage.sourceMap, undefined,
+    '没给 --write 就不许动发布库')
+  // --show 要把"块 ↔ 小节 + 摘录"列出来，供人工逐项核对
+  assert.equal(dry.rows[0].entries[0].sections[0].id, '甲节')
+  assert.match(dry.rows[0].entries[0].sections[0].quote, /共同犯罪要求共同故意与共同行为同时具备/)
+
+  assert.equal(await runCli(['sourcemap', '--site-root', siteDir, '--write'], deps), 0, 'stderr: ' + errors.join(' | '))
+  const written = JSON.parse(fs.readFileSync(path.join(siteDir, 'library.json'), 'utf8'))[0]
+  assert.equal(written.onepage.sourceMap.entries.length, 1)
+  assert.match(written.onepage.sourceMap.entries[0].block, /^ob-[0-9a-f]{8}$/)
+  assert.equal(written.onepage.sourceMap.note.checksum, markdownChecksum(noteText))
+  assert.equal(written.onepage.markdown.trim(), onepageMarkdown.trim(), '一页纸正文一个字都不动')
 })
 
 test('老发布库（只有 publishedAt）在下次发布时整体迁移成三个时间字段', async () => {
