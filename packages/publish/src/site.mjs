@@ -366,7 +366,9 @@ details.note-meta pre { background: var(--bg-soft); border-radius: var(--radius)
 .hit-badge { display: inline-block; font-family: var(--sans); font-size: 12px; padding: 2px 8px;
   border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
 .hit-badge.semantic { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-ink); }
-.hit-badge.exact { border-color: var(--line-strong); color: var(--ink-soft); }
+.hit-badge.exact { border-color: var(--accent); color: var(--accent-ink); background: var(--accent-soft); }
+.hit-badge.keyword { border-color: var(--line-strong); color: var(--ink-soft); }
+.hit-badge.fuzzy { border-color: var(--warn); color: var(--warn); }
 @media (max-width: 720px) { .search-shell { grid-template-columns: minmax(0, 1fr); gap: 16px; } }
 .search { width: 100%; padding: 12px 16px; font-size: 1em; font-family: var(--sans);
   border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--bg); color: var(--ink); }
@@ -1159,31 +1161,21 @@ const NOTE_SCRIPT = `<script>
     rememberWhere(id)
   }, 1500)
 
-  // 「我的标记」入口：从标题下那一排直接跳到这一页的标记列表；没有标记时如实说，不给一个死链接
-  var dockMarks = document.querySelector('[data-dock="marks"]')
-  if (dockMarks) dockMarks.addEventListener('click', function () {
-    var panel = document.getElementById('railMarks')
-    if (!panel || panel.hidden) { toast('这一页还没有标记：选中正文里的一句话就能做标记'); return }
-    try { panel.scrollIntoView({ block: 'center', behavior: 'smooth' }) } catch (error) { panel.scrollIntoView() }
-    var first = panel.querySelector('.mark-jump')
-    if (first) first.focus()
-  })
-
-  // 小节锚点：悬停显示 #，点一下把「页面地址 + 小节」复制到剪贴板
+  /**
+   * 小节锚点：悬停显示 #。
+   *
+   * 这里**只负责渲染这个链接**，点击行为在阅读脚本里（reader.mjs）——因为它要和
+   * 「复制整篇 Markdown」共用同一套成功/失败处理。旧实现把复制写在这里：不等
+   * clipboard.writeText 完成就把按钮改成"已复制"，剪贴板被拒时也一样报成功（审计 R2），
+   * 而且这里根本没有 toast 可用（审计 R1 的 ReferenceError）。
+   */
   headings.forEach(function (h) {
     var a = document.createElement('a');
     a.className = 'anchor';
     a.href = '#' + h.id;
     a.textContent = '#';
+    a.setAttribute('data-anchor-copy', h.id);
     a.setAttribute('aria-label', '复制这一节的链接');
-    a.addEventListener('click', function (event) {
-      event.preventDefault();
-      var url = location.origin + location.pathname + '#' + h.id;
-      if (navigator.clipboard) navigator.clipboard.writeText(url);
-      history.replaceState(null, '', '#' + h.id);
-      a.textContent = '已复制';
-      setTimeout(function () { a.textContent = '#' }, 1200);
-    });
     h.appendChild(a);
   });
 })();
@@ -1764,10 +1756,27 @@ const SEARCH_SCRIPT = `<script>
     }
   }
 
-  /** 精确命中 / 语义近似：这两种命中不是一回事，读者要一眼看出来；相似度只作参考，不当正确率。 */
-  function badge (hit) {
+  /**
+   * 这条命中"匹配到什么程度"。四档分开，读者一眼能看出自己拿到的是哪一种。
+   *
+   * 旧实现把所有非语义结果都写成"精确命中"——多词查询、错别字回退也算在内，
+   * 读者会以为整句查询原样出现过（审计 R3）。现在：
+   *   · 语义近似：向量召回（附相似度，且不当正确率）；
+   *   · 近似词匹配：检索时纠过错，写清原词→替换词；
+   *   · 精确匹配：查询串**整串原样**出现在小节标题或命中片段里（有证据才这么写）；
+   *   · 关键词匹配：命中靠拆出来的词，没有整串证据。
+   */
+  function badge (hit, query, fuzzy) {
     if (hit.semantic) return '<span class="hit-badge semantic">语义近似' + (hit.similarity ? ' ' + hit.similarity : '') + '</span>';
-    return '<span class="hit-badge exact">精确命中</span>';
+    var replacements = (fuzzy || []).filter(function (item) { return item && item.from && item.to });
+    if (replacements.length) {
+      var pairs = replacements.map(function (item) { return esc(item.from) + '→' + esc(item.to) }).join('、');
+      return '<span class="hit-badge fuzzy">近似词匹配（' + pairs + '）</span>';
+    }
+    var probe = String(query || '').trim();
+    var haystack = [hit.section || ''].concat(hit.snippets || []).join(' ');
+    if (probe && haystack.indexOf(probe) >= 0) return '<span class="hit-badge exact">精确匹配</span>';
+    return '<span class="hit-badge keyword">关键词匹配</span>';
   }
 
   /** 一组 = 一节课里的所有命中；同一小节只出现一次。 */
@@ -1786,7 +1795,7 @@ const SEARCH_SCRIPT = `<script>
     return order;
   }
 
-  function card (group) {
+  function card (group, query, fuzzy) {
     var head = group.head;
     var meta = [head.courseName, head.lessonDate, head.lessonTitle].filter(Boolean)
       .map(function (text) { return '<span>' + esc(text) + '</span>' }).join('');
@@ -1795,7 +1804,7 @@ const SEARCH_SCRIPT = `<script>
         .map(function (text) { return '<p>' + esc(text) + '</p>' }).join('');
       return '<li class="hit"><a href="' + esc(hit.anchor || hit.url) + '">' +
         '<h4>' + esc(hit.section || hit.lessonTitle) + '</h4>' +
-        snippets + badge(hit) +
+        snippets + badge(hit, query, fuzzy) +
         '</a></li>';
     }).join('');
     return '<section class="card group">' +
@@ -1874,7 +1883,8 @@ const SEARCH_SCRIPT = `<script>
         var notes = [];
         // 语义回退：字面没命中、这些是按意思找的——必须说清楚，并给出相似度
         if (semantic.used) {
-          notes.push('以下按**语义近似**召回' + (hits[0] && hits[0].similarity ? '（最像的一条相似度 ' + hits[0].similarity + '）' : ''));
+          // 这行提示是纯文本节点：写 Markdown 星号会原样显示成 **语义近似**
+          notes.push('以下按语义近似召回' + (hits[0] && hits[0].similarity ? '（最像的一条相似度 ' + hits[0].similarity + '）' : ''));
         }
         if (data.fuzzy && data.fuzzy.length) {
           notes.push('按近似词检索：' + data.fuzzy.map(function (item) { return item.from + '→' + item.to }).join('、'));
@@ -1885,7 +1895,7 @@ const SEARCH_SCRIPT = `<script>
         var multi = groups.filter(function (group) { return group.items.length > 1 }).length;
         if (multi) notes.push(multi + ' 篇在多个小节命中');
         show('命中 ' + groups.length + ' 节课、' + hits.length + ' 处小节' + (notes.length ? '（' + notes.join('；') + '）' : ''));
-        results.innerHTML = groups.map(card).join('');
+        results.innerHTML = groups.map(function (group) { return card(group, text, data.fuzzy) }).join('');
         restoreScroll();
       })
       .catch(function (error) {

@@ -686,10 +686,15 @@ test('搜索页：主标题是命中的小节，同课多处命中收在一张�
   assert.match(html, /function groupHits \(hits\)/)
   assert.match(html, /'<h4>' \+ esc\(hit\.section \|\| hit\.lessonTitle\) \+ '<\/h4>'/)
   assert.match(html, /'<ol class="hit-list">' \+ rows \+ '<\/ol>'/)
-  // 精确命中 / 语义近似分开标；相似度只作参考，不写成正确率
-  assert.match(html, /<span class="hit-badge exact">精确命中<\/span>/)
-  assert.match(html, /<span class="hit-badge semantic">语义近似/)
-  assert.match(html, /hit-badge semantic/)
+  // 四档匹配分开标（审计 R3：多词、错别字回退曾被一律写成"精确命中"）
+  assert.match(html, /if \(hit\.semantic\) return '<span class="hit-badge semantic">语义近似'/)
+  assert.match(html, /'<span class="hit-badge fuzzy">近似词匹配（' \+ pairs \+ '）<\/span>'/)
+  assert.match(html, /if \(probe && haystack\.indexOf\(probe\) >= 0\) return '<span class="hit-badge exact">精确匹配<\/span>'/)
+  assert.match(html, /return '<span class="hit-badge keyword">关键词匹配<\/span>'/)
+  assert.match(html, /esc\(item\.from\) \+ '→' \+ esc\(item\.to\)/, '纠错时写清原词→替换词')
+  assert.match(html, /haystack = \[hit\.section \|\| ''\]\.concat\(hit\.snippets \|\| \[\]\)\.join\(' '\)/, '整串原样出现才算精确匹配')
+  // 提示是纯文本节点：不许把 Markdown 星号写给读者看
+  assert.doesNotMatch(html, /按\*\*语义近似\*\*召回/)
   // 返回搜索：查询与筛选在 URL 里，滚动位置单独记一份
   assert.match(html, /SCROLL_KEY = 'course.searchScroll'/)
   assert.match(html, /function restoreScroll \(\)/)

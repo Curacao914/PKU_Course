@@ -882,6 +882,35 @@ async function auditNotePage(page, site, noteUrl, failures) {
   await page.goto(site.url + noteUrl, { waitUntil: 'domcontentloaded' })
   await page.waitForSelector('article h2', { timeout: 8000 })
 
+  /**
+   * R1：**零标记**时点「我的标记」。
+   *
+   * 旧实现把这个 handler 写在笔记页脚本里，却去调用另一个闭包里的 toast——
+   * 隔离浏览器复现的是 `toast is not defined`：点了什么都不发生，控制台报错。
+   * 这里在页面还没有任何标记时先点一次：要有可读提示，且不能有页面脚本异常
+   * （pageerror 由 main() 统一收集，出现即失败）。
+   */
+  {
+    const pageErrors = []
+    const onError = error => pageErrors.push(error.message)
+    page.on('pageerror', onError)
+    await page.click('[data-dock="marks"]')
+    await page.waitForTimeout(400)
+    const emptyMarks = await page.evaluate(() => {
+      const box = document.getElementById('toast')
+      return {
+        toast: box ? box.textContent.trim() : '',
+        visible: box ? box.style.opacity === '1' : false,
+        panelHidden: document.getElementById('railMarks') ? document.getElementById('railMarks').hidden : null,
+        marks: (() => { try { return JSON.parse(localStorage.getItem('course.annots:' + location.pathname) || '[]').length } catch (e) { return -1 } })()
+      }
+    })
+    page.off('pageerror', onError)
+    await record('零标记时点入口有真实反馈',
+      emptyMarks.visible && /还没有标记/.test(emptyMarks.toast) && pageErrors.length === 0 && emptyMarks.marks === 0,
+      '提示「' + emptyMarks.toast + '」，脚本异常 ' + pageErrors.length + ' 个，面板隐藏=' + emptyMarks.panelHidden)
+  }
+
   // 工具在顶栏这一排，正文右上角不该再有浮层（用户明确要求）
   const toolsInTopbar = await page.$eval('.topbar', el => !!el.querySelector('#tools'))
   const floatingTools = await page.$eval('#tools', el => getComputedStyle(el).position === 'fixed')
@@ -981,15 +1010,34 @@ async function auditNotePage(page, site, noteUrl, failures) {
   const scrollY = await page.evaluate(() => window.scrollY)
   await record('回到顶部可用', scrollY < 60, '滚动位置 ' + scrollY)
 
-  // 锚点复制
+  /**
+   * R2：小节链接复制。
+   *
+   * 旧实现不等 clipboard.writeText 完成就把按钮改成"已复制"——剪贴板被拒时同样报成功。
+   * 成功路径要先给权限才测得出来（无权限时走的本来就是失败路径），失败路径见后面的
+   * "剪贴板被拒"与"没有剪贴板 API"两段。
+   */
+  const anchorState = () => page.evaluate(() => {
+    const a = document.querySelector('article h2 a.anchor')
+    const box = document.getElementById('toast')
+    return {
+      label: a ? a.textContent : '',
+      hash: location.hash,
+      toast: box ? box.textContent.trim() : '',
+      fallback: Boolean(box && box.querySelector('textarea')),
+      visible: box ? box.style.opacity === '1' : false
+    }
+  })
   const anchor = await page.$('article h2 a.anchor')
   if (!anchor) await record('小节锚点', false, '标题上没有生成可复制的锚点')
   else {
+    await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: site.url }).catch(() => {})
     await anchor.click()
-    await page.waitForTimeout(150)
-    const text = await page.$eval('article h2 a.anchor', el => el.textContent)
-    const hash = await page.evaluate(() => location.hash)
-    await record('锚点复制', text === '已复制' && hash.length > 1, '文字「' + text + '」，地址 ' + hash)
+    await page.waitForTimeout(400)
+    const copied = await anchorState()
+    await record('小节链接复制成功才说已复制',
+      copied.label === '已复制' && /已复制小节链接/.test(copied.toast) && copied.hash.length > 1 && !copied.fallback,
+      '文字「' + copied.label + '」提示「' + copied.toast + '」地址 ' + decodeURIComponent(copied.hash))
     await page.waitForTimeout(1300)
     await record('锚点文字复位', (await page.$eval('article h2 a.anchor', el => el.textContent)) === '#', '一秒多之后应回到 #')
   }
@@ -1327,6 +1375,35 @@ async function auditNotePage(page, site, noteUrl, failures) {
   await record('取正文失败时不往剪贴板塞错误页', httpFail.visible && /取正文失败（HTTP 404）/.test(httpFail.text),
     '提示：' + httpFail.text.trim().slice(0, 60))
 
+  /**
+   * R2 的两条失败路径（同一个 bug 的另一半）：剪贴板被拒、浏览器没有剪贴板 API。
+   * 两种情况下按钮都**不许**变成"已复制"，而且要给出可手工拿走的链接。
+   */
+  await page.reload({ waitUntil: 'networkidle' })
+  await page.click('article h2 a.anchor')
+  await page.waitForTimeout(400)
+  const anchorDenied = await anchorState()
+  await record('剪贴板被拒时不谎报已复制',
+    anchorDenied.label === '#' && /复制失败/.test(anchorDenied.toast) && anchorDenied.fallback && anchorDenied.hash.length > 1,
+    '文字「' + anchorDenied.label + '」提示「' + anchorDenied.toast.trim().slice(0, 40) + '」带兜底文本域：' + anchorDenied.fallback)
+
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, get: () => undefined })
+  })
+  await page.reload({ waitUntil: 'networkidle' })
+  await page.click('article h2 a.anchor')
+  await page.waitForTimeout(400)
+  const anchorMissing = await anchorState()
+  await record('没有剪贴板 API 时也说清楚',
+    anchorMissing.label === '#' && /复制失败/.test(anchorMissing.toast) && anchorMissing.fallback,
+    '文字「' + anchorMissing.label + '」提示「' + anchorMissing.toast.trim().slice(0, 40) + '」')
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: () => Promise.reject(new Error('权限被拒绝（审计注入）')) }
+    })
+  })
+
   // 目录：点一条要跳到对应小节，且当前小节会被高亮
   await page.evaluate(() => window.scrollTo(0, 0))
   await page.waitForTimeout(300)
@@ -1432,10 +1509,69 @@ async function auditSearch(page, site, failures) {
     '课次「' + shape.lesson + '」→ 小节「' + shape.section + '」')
   // 结果落点要指到命中的那一节（带锚点），而不只是整篇
   await record('结果落点带小节锚点', Boolean(shape.href && shape.href.includes('#')), '首个链接：' + shape.href)
-  // 公开端没启用语义时不许出现"语义近似"标签（假装有语义结果比没有更糟）
-  await record('精确命中标出来、不假装有语义',
-    shape.badges.some(text => text.indexOf('精确命中') === 0) && shape.semantic === 0,
+  /**
+   * R3：四档匹配不许混为一谈。
+   *
+   * 旧实现把所有非语义结果都写成"精确命中"——多词查询、错别字回退也算，读者会以为
+   * 整句查询原样出现在笔记里。这里逐档验：完整短语→精确匹配；多词→关键词匹配；
+   * 纠错回退→近似词匹配（写明原词→替换词）；向量召回→语义近似（公开端未启用时不出现）。
+   */
+  await record('完整短语命中标成精确匹配、不假装有语义',
+    shape.badges.length > 0 && shape.badges.every(text => text === '精确匹配') && shape.semantic === 0,
     '标签：' + (shape.badges.join(' / ') || '（无）'))
+
+  await page.fill('#q', '执行 措施')
+  await page.waitForTimeout(800)
+  const multiWord = await page.evaluate(() => ({
+    badges: [...document.querySelectorAll('#results .hit-badge')].map(n => n.textContent.trim()),
+    cards: document.querySelectorAll('#results .card.group').length
+  }))
+  await record('多词查询不冒充精确匹配',
+    multiWord.cards > 0 && multiWord.badges.every(text => text === '关键词匹配'),
+    multiWord.cards + ' 张卡，标签：' + (multiWord.badges.join(' / ') || '（无）'))
+
+  // 纠错回退与向量召回：公开端没有语义、夹具里也没有错别字查询，用拦截响应验 UI 契约
+  const injectSearch = payload => page.route('**/api/search**', route => route.fulfill({
+    status: 200, contentType: 'application/json', body: JSON.stringify(payload)
+  }))
+  const baseHit = {
+    slug: 'notes/刑事执行法/第5-6节', url: '/notes/刑事执行法/第5-6节.html',
+    anchor: '/notes/刑事执行法/第5-6节.html#%E4%BA%8C', courseName: '刑事执行法',
+    lessonTitle: '第5-6节', lessonDate: '2026-09-25', section: '二、执行措施与救济', sectionId: '二',
+    snippets: ['执行措施与救济的关系需要先分清执行依据。'], keywords: [], theme: ''
+  }
+  await injectSearch({
+    ok: true, query: '罪刑法定主意', total: 1, coverage: 'body', escalated: false,
+    semantic: { used: false, enabled: false }, lexicalTotal: 1,
+    fuzzy: [{ from: '主意', to: '主义' }],
+    hits: [Object.assign({}, baseHit, { section: '罪刑法定主义的质疑' })]
+  })
+  await page.fill('#q', '罪刑法定主意')
+  await page.waitForTimeout(800)
+  const fuzzyBadge = await page.evaluate(() => {
+    const node = document.querySelector('#results .hit-badge')
+    return { text: node ? node.textContent.trim() : '', cls: node ? node.className : '' }
+  })
+  await record('纠错回退标成近似词匹配并写明替换',
+    /近似词匹配/.test(fuzzyBadge.text) && /主意→主义/.test(fuzzyBadge.text) && /fuzzy/.test(fuzzyBadge.cls),
+    '标签：' + fuzzyBadge.text)
+
+  await page.unroute('**/api/search**')
+  await injectSearch({
+    ok: true, query: '轻罪前科怎么处理', total: 1, coverage: 'body', escalated: false,
+    semantic: { used: true, enabled: true }, lexicalTotal: 0,
+    fuzzy: [], hits: [Object.assign({}, baseHit, { semantic: true, similarity: 0.662 })]
+  })
+  await page.fill('#q', '轻罪前科怎么处理')
+  await page.waitForTimeout(800)
+  const semanticBadge = await page.evaluate(() => {
+    const node = document.querySelector('#results .hit-badge')
+    return { text: node ? node.textContent.trim() : '', hint: document.getElementById('hint').textContent.trim() }
+  })
+  await record('语义召回标成语义近似并给相似度',
+    /语义近似/.test(semanticBadge.text) && /0.662/.test(semanticBadge.text) && !/正确率/.test(semanticBadge.hint),
+    '标签：' + semanticBadge.text + '｜提示：' + semanticBadge.hint.slice(0, 50))
+  await page.unroute('**/api/search**')
   await record('查询写进地址栏（返回时能还原）', /[?&]q=/.test(shape.url), '地址：' + shape.url)
   await record('课程筛选来自建站数据', shape.rail >= 2, shape.rail + ' 个筛选项')
 

@@ -353,6 +353,27 @@ export const READER_SCRIPT = '<script>' + ANCHOR_RUNTIME + String.raw`
     box.__timer = setTimeout(function () { box.style.opacity = '0' }, fallbackText ? 12000 : 2600)
   }
 
+  /**
+   * 复制到剪贴板：**成功与失败只有这一处判断**。
+   *
+   * 整篇 Markdown 与小节链接都走它——两处各写一套的结果，就是一边如实报失败、
+   * 另一边不等结果就报"已复制"（审计 R2）。失败时把文本放进可选中的 textarea 兜底。
+   * 返回 Promise<boolean>：调用方据此决定要不要改按钮状态。
+   */
+  function copyToClipboard (text, okMessage) {
+    if (!navigator.clipboard || !navigator.clipboard.writeText) {
+      toast('复制失败：这个浏览器不给用剪贴板', text)
+      return Promise.resolve(false)
+    }
+    return navigator.clipboard.writeText(text).then(function () {
+      toast(okMessage || '已复制')
+      return true
+    }).catch(function (error) {
+      toast('复制失败：' + ((error && error.message) || '浏览器拒绝了剪贴板权限'), text)
+      return false
+    })
+  }
+
   if (tools) {
     // 挂在 document 上而不是 #tools 上：即使某次重绘换掉了按钮节点，点击也仍然能被接住
     document.addEventListener('click', function (event) {
@@ -387,15 +408,8 @@ export const READER_SCRIPT = '<script>' + ANCHOR_RUNTIME + String.raw`
         }
         // 复制是异步的：先看状态码（404/503 的响应体是一段错误页，塞进剪贴板等于把错误页
         // 复制走），再看剪贴板权限（可能被拒）。两种情况都要当场说清楚，并给出人工兜底。
-        var write = function (text) {
-          if (!navigator.clipboard || !navigator.clipboard.writeText) return Promise.reject(new Error('这个浏览器不给用剪贴板'))
-          return navigator.clipboard.writeText(text)
-        }
         var copyText = function (text) {
-          return write(text).then(function () { toast('已复制 Markdown'); done() })
-            .catch(function (error) {
-              toast('复制失败：' + ((error && error.message) || '浏览器拒绝了剪贴板权限'), text)
-            })
+          return copyToClipboard(text, '已复制 Markdown').then(function (ok) { if (ok) done(); return ok })
         }
         if (link && window.fetch) {
           fetch(link.getAttribute('href')).then(function (res) {
@@ -871,7 +885,48 @@ export const READER_SCRIPT = '<script>' + ANCHOR_RUNTIME + String.raw`
       if (drop) dropMark(drop.getAttribute('data-mark-id'))
     })
   }
+
+  /**
+   * 「我的标记」入口：从标题下那一排点，或者从一页纸带 #railMarks 进来。
+   *
+   * 没有标记时**必须说一句**：列表在没标记时是隐藏的，跳到隐藏区域等于什么都没发生
+   * （审计 R1 要的就是这个空状态）。所以先看面板在不在，再决定滚过去还是解释一句。
+   */
+  function revealMarks (scroll) {
+    var panel = document.getElementById('railMarks')
+    if (!panel || panel.hidden) { toast('这一页还没有标记：选中正文里的一句话就能做标记'); return }
+    if (scroll !== false) {
+      try { panel.scrollIntoView({ block: 'center', behavior: 'smooth' }) } catch (error) { panel.scrollIntoView() }
+    }
+    var first = panel.querySelector('.mark-jump')
+    if (first) first.focus()
+  }
+  var dockMarks = document.querySelector('[data-dock="marks"]')
+  if (dockMarks) dockMarks.addEventListener('click', function () { revealMarks(true) })
+
+  /**
+   * 标题上的"#"：把「页面地址 + 小节」复制走。
+   *
+   * 地址栏先改（保留阅读位置），按钮文字**等复制结果回来再改**：剪贴板被拒时保持 "#"，
+   * 并把链接放进 toast 里的 textarea，读者按 ⌘C 就能自己拿走。
+   */
+  document.addEventListener('click', function (event) {
+    var link = event.target && event.target.closest ? event.target.closest('[data-anchor-copy]') : null
+    if (!link) return
+    event.preventDefault()
+    var id = link.getAttribute('data-anchor-copy') || ''
+    var url = location.origin + location.pathname + '#' + id
+    try { history.replaceState(null, '', '#' + id) } catch (error) {}
+    copyToClipboard(url, '已复制小节链接').then(function (ok) {
+      if (!ok) return
+      link.textContent = '已复制'
+      setTimeout(function () { link.textContent = '#' }, 1200)
+    })
+  })
+
   restore()
+  // 从一页纸的「我的标记」跳进来：goHash 已经滚过去并闪了一下，这里只补空状态与焦点
+  if (decodeURIComponent(location.hash.replace(/^#/, '')) === 'railMarks') revealMarks(false)
 
   /**
    * 导出 / 导入批注。
