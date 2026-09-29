@@ -46,7 +46,7 @@ export function renderOnepagePage(record = {}, { siteOrigin = '', courseLessons 
     '<aside class="rail rail-left">',
     rail || `<div class="rail-title">${escapeHtml(record.courseName || '')}</div>`,
     '</aside>',
-    '<div class="sheet-wrap">',
+    '<div class="sheet-wrap" id="sheetWrap" data-sheet-mode="read">',
     // 与笔记页同一位置的三个入口：在这一页也能原路回正文、回到自己的标记
     lessonDock(record, { current: 'onepage' }),
     // 显示方式开关：默认阅读模式，纸张模式是一次明确的点击（并记住选择）
@@ -182,7 +182,11 @@ export const ONEPAGE_SCRIPT = `<script>
   })
   function blockNode (id) {
     if (!id) return null
-    return document.querySelector('[data-ob="' + String(id).replace(/["\\]/g, '') + '"]')
+    // 块 ID 只可能是 ob-<8 位十六进制>（可能带 -2 后缀）：用白名单过滤后再拼进选择器。
+    // 这里原先写的是正则转义（["\\]），而它在一层模板串里被折叠成了 /["\]/ ——
+    // 一个没闭合的正则，整个一页纸脚本当场不执行（字号、模式开关、"看原文"全哑）。
+    var safe = String(id).replace(/[^a-zA-Z0-9_-]/g, '')
+    return safe ? document.querySelector('[data-ob="' + safe + '"]') : null
   }
   function flashBlock (node) {
     if (!node || reduceMotion()) return
@@ -244,6 +248,10 @@ export const ONEPAGE_SCRIPT = `<script>
 
   function repaint () {
     sheet.setAttribute('data-mode', mode)
+    // 包装元素上也记一份模式：未定位说明、来源入口这些都渲染在纸张之外，
+    // 纸张模式与打印里它们一个都不该出现（纸上只有那张 A4）
+    var wrap = document.getElementById('sheetWrap')
+    if (wrap) wrap.setAttribute('data-sheet-mode', mode)
     if (tools) {
       [].slice.call(tools.querySelectorAll('button[data-sheet-mode]')).forEach(function (button) {
         button.setAttribute('aria-pressed', button.getAttribute('data-sheet-mode') === mode ? 'true' : 'false')
@@ -328,7 +336,8 @@ export const ONEPAGE_CSS = `
 .ob-flash { animation: obFlash 2.4s ease-out 1; }
 @keyframes obFlash { 0% { background: var(--accent-soft); } 100% { background: transparent; } }
 /* 纸张模式与打印里没有交互控件：纸上只有那张 A4，映射不许把能放下的纸撑成多页 */
-.sheet[data-mode="a4"] .ob-source, .sheet[data-mode="a4"] .ob-unmapped { display: none; }
+.sheet[data-mode="a4"] .ob-source,
+[data-sheet-mode="a4"] .ob-unmapped { display: none; }
 .sheet-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; max-width: 210mm;
   margin: 0 auto 12px; }
 .sheet-tools button { font: inherit; font-size: 13px; padding: 6px 12px; min-height: 34px; cursor: pointer;

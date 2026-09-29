@@ -897,7 +897,26 @@ test('every page inline script parses — a syntax error means a blank page', ()
         markdown: [NOTE, '', '<details><summary>元数据</summary>', '<pre><code>', 'META: CONCEPT: 共同故意', '</code></pre>', '</details>'].join('\n')
       })]
     }),
-    知识地图: renderKnowledgeMapPage({ notes: [record({ markdown: NOTE })] })
+    知识地图: renderKnowledgeMapPage({ notes: [record({ markdown: NOTE })] }),
+    // 一页纸页必须在这里：它那段脚本里只要有一个没闭合的正则，整页的开关、"看原文"、
+    // 字号响应会**全部哑掉**，而其它页面照常——这种错只有把这一页也解析一遍才拦得住
+    一页纸: renderOnepagePageHtml(record({
+      markdown: NOTE,
+      onepage: {
+        title: '一页纸',
+        markdown: '## 一、要点\n\n- 共同故意与共同行为都要有。',
+        chars: 30,
+        sourceMap: {
+          version: 1,
+          onepageChecksum: '',
+          entries: [{
+            block: 'ob-00000000',
+            label: '要点',
+            sections: [{ id: '一-成立条件', title: '一、成立条件', quote: '共同故意与共同行为都要有' }]
+          }]
+        }
+      }
+    }), { siteOrigin: '' })
   }
   for (const [name, html] of Object.entries(pages)) {
     const scripts = []

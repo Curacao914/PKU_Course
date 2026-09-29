@@ -74,6 +74,15 @@ test('免费路径：只有逐字出现且唯一的块才建映射，概括改�
   assert.equal(map.entries.some(entry => entry.block === blocks[0].id), false, '标题块不配来源入口')
 })
 
+test('免费路径：列表项开头就是被引用的那句话时也要认（去掉 Markdown 记号再比对）', () => {
+  const note = ['## 甲节', '', '减刑要经过报请与裁定两个环节。假释看的是没有再犯危险。'].join('\n')
+  const onepage = ['- 减刑要经过报请与裁定两个环节。', '- 另一条完全不相干的概括说明。'].join('\n\n')
+  const map = buildSourceMap({ slug: 'notes/x', noteMarkdown: note, onepageMarkdown: onepage })
+  assert.equal(map.entries.length, 1, '被逐字引用的那一条要定位到')
+  assert.equal(map.entries[0].sections[0].id, '甲节')
+  assert.match(map.entries[0].sections[0].quote, /减刑要经过报请与裁定两个环节/)
+})
+
 test('免费路径：两节都像就不定，宁可不定位', () => {
   const note = [
     '## 甲节',

@@ -28,7 +28,8 @@ import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright-core'
 
 import {
-  buildNoteRecord, renderIndexPage, renderKnowledgeMapPage, renderNotePage, renderSearchPage, renderTermIndexPage
+  buildNoteRecord, buildSourceMap, renderIndexPage, renderKnowledgeMapPage, renderNotePage, renderSearchPage,
+  renderTermIndexPage, sectionTexts, verifySourceMap
 } from '@course/publish'
 // 一页纸页面的渲染函数没有从包的入口导出（包只暴露 "."），审计要造一份能点进去的
 // 一页纸夹具，所以直接引这份源码——不然"首页那个入口点下去是不是真的到得了"就测不到。
@@ -162,6 +163,25 @@ function buildFixture() {
     metadata: record.metadata
   }], null, 2))
 
+  /**
+   * 夹具里的这一页纸要带**真实的来源映射**：用免费路径（确定性抽取）现算，
+   * 这样"看原文 → 原文 → 返回一页纸"整条路是在真实数据上验的，而不是手写的假映射。
+   */
+  const attachFixtureSourceMap = record => {
+    const note = String(record.markdown || '')
+    const onepageMarkdown = String(record.onepage?.markdown || '')
+    if (!note || !onepageMarkdown) return record
+    const draft = buildSourceMap({ slug: record.slug, noteMarkdown: note, onepageMarkdown })
+    const verified = verifySourceMap(draft, {
+      slug: record.slug, noteMarkdown: note, onepageMarkdown, sections: sectionTexts(note)
+    })
+    if (!verified.entries.length) return record
+    return {
+      ...record,
+      onepage: { ...record.onepage, sourceMap: { ...draft, entries: verified.entries } }
+    }
+  }
+
   // 首页 / 索引页：横向课次条、课程过滤、条目落到正文位置，都要真的点一遍
   const execSecond = buildNoteRecord({
     courseName: '刑事执行法',
@@ -170,7 +190,8 @@ function buildFixture() {
     // 这一节配了一页纸：首页那门课的第一行与课次行里的入口都要有东西可点
     onepage: {
       title: '减刑与假释的适用条件',
-      markdown: ['## 一、减刑', '', '- 报请与裁定', '', '## 二、假释', '', '- 没有再犯危险'].join('\n'),
+      // 第一块**逐字**引用正文（免费路径能定位到），第二块是概括（不硬指，走"未定位"）
+      markdown: ['## 一、减刑', '', '- 减刑要经过报请与裁定两个环节。', '', '## 二、假释', '', '- 没有再犯危险的判断'].join('\n'),
       chars: 26
     },
     brief: {
@@ -260,7 +281,8 @@ function buildFixture() {
       '</details>'
     ].join('\n')
   })
-  const courseRecords = [record, execSecond, companyRecord, companySecond, empiricalRecord]
+  // 一页纸那一篇带上真实的来源映射（其余篇没有一页纸，不受影响）
+  const courseRecords = [record, attachFixtureSourceMap(execSecond), companyRecord, companySecond, empiricalRecord]
   for (const item of courseRecords) {
     const pageFile = path.join(siteRoot, item.slug + '.html')
     fs.mkdirSync(path.dirname(pageFile), { recursive: true })
@@ -2411,6 +2433,143 @@ async function captureReadingShots (page, site, fixture, dir) {
   return []
 }
 
+/**
+ * 来源映射的往返（§1.5）：一页纸 → 原文 → 返回一页纸。
+ *
+ * 验的是四件事，都在真实浏览器里点：
+ *   1. 阅读模式里"看原文"在块旁边，点一下到**真正那一节**（地址栏锚点 + 小节在视野内）；
+ *   2. 原文给出「返回一页纸」，地址与当前这一篇对得上（对不上就不该显示）；
+ *   3. 回到一页纸时落回**原来那一块**（不是页首），并且有一点点落点提示；
+ *   4. 浏览器后退同样落回去；往返不重置字号、纸色与深浅。
+ * 另外确认 A4 模式里这些交互控件不出现（纸上不许多长出按钮）。
+ */
+async function auditSourceMapRoundTrip (page, site, failures) {
+  const results = []
+  const record = async (name, ok, detail) => {
+    results.push({ name, ok, detail })
+    console.log('  ' + (ok ? '✔' : '✖') + ' ' + name.padEnd(20) + detail)
+    if (!ok) failures.push('来源映射 ' + name + '：' + detail)
+  }
+  console.log('来源映射往返')
+
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto(site.url + '/index.html', { waitUntil: 'domcontentloaded' })
+  await page.waitForTimeout(300)
+  const onepageHref = await page.evaluate(() => {
+    const link = document.querySelector('a.onepage-link, a[href*="/onepage/"]')
+    return link ? link.getAttribute('href') : ''
+  })
+  if (!onepageHref) {
+    await record('夹具里有一页纸可测', false, '首页没有 /onepage/ 链接')
+    return results
+  }
+  const onepageUrl = new URL(onepageHref, site.url).toString()
+
+  // 读者字号调到 140%：往返之后必须还是 140%
+  await page.goto(onepageUrl, { waitUntil: 'domcontentloaded' })
+  await page.evaluate(() => {
+    localStorage.setItem('course.fontScale', '1.4')
+    document.documentElement.style.setProperty('--font-scale', '1.4')
+  })
+  await page.reload({ waitUntil: 'domcontentloaded' })
+  await page.waitForTimeout(400)
+
+  const entries = await page.evaluate(() => ({
+    links: document.querySelectorAll('.ob-link').length,
+    blocks: document.querySelectorAll('[data-ob]').length,
+    label: (document.querySelector('.ob-label') || {}).textContent || '',
+    unmapped: (document.querySelector('.ob-unmapped') || {}).textContent || '',
+    fontScale: document.documentElement.style.getPropertyValue('--font-scale')
+  }))
+  await record('一页纸上有"看原文"', entries.links >= 1 && entries.blocks >= 2 && entries.fontScale === '1.4',
+    entries.links + ' 个入口，' + entries.blocks + ' 个块，字号 ' + entries.fontScale)
+  await record('未定位的要点如实说明', /未能定位到具体小节/.test(entries.unmapped),
+    '「' + entries.unmapped.trim() + '」')
+
+  const target = await page.evaluate(() => {
+    const link = document.querySelector('.ob-link')
+    return link ? { href: link.getAttribute('href'), block: link.getAttribute('data-ob-from'), section: link.getAttribute('data-ob-section') } : null
+  })
+  await page.click('.ob-link')
+  await page.waitForTimeout(700)
+  const landed = await page.evaluate(() => {
+    const id = decodeURIComponent(location.hash.replace(/^#/, ''))
+    const node = id ? document.getElementById(id) : null
+    const rect = node ? node.getBoundingClientRect() : null
+    const back = document.getElementById('obBack')
+    return {
+      path: location.pathname,
+      hash: decodeURIComponent(location.hash),
+      inView: rect ? rect.top > -40 && rect.top < window.innerHeight : false,
+      backVisible: back ? !back.hidden : false,
+      backHref: back ? back.getAttribute('href') : '',
+      storedReturn: (() => { try { return localStorage.getItem('course.obReturn') || '' } catch (error) { return '（读不到）' } })(),
+      fontScale: document.documentElement.style.getPropertyValue('--font-scale'),
+      theme: document.documentElement.getAttribute('data-theme')
+    }
+  })
+  await record('点"看原文"到真正那一节',
+    /^\/notes\//.test(landed.path) && landed.inView && landed.hash.length > 1 && landed.storedReturn.indexOf('onepagePath') > 0,
+    landed.path + landed.hash + '，小节在视野内=' + landed.inView + '，已记下查阅上下文=' + (landed.storedReturn.indexOf('onepagePath') > 0))
+  await record('原文给出「返回一页纸」',
+    landed.backVisible && landed.backHref.indexOf('/onepage/') === 0 && landed.backHref.includes('#ob-'),
+    landed.backVisible ? landed.backHref : '（没有出现返回入口）｜上下文：' + landed.storedReturn.slice(0, 160))
+
+  await page.click('#obBack')
+  await page.waitForTimeout(800)
+  const returned = await page.evaluate(target => {
+    const node = target ? document.querySelector('[data-ob="' + target + '"]') : null
+    const rect = node ? node.getBoundingClientRect() : null
+    return {
+      path: location.pathname,
+      inView: rect ? rect.top > -60 && rect.top < window.innerHeight : false,
+      flashed: node ? node.className.includes('ob-flash') : false,
+      atTop: Math.round(window.scrollY) < 80,
+      scrollable: document.documentElement.scrollHeight - window.innerHeight > 120,
+      fontScale: document.documentElement.style.getPropertyValue('--font-scale')
+    }
+  }, target ? target.block : '')
+  // 夹具这一页很短，"停在页首"与"落回那一块"其实是同一件事；只有页面够长时才要求真的滚下去
+  await record('返回后落回原来那一块',
+    /^\/onepage\//.test(returned.path) && returned.inView && (!returned.atTop || !returned.scrollable),
+    returned.path + '，块在视野内=' + returned.inView + '，可滚动=' + returned.scrollable + '，滚动到页首=' + returned.atTop)
+  await record('往返不重置字号', returned.fontScale === '1.4', '字号 ' + returned.fontScale)
+
+  // 浏览器后退：也该落回那一块，而不是页首
+  await page.click('.ob-link')
+  await page.waitForTimeout(700)
+  await page.goBack()
+  await page.waitForTimeout(900)
+  const backAgain = await page.evaluate(target => {
+    const node = target ? document.querySelector('[data-ob="' + target + '"]') : null
+    const rect = node ? node.getBoundingClientRect() : null
+    return {
+      path: location.pathname,
+      inView: rect ? rect.top > -60 && rect.top < window.innerHeight : false,
+      atTop: Math.round(window.scrollY) < 80,
+      scrollable: document.documentElement.scrollHeight - window.innerHeight > 120
+    }
+  }, target ? target.block : '')
+  await record('浏览器后退也落回原块',
+    /^\/onepage\//.test(backAgain.path) && backAgain.inView && (!backAgain.atTop || !backAgain.scrollable),
+    backAgain.path + '，块在视野内=' + backAgain.inView)
+
+  // A4 模式：这些交互控件不占纸面
+  await page.click('button[data-sheet-mode="a4"]')
+  await page.waitForTimeout(300)
+  const paper = await page.evaluate(() => ({
+    sourceVisible: (() => { const node = document.querySelector('.ob-source'); return node ? getComputedStyle(node).display !== 'none' : false })(),
+    unmappedVisible: (() => { const node = document.querySelector('.ob-unmapped'); return node ? getComputedStyle(node).display !== 'none' : false })()
+  }))
+  await record('A4 预览里不出现来源入口', !paper.sourceVisible && !paper.unmappedVisible,
+    '看原文可见=' + paper.sourceVisible + '，未定位说明可见=' + paper.unmappedVisible)
+  await page.evaluate(() => {
+    localStorage.setItem('course.fontScale', '1')
+    localStorage.removeItem('course.onepageMode')
+  })
+  return results
+}
+
 async function main() {
   const fixture = buildFixture()
   const calls = []
@@ -2469,6 +2628,8 @@ async function main() {
     console.log('')
     await auditMobileLayout(page, site, fixture.noteUrl, failures)
     await auditOnepagePrint(page, site, fixture.noteUrl, failures)
+    console.log('')
+    await auditSourceMapRoundTrip(page, site, failures)
     if (process.env.COURSE_AUDIT_SHOTS) {
       console.log('')
       await captureReadingShots(page, site, fixture, process.env.COURSE_AUDIT_SHOTS)

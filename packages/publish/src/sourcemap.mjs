@@ -171,7 +171,9 @@ export function buildSourceMap({ slug = '', noteMarkdown = '', onepageMarkdown =
   const problems = []
 
   for (const block of blocks) {
-    const sentences = normalize(block.text)
+    // 先去掉 Markdown 记号（列表的 "-"、粗体的 "*"）再切句子：否则"- 减刑要经过…"整句
+    // 带着那个短横线，在正文里永远找不到——一条本来能确定的映射就这么没了
+    const sentences = normalize(plainBlockText(block.text))
       .split(/[。；;！!？?，,、：:（）()【】《》"'`]+/)
       .filter(sentence => sentence.length >= minOverlap)
     if (!sentences.length) continue
