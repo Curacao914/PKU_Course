@@ -20,10 +20,40 @@ export const ONEPAGE_MAX_CHARS = 2600
 export const ONEPAGE_SCHEMA = {
   title: 'string（不超过 20 字，这一页的标题，可以是本课主题）',
   markdown: 'string（一张 A4 能放下的复习页 Markdown：短句、列表、表格；不要长段落）',
-  outline: ['string（3—6 条，这一页分了哪几块，供目录/校验用）']
+  outline: ['string（3—6 条，这一页分了哪几块，供目录/校验用）'],
+  // 来源映射：让读者能回到"这句话的依据在哪一节"。
+  // 只允许从**给定的小节清单**里挑 id；链接由程序拼，模型不许自己写地址。
+  sourceMap: [{
+    block: 'string（这一条对应 markdown 里的哪一块：给出该块**开头的 8—20 个字**，程序据此定位）',
+    label: 'string（这一块在讲什么，不超过 20 字）',
+    sections: [{
+      id: 'string（必须逐个字符照抄"可用小节清单"里的 id，不许自己编）',
+      title: 'string（该小节标题，照抄清单）',
+      quote: 'string（该小节正文里**逐字出现**的一小段话，12—60 字，原样照抄，不许改写）'
+    }]
+  }]
 }
 
-export function buildOnepageSource({ markdown = '', courseName = '', lessonTitle = '', budgetNote = '' } = {}) {
+/**
+ * 来源映射草稿的形状校验（**只校验形状**）。
+ *
+ * 为什么不在这一步核对"小节真的存在、摘录真的在那一节里"：那要正文与小节切法，
+ * 而它们都在发布侧（@course/publish）。职责分开——模型契约在 notes，
+ * 块 ID 解析、指纹与逐字核对在 publish，最后在发布链路里合成。
+ */
+export function normalizeSourceMapDraft(value) {
+  return (Array.isArray(value) ? value : []).map(entry => ({
+    block: cleanText(entry?.block || entry?.blockHint || '').slice(0, 60),
+    label: cleanText(entry?.label || '').slice(0, 40),
+    sections: (Array.isArray(entry?.sections) ? entry.sections : []).map(link => ({
+      id: cleanText(link?.id || ''),
+      title: cleanText(link?.title || '').slice(0, 80),
+      quote: cleanText(link?.quote || link?.excerpt || '').slice(0, 120)
+    })).filter(link => link.id && link.quote)
+  })).filter(entry => entry.block && entry.sections.length).slice(0, 60)
+}
+
+export function buildOnepageSource({ markdown = '', courseName = '', lessonTitle = '', budgetNote = '', sections = [] } = {}) {
   const text = String(markdown || '').trim()
   if (!text) throw new Error('没有笔记正文，无法生成一页纸')
   return [
@@ -31,6 +61,13 @@ export function buildOnepageSource({ markdown = '', courseName = '', lessonTitle
     `课次：${lessonTitle}`,
     `目标篇幅：${ONEPAGE_TARGET_CHARS} 字左右（含表格单元格），绝不能超过 ${ONEPAGE_MAX_CHARS} 字`,
     budgetNote ? `上一版被退回的原因：${budgetNote}` : '',
+    sections.length
+      ? [
+        '',
+        '## 可用小节清单（sourceMap.sections[].id 只能从这里挑，逐字照抄）',
+        ...sections.map(section => `- ${section.id}｜${section.title}`)
+      ].join('\n')
+      : '',
     '',
     '## 笔记全文（这是唯一素材，不得新增其中没有的内容）',
     text
@@ -54,6 +91,9 @@ export function validateOnepage(value = {}) {
     title: cleanText(value.title || '').slice(0, 30),
     markdown,
     outline: (Array.isArray(value.outline) ? value.outline : []).map(item => cleanText(item)).filter(Boolean).slice(0, 8),
+    // 来源映射草稿要一路带出去：schema → validateOnepage → onepage.json → 发布 → 页面。
+    // 这一层漏掉它，页面上就永远不会有"看原文"（审计提醒过的正是这种"新增字段被丢掉"）。
+    sourceMap: normalizeSourceMapDraft(value.sourceMap),
     chars,
     hasWall: Boolean(wall),
     blocks: paragraphs.length,
@@ -71,7 +111,9 @@ export function validateOnepage(value = {}) {
  * 只重试一次：第二次还超，说明这节内容确实塞不进一张纸，那就该让人来决定删什么。
  */
 export async function generateOnepage({
-  markdown, courseName = '', lessonTitle = '', courseSpec = {}, callModel, modelConfig, retries = 1
+  markdown, courseName = '', lessonTitle = '', courseSpec = {}, callModel, modelConfig, retries = 1,
+  // 可用小节清单（id + 标题）：来源映射只许从这里挑，模型不许自己编 id
+  sections = []
 } = {}) {
   let budgetNote = ''
   let lastError = null
@@ -84,7 +126,7 @@ export async function generateOnepage({
         promptVersion: courseSpec.promptVersion,
         courseSpec,
         lessonBlueprint: { title: lessonTitle },
-        sourceText: buildOnepageSource({ markdown, courseName, lessonTitle, budgetNote }),
+        sourceText: buildOnepageSource({ markdown, courseName, lessonTitle, budgetNote, sections }),
         schema: ONEPAGE_SCHEMA
       })
     })

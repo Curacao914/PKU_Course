@@ -2344,11 +2344,25 @@ async function captureReadingShots (page, site, fixture, dir) {
   }
 
   console.log('阅读样板截图')
+  const narrow = { width: 320, height: 800 }
   const noteUrl = fixture.noteUrl.startsWith('http') ? fixture.noteUrl : new URL(fixture.noteUrl, site.url).toString()
   await page.goto(noteUrl, { waitUntil: 'domcontentloaded' })
   await page.waitForTimeout(500)
   await shot('lesson-note-desktop', desktop)
   await shot('lesson-note-mobile', mobile)
+  await shot('lesson-note-narrow', narrow)
+  // 深色模式也留一张：配色精修要能在四种底色下看
+  await page.evaluate(() => {
+    localStorage.setItem('course.theme', 'dark')
+    document.documentElement.setAttribute('data-theme', 'dark')
+  })
+  await page.waitForTimeout(300)
+  await shot('lesson-note-dark-mobile', mobile)
+  await page.evaluate(() => {
+    localStorage.setItem('course.theme', 'light')
+    document.documentElement.setAttribute('data-theme', 'light')
+  })
+  await page.waitForTimeout(200)
 
   await page.goto(site.url + '/index.html', { waitUntil: 'domcontentloaded' })
   await page.waitForTimeout(400)
@@ -2369,6 +2383,18 @@ async function captureReadingShots (page, site, fixture, dir) {
     await shot('lesson-onepage-read-desktop', desktop)
     await setFont(1.4)
     await shot('lesson-onepage-read-140-mobile', mobile)
+    await shot('lesson-onepage-read-140-desktop', desktop)
+    await page.evaluate(() => {
+      localStorage.setItem('course.theme', 'dark')
+      document.documentElement.setAttribute('data-theme', 'dark')
+    })
+    await page.waitForTimeout(300)
+    await shot('lesson-onepage-read-dark-mobile', mobile)
+    await page.evaluate(() => {
+      localStorage.setItem('course.theme', 'light')
+      document.documentElement.setAttribute('data-theme', 'light')
+    })
+    await page.waitForTimeout(200)
     await page.click('button[data-sheet-mode="a4"]')
     await page.waitForTimeout(300)
     await shot('lesson-onepage-a4-desktop', desktop)

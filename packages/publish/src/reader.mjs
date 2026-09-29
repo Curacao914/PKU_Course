@@ -252,6 +252,9 @@ export function lessonDock(record = {}, { current = 'note' } = {}) {
       ? '<button type="button" data-dock="marks">我的标记</button>'
       : `<a href="${escapeAttr(noteHref)}#railMarks">我的标记</a>`
   ]
+  // 「返回一页纸」：从一页纸点"看原文"过来时才出现（脚本校验过地址才显示）。
+  // 直接打开原文、或上下文对不上这一篇时，这里什么都没有——不显示一个点不动的按钮。
+  if (current === 'note') items.push('<a class="dock-back" id="obBack" hidden>返回一页纸</a>')
   return `<nav class="lesson-dock" aria-label="本课次入口">${items.join('')}</nav>`
 }
 
@@ -903,6 +906,30 @@ export const READER_SCRIPT = '<script>' + ANCHOR_RUNTIME + String.raw`
   }
   var dockMarks = document.querySelector('[data-dock="marks"]')
   if (dockMarks) dockMarks.addEventListener('click', function () { revealMarks(true) })
+
+  /**
+   * 「返回一页纸」：**只接受已确认的站内页面**。
+   *
+   * 上下文是"上一步从一页纸点看原文"时写下的（见 onepage.mjs）。这里逐条校验：
+   * 必须是 /onepage/ 开头的站内路径、不能带协议或双斜杠、而且要和**当前这一篇**对得上
+   * （/onepage/X.html ↔ /notes/X.html）。任何一条不满足就不显示——宁愿少一个入口，
+   * 也不要给一个跳去别处或死掉的返回按钮。
+   */
+  var obBack = document.getElementById('obBack')
+  if (obBack) {
+    var obContext = null
+    try { obContext = JSON.parse(localStorage.getItem('course.obReturn') || 'null') } catch (error) { obContext = null }
+    var noteTail = location.pathname.replace(/^\/notes\//, '').replace(/\.html$/, '')
+    var onepagePath = obContext && typeof obContext.onepagePath === 'string' ? obContext.onepagePath : ''
+    var validOnepage = onepagePath.indexOf('/onepage/') === 0 &&
+      onepagePath.indexOf('//') < 0 && onepagePath.indexOf(':') < 0 &&
+      onepagePath === '/onepage/' + noteTail + '.html'
+    if (validOnepage) {
+      var backBlock = String(obContext.block || '')
+      obBack.setAttribute('href', onepagePath + (backBlock ? '#' + encodeURIComponent(backBlock) : ''))
+      obBack.hidden = false
+    }
+  }
 
   /**
    * 标题上的"#"：把「页面地址 + 小节」复制走。

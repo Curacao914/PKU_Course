@@ -1,11 +1,28 @@
 export {
+  blockIdOf,
   escapeHtml,
   extractHeadings,
+  plainBlockText,
   renderInline,
   renderMarkdown,
+  sectionIndex,
+  sectionTexts,
   slugify,
   summarizeMarkdown
 } from './markdown.mjs'
+
+// 一页纸 → 原文的来源映射：块 ID、摘录核对、免费路径构建与发布前验证
+export {
+  OVERLAP_MIN_CHARS,
+  QUOTE_MIN_CHARS,
+  SOURCE_MAP_VERSION,
+  buildSourceMap,
+  onepageBlocks,
+  quoteInSection,
+  resolveSourceMapEntries,
+  sourceMapStats,
+  verifySourceMap
+} from './sourcemap.mjs'
 
 export {
   DEFAULT_ZONE_ID,

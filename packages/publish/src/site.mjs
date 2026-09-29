@@ -784,6 +784,16 @@ export function buildNoteRecord({
         title: String(onepage.title || '').trim(),
         markdown: String(onepage.markdown).trim(),
         chars: Number(onepage.chars || String(onepage.markdown).replace(/\s/g, '').length),
+        /**
+         * 来源映射**必须显式带过去**。
+         *
+         * 这里是白名单式投影：新增字段不写进来的话，会在"模型返回 → 校验 → 发布库 → 页面"
+         * 这条链的最后一跳被悄悄丢掉，页面上永远不会出现"看原文"，而且没有任何报错。
+         * 形状不对就不带（内容核对在发布链路与本文件的渲染侧）。
+         */
+        ...(onepage.sourceMap && Array.isArray(onepage.sourceMap.entries) && onepage.sourceMap.entries.length
+          ? { sourceMap: onepage.sourceMap }
+          : {}),
         ...bindingFields(onepage)
       }
       : null,

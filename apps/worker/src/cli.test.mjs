@@ -935,6 +935,149 @@ test('--regenerate-derived：按当前正文重做派生物、写回文件，下
   assert.deepEqual(model.calls, [], '不存在就是不存在，不自动生成')
 })
 
+/**
+ * 来源映射的端到端：**从模拟模型回包开始**，一路走到页面上的"看原文"。
+ *
+ * 这条链很长（schema → validateOnepage → onepage.json → resolveDerived → 发布库 → 页面渲染），
+ * 中间任何一跳漏掉新字段，页面上就永远不会有"看原文"，而且不会有任何报错——
+ * 所以这里逐跳断言，而不是只看最后一跳。
+ */
+test('来源映射：模拟模型回包 → 校验 → onepage.json → 发布库 → 页面上的"看原文"', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const notesDir = path.join(dir, 'notes')
+  fs.mkdirSync(notesDir, { recursive: true })
+  fs.writeFileSync(path.join(notesDir, 'notes-run-summary.json'),
+    JSON.stringify({ course: '法律实证分析', lesson: '2026-09-23第1-2节', status: 'completed' }))
+  // 正文里有一句能被逐字引用的话，还有一节用来当来源
+  const quoted = '分析单元决定了数据结构，也决定了能问出什么样的问题'
+  const noteText = [
+    '# 2026-09-23第1-2节',
+    '',
+    '## 分析单元与变量测量',
+    '',
+    '这一节先把分析单元说清楚。' + quoted + '。测量水平随后决定可用的统计量。',
+    '',
+    '## 抽样框架',
+    '',
+    '抽样框架要与研究问题对齐，否则外部效度无从谈起。'
+  ].join('\n')
+  fs.writeFileSync(path.join(notesDir, '2026-09-23第1-2节.md'), noteText)
+
+  // 一页纸正文：够 400 字、没有长墙段落；其中一条要点**逐字**引用了上面那句话
+  const onepageMarkdown = [
+    '## 一、体系',
+    '',
+    '- 分析单元：' + quoted + '。',
+    ...Array.from({ length: 20 }, (_, index) => '- 要点 ' + (index + 1) + '：' + '内容'.repeat(5))
+  ].join('\n')
+
+  const onepagePath = path.join(notesDir, 'onepage.json')
+  fs.writeFileSync(path.join(notesDir, 'brief.json'), JSON.stringify({
+    schemaVersion: 1, course: '法律实证分析', lesson: '2026-09-23第1-2节', replayKey: 'replay-1',
+    sourceChecksum: briefSourceChecksum(noteText), briefing: '这一讲的简报。', keyPoints: ['要点']
+  }))
+  // 旧的一页纸指纹对不上 → 走"重新生成"这条路（也就是模型回包这条路）
+  fs.writeFileSync(onepagePath, JSON.stringify({
+    schemaVersion: 1, course: '法律实证分析', lesson: '2026-09-23第1-2节', replayKey: 'replay-1',
+    sourceChecksum: 'deadbeef', markdown: '过期的一页纸', title: '旧的'
+  }))
+
+  // 模拟模型回包：块提示 + 小节 id（照抄清单）+ 逐字摘录
+  const model = (() => {
+    const calls = []
+    const callModel = async payload => {
+      calls.push(payload.role)
+      if (payload.role === 'brief') {
+        return { parsed: { briefing: '重生成的简报内容。', keyPoints: ['要点一'], theme: '主题', keywords: ['甲'] }, trace: { role: 'brief' } }
+      }
+      if (payload.role === 'onepage') {
+        // 提示词里给了可用小节清单，模型只能从里面挑 id
+        // buildPrompt 返回的是结构化提示（system + user 分块），串起来找更贴近真实用法
+        const promptText = JSON.stringify(payload.prompt)
+        assert.match(promptText, /可用小节清单/, '一页纸提示词要附上可用小节清单')
+        assert.match(promptText, /分析单元与变量测量/, '清单里要有这一节，模型才可能挑对它')
+        return {
+          parsed: {
+            title: '重生成的一页纸',
+            markdown: onepageMarkdown,
+            outline: ['一、体系'],
+            sourceMap: [
+              { block: '分析单元：' + quoted.slice(0, 6), label: '分析单元', sections: [{ id: '分析单元与变量测量', title: '分析单元与变量测量', quote: quoted }] },
+              // 编出来的小节 id：必须被核对掉，不许生成死链
+              { block: '要点 1', label: '编的', sections: [{ id: '根本不存在的小节', title: '编的', quote: quoted }] }
+            ]
+          },
+          trace: { role: 'onepage' }
+        }
+      }
+      throw new Error('未预期的角色：' + payload.role)
+    }
+    return { callModel, calls }
+  })()
+
+  const siteDir = path.join(dir, 'site')
+  const { deps, lines: output, errors } = harness({ callModel: model.callModel })
+  const args = ['publish', '--from', notesDir, '--out', siteDir, '--replay-key', 'replay-1', '--regenerate-derived', '--no-notify']
+  assert.equal(await runCli(args, deps), 0, 'stderr: ' + errors.join(' | '))
+  const payload = parse(output.at(-1))
+
+  // ① onepage.json：草稿被解析成真正的块 ID，并盖上"哪一版正文、哪一版一页纸"的指纹
+  const written = JSON.parse(fs.readFileSync(onepagePath, 'utf8'))
+  assert.ok(written.sourceMap, 'onepage.json 必须带上 sourceMap；stderr：' + errors.join(' | '))
+  assert.equal(written.sourceMap.entries.length, 1, '编出来的小节 id 在写盘时就筛掉，真的那条留下')
+  assert.match(written.sourceMap.entries[0].block, /^ob-[0-9a-f]{8}$/)
+  assert.equal(written.sourceMap.note.checksum, markdownChecksum(noteText))
+
+  // ② 发布库：核对后的映射进记录（渲染一侧靠它）
+  const [record] = JSON.parse(fs.readFileSync(path.join(siteDir, 'library.json'), 'utf8'))
+  assert.ok(record.onepage.sourceMap, '发布库里的记录必须带上 sourceMap')
+  assert.equal(record.onepage.sourceMap.entries[0].sections[0].id, '分析单元与变量测量')
+  assert.equal(payload.sourceMap.located, 1)
+  assert.ok(payload.sourceMap.total >= 2, '覆盖率与定位数分开报')
+
+  // ③ 页面：块上带 data-ob，"看原文"指到真正的小节锚点
+  const page = fs.readFileSync(path.join(siteDir, 'onepage/法律实证分析/2026-09-23第1-2节.html'), 'utf8')
+  assert.match(page, /data-ob="ob-[0-9a-f]{8}"/)
+  assert.match(page, /class="ob-link" href="\/notes\/法律实证分析\/2026-09-23第1-2节\.html#%E5%88%86%E6%9E%90%E5%8D%95%E5%85%83%E4%B8%8E%E5%8F%98%E9%87%8F%E6%B5%8B%E9%87%8F"/)
+  assert.match(page, /看原文/)
+  // 没定位到的块要如实说，并给整篇入口
+  assert.match(page, /本页有 \d+ 个要点未能定位到具体小节/)
+  assert.match(page, /<a href="\/notes\/法律实证分析\/2026-09-23第1-2节\.html">查看整篇笔记<\/a>/)
+  // 纸张模式与打印里没有这些入口（不许把能放下的纸撑成多页）
+  assert.match(page, /\.sheet\[data-mode="a4"\] \.ob-source, \.sheet\[data-mode="a4"\] \.ob-unmapped \{ display: none; \}/)
+})
+
+test('来源映射：正文改过之后整份失效，页面退回整篇入口（不留精确来源的假象）', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const siteDir = path.join(dir, 'site')
+  fs.mkdirSync(siteDir, { recursive: true })
+  const noteText = '# 第1节\n\n## 甲节\n\n共同犯罪要求共同故意与共同行为同时具备。'
+  const onepageMarkdown = '- 共同犯罪要求共同故意与共同行为同时具备。' + '补充说明'.repeat(30)
+  const staleMap = {
+    version: 1,
+    // 记的是**另一版**正文的指纹
+    note: { slug: 'notes/甲/第1节', checksum: markdownChecksum('很久以前的正文') },
+    onepageChecksum: markdownChecksum(onepageMarkdown),
+    entries: [{ block: 'ob-00000000', label: '甲', sections: [{ id: '甲节', title: '甲节', quote: '共同犯罪要求共同故意与共同行为同时具备' }] }]
+  }
+  fs.writeFileSync(path.join(siteDir, 'library.json'), JSON.stringify([{
+    slug: 'notes/甲/第1节', courseName: '甲', lessonTitle: '第1节', markdown: noteText,
+    sections: [{ id: '甲节', title: '甲节', level: 2, chars: 20, fingerprint: '00000000' }],
+    onepage: { title: '一页', markdown: onepageMarkdown, chars: 200, sourceMap: staleMap }
+  }]))
+  // 站点目录里放一份正文 .md：渲染一侧读它做轻核对
+  const mdDir = path.join(siteDir, 'md/甲')
+  fs.mkdirSync(mdDir, { recursive: true })
+  fs.writeFileSync(path.join(mdDir, '第1节.md'), noteText)
+
+  const { renderOnepagePageHtml } = await import('../../../packages/publish/src/site.mjs')
+  const record = JSON.parse(fs.readFileSync(path.join(siteDir, 'library.json'), 'utf8'))[0]
+  const html = renderOnepagePageHtml(record, { siteOrigin: '' })
+  // 版本对不上：整份不用，一个 .ob-link 都不该出现
+  assert.doesNotMatch(html, /class="ob-link"/)
+  assert.match(html, /查看整篇笔记/, '退回整篇入口，并说明未定位')
+})
+
 test('老发布库（只有 publishedAt）在下次发布时整体迁移成三个时间字段', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
   const siteDir = path.join(dir, 'site')

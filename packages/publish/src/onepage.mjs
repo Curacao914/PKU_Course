@@ -1,5 +1,6 @@
 import { escapeHtml, renderMarkdown } from './markdown.mjs'
 import { lessonDock, svgIcon } from './reader.mjs'
+import { onepageBlocks, verifySourceMap } from './sourcemap.mjs'
 
 /**
  * 一页纸视图：左侧同一课程的课次（点着换页），右侧同一份内容，两种看法。
@@ -18,6 +19,18 @@ import { lessonDock, svgIcon } from './reader.mjs'
 export function renderOnepagePage(record = {}, { siteOrigin = '', courseLessons = [] } = {}) {
   const onepage = record.onepage || {}
   const sheetTitle = onepage.title || record.lessonTitle || ''
+  const noteHref = `/${String(record.slug || '').replace(/^\/+/, '')}.html`
+  const blocks = onepageBlocks(onepage.markdown || '')
+  /**
+   * 渲染这一侧只做**轻核对**：块还在不在、小节还在不在（发布库里有 sections，没有正文）。
+   * 逐字核对"摘录确实在这一节里"发生在发布链路里——那里才有正文（见 commands.mjs）。
+   * 任何一条对不上就退回整篇入口，绝不显示一个看着精确的错误链接。
+   */
+  const sourceMap = verifySourceMap(onepage.sourceMap || null, {
+    slug: record.slug || '',
+    onepageMarkdown: onepage.markdown || '',
+    sections: (record.sections || []).map(section => ({ id: section.id, title: section.title }))
+  })
   const rail = courseLessons.length
     ? `<nav aria-label="本课程课次"><div class="rail-title">${escapeHtml(record.courseName || '本课程')}</div>` +
       `<ol class="lessons">${courseLessons.map(item => {
@@ -44,14 +57,76 @@ export function renderOnepagePage(record = {}, { siteOrigin = '', courseLessons 
     '</div>',
     '<article class="sheet" id="sheet" data-mode="read">',
     `<h1 class="sheet-title">${escapeHtml(sheetTitle)}</h1>`,
-    `<div class="sheet-body" id="sheetBody">${renderMarkdown(onepage.markdown || '')}</div>`,
+    `<div class="sheet-body" id="sheetBody">${renderOnepageBody(blocks, sourceMap, { noteHref })}</div>`,
     `<div class="sheet-foot">${escapeHtml(record.courseName || '')} · ${escapeHtml(record.lessonTitle || '')}</div>`,
     '</article>',
+    unmappedNote({ total: blocks.length, located: sourceMap.located, noteHref }),
     '</div>',
     ONEPAGE_SCRIPT
-  ].join('\n')
+  ].filter(Boolean).join('\n')
 
   return { body }
+}
+
+/**
+ * 一页纸正文：**每块一个 data-ob**，有来源的块跟一条"看原文"。
+ *
+ * 为什么要有块这一层：来源映射是"块 → 小节"的关系，回跳也要能落回**具体的块**而不是
+ * 页首。块的切法与映射共用 onepageBlocks()，所以页面上的 data-ob 与映射里的 block
+ * 一定对得上（对不上就说明正文改过，那时映射已经整体失效）。
+ *
+ * 入口刻意做得小：它是"想深究时的一条路"，不是这页纸上的按钮墙。
+ */
+function renderOnepageBody(blocks = [], sourceMap = {}, { noteHref = '' } = {}) {
+  const byBlock = new Map((sourceMap.entries || []).map(entry => [entry.block, entry]))
+  const usedHeadingIds = new Map()
+  return blocks.map(block => {
+    const html = dedupeHeadingIds(renderMarkdown(block.text), usedHeadingIds)
+    // 标题块不配入口：标题本身就是结构，给它挂"看原文"会让每一节都长出一排链接
+    const entry = block.kind === 'heading' ? null : byBlock.get(block.id)
+    return `<div class="ob ob-${escapeHtml(block.kind)}" data-ob="${escapeHtml(block.id)}">` +
+      html + sourceEntry(entry, { noteHref, blockId: block.id }) + '</div>'
+  }).join('\n')
+}
+
+/** 同一页里重复的小节标题：第二个起加 -2/-3，与整篇笔记的规则一致（否则锚点只能落到第一处）。 */
+function dedupeHeadingIds(html, used) {
+  return String(html).replace(/<h([1-6]) id="([^"]+)"/g, (match, level, id) => {
+    const seen = (used.get(id) || 0) + 1
+    used.set(id, seen)
+    return seen === 1 ? match : `<h${level} id="${escapeHtml(id)}-${seen}"`
+  })
+}
+
+/** 一条（或几条）来源。多来源用紧凑弹出列表：真综合了几节时给出选择，不随意挑一节代表全部。 */
+function sourceEntry(entry, { noteHref = '', blockId = '' } = {}) {
+  if (!entry || !Array.isArray(entry.sections) || !entry.sections.length) return ''
+  const linkOf = section => {
+    const href = `${noteHref}#${encodeURIComponent(section.id)}`
+    const title = section.title || section.id
+    return `<a class="ob-link" href="${escapeHtml(href)}" data-ob-from="${escapeHtml(blockId)}" ` +
+      `data-ob-section="${escapeHtml(section.id)}">${escapeHtml(title)}` +
+      (section.excerpt ? `<span class="ob-quote">${escapeHtml(section.excerpt)}</span>` : '') +
+      '</a>'
+  }
+  if (entry.sections.length === 1) {
+    return `<p class="ob-source"><span class="ob-label">看原文</span>${linkOf(entry.sections[0])}</p>`
+  }
+  return `<details class="ob-source ob-multi"><summary>看原文 · ${entry.sections.length} 处</summary>` +
+    `<ol class="ob-list">${entry.sections.map(section => `<li>${linkOf(section)}</li>`).join('')}</ol></details>`
+}
+
+/**
+ * 没定位到的块：**说清楚**，并给整篇入口。
+ *
+ * 一页纸上大部分块都能定位时不该出现这一行；出现时它说的是"这几个要点我没能确认依据在哪"——
+ * 读者据此决定要不要翻整篇，而不是被一个看着精确的链接骗过去。
+ */
+function unmappedNote({ total = 0, located = 0, noteHref = '' } = {}) {
+  const missing = Math.max(0, Number(total) - Number(located))
+  if (!missing) return ''
+  return `<p class="ob-unmapped">本页有 ${missing} 个要点未能定位到具体小节（未做依据核对），` +
+    `<a href="${escapeHtml(noteHref)}">查看整篇笔记</a>。</p>`
 }
 
 /**
@@ -81,6 +156,63 @@ export const ONEPAGE_SCRIPT = `<script>
   }
   function userScale () {
     return parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--font-scale')) || 1
+  }
+  function reduceMotion () {
+    try { return Boolean(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) } catch (error) { return false }
+  }
+
+  // ── 来源映射的往返 ──
+  // 点"看原文"时记下：从哪一页的哪一块走的、滚到哪。原文那边据此给出「返回一页纸」，
+  // 本页据此在回来时落回那一块——而不是回到页首让读者自己再找一遍。
+  var RETURN_KEY = 'course.obReturn'
+  document.addEventListener('click', function (event) {
+    var link = event.target && event.target.closest ? event.target.closest('.ob-link') : null
+    if (!link) return
+    try {
+      localStorage.setItem(RETURN_KEY, JSON.stringify({
+        onepagePath: location.pathname,
+        noteHref: link.getAttribute('href') || '',
+        block: link.getAttribute('data-ob-from') || '',
+        sectionId: link.getAttribute('data-ob-section') || '',
+        scrollY: Math.round(window.scrollY || 0),
+        sheetMode: sheet.getAttribute('data-mode'),
+        at: Date.now()
+      }))
+    } catch (error) {}
+  })
+  function blockNode (id) {
+    if (!id) return null
+    return document.querySelector('[data-ob="' + String(id).replace(/["\\]/g, '') + '"]')
+  }
+  function flashBlock (node) {
+    if (!node || reduceMotion()) return
+    node.classList.remove('ob-flash')
+    void node.offsetWidth
+    node.classList.add('ob-flash')
+    setTimeout(function () { node.classList.remove('ob-flash') }, 2400)
+  }
+  function restorePlace () {
+    var hashId = ''
+    try { hashId = decodeURIComponent(String(location.hash || '').replace(/^#/, '')) } catch (error) { hashId = '' }
+    var withHash = blockNode(hashId)
+    if (withHash) {
+      try { withHash.scrollIntoView({ block: 'center', behavior: 'auto' }) } catch (error) { withHash.scrollIntoView() }
+      flashBlock(withHash)
+      return
+    }
+    var saved = null
+    try { saved = JSON.parse(localStorage.getItem(RETURN_KEY) || 'null') } catch (error) { saved = null }
+    if (!saved || saved.onepagePath !== location.pathname) return
+    // 只用一次：否则下次直接打开这一页又会被拽去上次那一块
+    try { localStorage.removeItem(RETURN_KEY) } catch (error) {}
+    if (Date.now() - Number(saved.at || 0) > 6 * 60 * 60 * 1000) return
+    var node = blockNode(saved.block)
+    if (node) {
+      try { node.scrollIntoView({ block: 'center', behavior: 'auto' }) } catch (error) { node.scrollIntoView() }
+      flashBlock(node)
+    } else if (saved.scrollY) {
+      window.scrollTo(0, saved.scrollY)
+    }
   }
 
   /** 纸张模式：起始字号跟随全局字号（限制在 0.85—1.15），放不下继续缩，缩不动就标记。 */
@@ -128,6 +260,7 @@ export const ONEPAGE_SCRIPT = `<script>
   }
 
   repaint()
+  restorePlace()
   if (tools) {
     tools.addEventListener('click', function (event) {
       var button = event.target.closest('button[data-sheet-mode]')
@@ -173,6 +306,29 @@ export const ONEPAGE_CSS = `
 .sheet-wrap { min-width: 0; }
 
 /* 显示方式开关：两个按钮 + 一行状态，不做成大按钮工具栏 */
+/* ── 来源映射：块的包装 + "看原文" ── */
+.sheet-body .ob { margin: 0; }
+.sheet-body .ob-source { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 8px;
+  margin: 4px 0 16px; font-family: var(--sans); font-size: calc(13px * var(--font-scale)); }
+.sheet-body .ob-label { color: var(--muted); }
+.sheet-body .ob-link { color: var(--accent-ink); text-decoration: none;
+  border-bottom: 1px solid var(--accent-soft); padding-bottom: 1px; }
+.sheet-body .ob-link:hover { border-bottom-color: var(--accent); }
+.sheet-body .ob-quote { display: block; margin-top: 3px; color: var(--muted); font-size: .92em; line-height: 1.5; }
+.sheet-body .ob-multi { margin: 4px 0 16px; font-family: var(--sans);
+  font-size: calc(13px * var(--font-scale)); }
+.sheet-body .ob-multi > summary { cursor: pointer; color: var(--accent-ink); }
+.sheet-body .ob-multi[open] > summary { margin-bottom: 6px; }
+.sheet-body .ob-list { list-style: none; margin: 0; padding: 0; }
+.sheet-body .ob-list li { margin: 0 0 8px; }
+.ob-unmapped { max-width: 74ch; margin: 14px auto 0; font-family: var(--sans); font-size: 13px;
+  line-height: 1.6; color: var(--muted); }
+.ob-unmapped a { color: var(--accent-ink); }
+/* 回到这一块时轻量提示一下（不闪、不跳，只是让眼睛知道落在哪） */
+.ob-flash { animation: obFlash 2.4s ease-out 1; }
+@keyframes obFlash { 0% { background: var(--accent-soft); } 100% { background: transparent; } }
+/* 纸张模式与打印里没有交互控件：纸上只有那张 A4，映射不许把能放下的纸撑成多页 */
+.sheet[data-mode="a4"] .ob-source, .sheet[data-mode="a4"] .ob-unmapped { display: none; }
 .sheet-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; max-width: 210mm;
   margin: 0 auto 12px; }
 .sheet-tools button { font: inherit; font-size: 13px; padding: 6px 12px; min-height: 34px; cursor: pointer;
@@ -266,6 +422,7 @@ export const ONEPAGE_CSS = `
   .sheet-body th, .sheet-body td { padding: .9mm 1.4mm !important; }
   .sheet-body blockquote { font-size: calc(11px * var(--sheet-scale, 1)) !important; }
   .sheet-foot { font-size: calc(10px * var(--sheet-scale, 1)) !important; }
+  .ob-source, .ob-unmapped { display: none !important; }
   body { background: #fff; }
 }
 `;

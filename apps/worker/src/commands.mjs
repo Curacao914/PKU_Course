@@ -56,16 +56,23 @@ import {
   wechatSessionState
 } from '@course/notify'
 import {
+  SOURCE_MAP_VERSION,
   buildNoteRecord,
+  buildSourceMap,
   derivedBinding,
   markdownBytesChecksum,
   markdownChecksum,
+  markdownPath,
   migrateRecordTime,
   noteSlug,
   readSiteIndex,
   refreshRecord,
+  resolveSourceMapEntries,
+  sectionTexts,
   slugify,
+  sourceMapStats,
   verifyDerived,
+  verifySourceMap,
   writeJsonAtomic,
   writeSite
 } from '@course/publish'
@@ -1237,6 +1244,99 @@ export function createCommands(context) {
     return errors.length ? 1 : 0
   }
 
+  /**
+   * course sourcemap：给**已经发布**的一页纸补来源映射。
+   *
+   * 三条自律（都来自任务书）：
+   *   · 只补映射：原笔记与现有一页纸正文一个字都不动（这里根本不写它们）；
+   *   · 免费路径优先：只认"某句话在这一节正文里逐字出现、而且这一节明显领先"的对照，
+   *     概括改写一律不猜；要判断改写需要模型，那属于按课次的映射专用调用，必须另有预算；
+   *   · 覆盖率与正确率分开报：定位到几块、剩几块退回整篇入口都打出来，
+   *     并且把每一对"块 ↔ 小节 + 摘录"列出来供人工逐项核对（--show）。
+   */
+  async function sourceMapRun(options) {
+    const siteRoot = path.resolve(options.options['site-root'] || path.join(config.scratchRoot, 'site'))
+    const libraryFile = path.resolve(options.options.library || path.join(siteRoot, 'library.json'))
+    if (!fs.existsSync(libraryFile)) throw new Error(`找不到发布库 ${libraryFile}`)
+    const library = JSON.parse(fs.readFileSync(libraryFile, 'utf8'))
+    const wantedCourse = String(options.options.course || '').trim()
+    const wantedLesson = String(options.options.lesson || '').trim()
+    const write = options.flags?.has('write') === true
+    const show = options.flags?.has('show') === true
+
+    const rows = []
+    let next = library
+    for (const record of library) {
+      if (wantedCourse && !String(record.courseName || '').includes(wantedCourse)) continue
+      if (wantedLesson && !String(record.lessonTitle || '').includes(wantedLesson)) continue
+      if (!record.onepage || !record.onepage.markdown) continue
+      // 正文从站点目录里的 .md 读（发布时同时写出的那一份），不必回 scratch 找
+      const noteFile = path.resolve(siteRoot, markdownPath(record.slug))
+      if (!fs.existsSync(noteFile)) {
+        rows.push({ slug: record.slug, error: `找不到正文 ${noteFile}` })
+        continue
+      }
+      const noteMarkdown = fs.readFileSync(noteFile, 'utf8')
+      const built = buildSourceMap({
+        slug: record.slug,
+        noteMarkdown,
+        onepageMarkdown: record.onepage.markdown
+      })
+      const verified = verifySourceMap(built, {
+        slug: record.slug,
+        noteMarkdown,
+        onepageMarkdown: record.onepage.markdown,
+        sections: sectionTexts(noteMarkdown)
+      })
+      const stats = sourceMapStats(verified)
+      rows.push({
+        slug: record.slug,
+        courseName: record.courseName,
+        lessonTitle: record.lessonTitle,
+        ...stats,
+        entries: verified.entries.map(entry => ({
+          block: entry.block,
+          label: entry.label,
+          sections: entry.sections.map(section => ({ id: section.id, title: section.title, quote: section.quote }))
+        }))
+      })
+      if (write && verified.entries.length) {
+        next = next.map(item => item.slug === record.slug
+          ? {
+            ...item,
+            onepage: {
+              ...item.onepage,
+              sourceMap: {
+                version: SOURCE_MAP_VERSION,
+                note: { slug: record.slug, checksum: markdownChecksum(noteMarkdown) },
+                onepageChecksum: markdownChecksum(item.onepage.markdown),
+                generatedBy: 'lexical-overlap',
+                entries: verified.entries
+              }
+            }
+          }
+          : item)
+      }
+    }
+
+    if (write && next !== library) {
+      writeJsonAtomic(libraryFile, next)
+      stderr(`已写回 ${rows.filter(row => !row.error && row.located).length} 篇的来源映射（正文与一页纸未改动）`)
+      stderr('页面要重新生成才会出现"看原文"：course publish --rebuild')
+    }
+    emit({
+      library: libraryFile,
+      written: write && next !== library,
+      lessons: rows.length,
+      located: rows.reduce((sum, row) => sum + (row.located || 0), 0),
+      unmapped: rows.reduce((sum, row) => sum + (row.unmapped || 0), 0),
+      rows: show ? rows : rows.map(row => ({
+        slug: row.slug, located: row.located, unmapped: row.unmapped, error: row.error
+      }))
+    }, options)
+    return 0
+  }
+
   async function onepageRun(options) {
     const from = path.resolve(requireOption(options.options, 'from', 'onepage'))
     const course = requireOption(options.options, 'course', 'onepage')
@@ -1263,9 +1363,13 @@ export function createCommands(context) {
       courseName: course,
       lessonTitle: lesson,
       courseSpec: { courseName: course },
+      // 来源映射只许从这些小节里挑（模型不许自己编 id、更不许自己拼地址）
+      sections: sectionTexts(markdown).map(section => ({ id: section.id, title: section.title })),
       callModel,
       modelConfig
     })
+    const slug = noteSlug({ courseName: course, lessonTitle: lesson })
+    const sourceMap = stampSourceMap(result.sourceMap, { slug, noteMarkdown: markdown, onepageMarkdown: result.markdown })
     const outDir = path.resolve(options.options.out || path.dirname(notePath))
     fs.mkdirSync(outDir, { recursive: true })
     const onepagePath = path.join(outDir, 'onepage.json')
@@ -1283,6 +1387,8 @@ export function createCommands(context) {
       outline: result.outline,
       markdown: result.markdown,
       chars: result.chars,
+      // 来源映射：模型只给"哪一块 → 哪一节 + 摘录"，块 ID 与指纹由程序算
+      ...(sourceMap ? { sourceMap } : {}),
       trace: result.trace
     }, null, 2)}\n`)
     emit({
@@ -1293,6 +1399,7 @@ export function createCommands(context) {
       chars: result.chars,
       lists: result.lists,
       tables: result.tables,
+      sourceMap: sourceMap ? { entries: sourceMap.entries.length } : { entries: 0 },
       overBudget: result.chars > ONEPAGE_TARGET_CHARS,
       usage: result.trace?.usage || null
     }, options)
@@ -1372,7 +1479,71 @@ export function createCommands(context) {
     return 0
   }
 
-  async function publish(options) {
+  /**
+ * 给来源映射盖章：块提示 → 块 ID，并记下"这一份映射是对哪一版正文、哪一版一页纸做的"。
+ *
+ * 解析不出来的条目直接丢掉——模型给的块提示定位不到唯一块时，宁可没有这条映射，
+ * 也不许指到别处去。返回 null 表示"这一份没有可用映射"。
+ */
+function stampSourceMap(draftEntries, { slug = '', noteMarkdown = '', onepageMarkdown = '' } = {}) {
+  const resolved = resolveSourceMapEntries(draftEntries, onepageMarkdown)
+  if (!resolved.length) return null
+  /**
+   * 顺手把"这一篇里根本没有的小节"筛掉。
+   *
+   * 模型只能从提示词给的清单里挑，但它仍可能编一个 id（实测会）。这一层筛完，落到磁盘上的
+   * 映射至少指向真实存在的小节；"摘录是否真的在这一节里"由发布链路逐字核对（见下）。
+   */
+  const validIds = new Set(sectionTexts(noteMarkdown).map(section => section.id))
+  const entries = resolved
+    .map(entry => ({
+      block: entry.block,
+      label: entry.label,
+      sections: entry.sections.filter(link => validIds.has(link.id))
+        .map(link => ({ id: link.id, title: link.title, quote: link.quote }))
+    }))
+    .filter(entry => entry.sections.length)
+  if (!entries.length) return null
+  return {
+    version: SOURCE_MAP_VERSION,
+    note: { slug, checksum: markdownChecksum(noteMarkdown) },
+    onepageChecksum: markdownChecksum(onepageMarkdown),
+    generatedBy: 'model',
+    entries
+  }
+}
+
+/**
+ * 全量核对（只有这里同时握着正文、小节切法与一页纸）。
+ *
+ * 核对的是四件事：身份、版本、小节存在、**摘录确实逐字出现在那一节里**。
+ * 前三件只证明链接有效，第四件才是"这一节真的支持这个要点"的最低证据。
+ * 核对不过的条目丢掉，整份失效（正文或一页纸改过）时一条都不留。
+ */
+function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepageMarkdown = '' } = {}) {
+  if (!sourceMap || !Array.isArray(sourceMap.entries) || !sourceMap.entries.length) return { sourceMap: null, report: null }
+  const verified = verifySourceMap(sourceMap, {
+    slug,
+    noteMarkdown,
+    onepageMarkdown,
+    sections: sectionTexts(noteMarkdown)
+  })
+  const stats = sourceMapStats(verified)
+  const report = { ...stats, bound: verified.bound, problems: verified.problems.slice(0, 6) }
+  if (!verified.entries.length) return { sourceMap: null, report }
+  return {
+    sourceMap: {
+      version: SOURCE_MAP_VERSION,
+      note: { slug, checksum: markdownChecksum(noteMarkdown) },
+      onepageChecksum: markdownChecksum(onepageMarkdown),
+      generatedBy: sourceMap.generatedBy || 'model',
+      entries: verified.entries
+    },
+    report
+  }
+}
+
+async function publish(options) {
     const siteRoot = path.resolve(options.options.out || path.join(config.scratchRoot, 'site'))
     const libraryForRebuild = path.join(siteRoot, 'library.json')
 
@@ -1593,8 +1764,14 @@ export function createCommands(context) {
           courseName: course,
           lessonTitle,
           courseSpec: { courseName: course },
+          sections: sectionTexts(markdown).map(section => ({ id: section.id, title: section.title })),
           callModel: derivedCallModel(),
           modelConfig: derivedModelConfig
+        })
+        const rebuiltMap = stampSourceMap(result.sourceMap, {
+          slug: noteSlug({ courseName: course, lessonTitle }),
+          noteMarkdown: markdown,
+          onepageMarkdown: result.markdown
         })
         return {
           schemaVersion: 1,
@@ -1603,11 +1780,21 @@ export function createCommands(context) {
           outline: result.outline,
           markdown: result.markdown,
           chars: result.chars,
+          ...(rebuiltMap ? { sourceMap: rebuiltMap } : {}),
           trace: result.trace
         }
       }
     })
 
+    /**
+     * 来源映射的全量核对：这里同时握着正文、小节切法与一页纸，是唯一能做"摘录逐字核对"的地方。
+     * 核对结果写进发布库（渲染一侧只做轻核对），并单独报告定位/未定位的数量。
+     */
+    const recordSlug = noteSlug({ courseName: course, lessonTitle })
+    const { sourceMap: verifiedSourceMap, report: sourceMapReport } = verifyRecordSourceMap(
+      onepageResolution.value?.sourceMap,
+      { slug: recordSlug, noteMarkdown: markdown, onepageMarkdown: onepageResolution.value?.markdown || '' }
+    )
     const record = buildNoteRecord({
       courseName: course,
       teacher,
@@ -1622,6 +1809,8 @@ export function createCommands(context) {
       updatedAt: nowIso,
       brief: briefResolution.value,
       onepage: onepageResolution.value
+        ? { ...onepageResolution.value, ...(verifiedSourceMap ? { sourceMap: verifiedSourceMap } : { sourceMap: null }) }
+        : onepageResolution.value
     })
     // 日期只能靠首次进站时间兜底时要说出来：这个日期是猜的，页面上会照它排
     if (record.lessonDateSource === 'published' || record.lessonDateSource === 'none') {
@@ -1770,6 +1959,8 @@ export function createCommands(context) {
         // 派生物这一轮有没有被采纳；reason 说清为什么没挂（stale_source / missing_checksum …）
         brief: { applied: briefResolution.applied, reason: briefResolution.reason },
         onepage: { applied: onepageResolution.applied, reason: onepageResolution.reason },
+        // 来源映射单独报：定位到几块、剩几块退回整篇入口、哪些条目被核对掉（原因在前几条）
+        sourceMap: sourceMapReport,
         // 三件事分开报，别混成一句"已发布"：
         //   contentChanged —— 内容有没有变（决定要不要通知）
         //   notifyPolicy   —— 这次用的是哪条策略（flag / stored），为什么没发一看就知道
@@ -3326,7 +3517,8 @@ export function createCommands(context) {
   return {
     doctor, discover, download, transcribe, notes, materials, balance, publish,
     notify, cycle, verify, status, retry, prune, backup, digest, 'ppt-reminder': pptReminder,
-    brief: briefRun, onepage: onepageRun, integrate: integrateRun, artifacts: artifactsRun, reconcile: reconcileRun, embed: embedRun,
+    brief: briefRun, onepage: onepageRun, sourcemap: sourceMapRun, integrate: integrateRun,
+    artifacts: artifactsRun, reconcile: reconcileRun, embed: embedRun,
     'admin-passwd': adminPassword, mcp
   }
 }
@@ -3397,6 +3589,10 @@ export const USAGE = `用法：course <命令> [选项]
              [--replay-key <键>]
                                            只重跑一页纸摘要：把一节笔记压进一张 A4（复习只看这一页）
                                            产物带 sourceChecksum（所依据正文的 SHA-256），发布时校验
+  sourcemap  [--course <名称>] [--lesson <课次>] [--site-root <站点目录>] [--library <library.json>]
+             [--write] [--show]
+                                           给已发布的一页纸补来源映射（只补映射；免费路径：
+                                           只认逐字出现且唯一的对照，没有依据就保持未定位）
   brief      --from <笔记.md 或所在目录> --course <名称> --lesson <课次> [--out <目录>]
              [--replay-key <键>]
                                            只重跑简报这一步：产出简报与首页用的关键词

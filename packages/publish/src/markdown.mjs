@@ -291,6 +291,33 @@ function scanHeadings(markdown) {
   return heads
 }
 
+/**
+ * 块的**规范化纯文本**：去掉 Markdown 记号，只留读者能看到的那几个字。
+ *
+ * 一页纸的块 ID（data-ob）由它算出来，所以"改一个标点"不该换 ID、"改一句内容"必须换 ID——
+ * 前者只是排版，后者是内容。
+ */
+export function plainBlockText(text) {
+  return String(text ?? '')
+    .replace(/\`\`\`[\s\S]*?\`\`\`/g, ' ')
+    .replace(/^\s*\|[\s:|-]+\|\s*$/gm, ' ')
+    .replace(/^\s{0,3}#{1,6}\s+/gm, '')
+    .replace(/^\s*>\s?/gm, '')
+    .replace(/^\s*[-*]\s+\[[ xX]\]\s+/gm, '')
+    .replace(/^\s*(?:[-*]|\d+[.)])\s+/gm, '')
+    .replace(/\|/g, ' ')
+    .replace(/`([^`]*)`/g, '$1')
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/[*_]{1,2}([^*_]+)[*_]{1,2}/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/** 块 ID：与小节指纹同一口径（FNV-1a 32 位 → 8 位十六进制），前缀 ob- 表明这是块级定位。 */
+export function blockIdOf(text) {
+  return `ob-${fingerprintOf(plainBlockText(text))}`
+}
+
 /** 内容指纹：FNV-1a 32 位 → 8 位十六进制（判断"这一段正文还是不是那一段"）。 */
 export function fingerprintOf(text) {
   const value = String(text ?? '')
@@ -309,7 +336,13 @@ export function fingerprintOf(text) {
  * 命中落在哪一节、点进去锚点到哪、这一节是不是索引里那一节（指纹对不上就重新定位）。
  * 正文本身不进索引，索引体积仍是可控的。
  */
-export function sectionIndex(markdown) {
+/**
+ * 小节 + 本节自己的正文（不含子小节）。
+ *
+ * 这一份是"切法"的唯一实现：小节索引与来源映射的**摘录核对**都从它出来。
+ * 两份切法一旦分叉，就会出现"索引说有这一节、摘录却核对不上"这种最难查的错。
+ */
+export function sectionTexts(markdown) {
   const lines = String(markdown ?? '').replace(/\r\n?/g, '\n').split('\n')
   const heads = scanHeadings(markdown)
   return heads.map((head, index) => {
@@ -319,9 +352,19 @@ export function sectionIndex(markdown) {
     }
     const child = heads.slice(index + 1).find(item => item.line < end)
     const ownEnd = child ? child.line : end
-    const own = lines.slice(head.line + 1, ownEnd).join('\n').trim()
-    return { id: head.id, title: head.text, level: head.level, chars: own.length, fingerprint: fingerprintOf(own) }
+    const body = lines.slice(head.line + 1, ownEnd).join('\n').trim()
+    return { id: head.id, title: head.text, level: head.level, body }
   })
+}
+
+export function sectionIndex(markdown) {
+  return sectionTexts(markdown).map(section => ({
+    id: section.id,
+    title: section.title,
+    level: section.level,
+    chars: section.body.length,
+    fingerprint: fingerprintOf(section.body)
+  }))
 }
 
 export function extractHeadings(markdown) {
