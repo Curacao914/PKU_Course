@@ -64,6 +64,14 @@ export function onepageBlocks(markdown) {
   })
 }
 
+/** 一节正文里的句子（长句优先），用来给弱匹配档挑一句"确实在这一节里"的原话。 */
+function sortedSentences(body) {
+  return normalize(body)
+    .split(/[。；;！!？?]/)
+    .filter(sentence => sentence.length >= QUOTE_MIN_CHARS)
+    .sort((left, right) => right.length - left.length)
+}
+
 /** 摘录是否**逐字**在这一节里（忽略空白与换行：Markdown 的折行不是内容差异）。 */
 export function quoteInSection(quote, body) {
   const needle = normalize(quote)
@@ -145,6 +153,8 @@ export function verifySourceMap(sourceMap, { slug = '', noteMarkdown = '', onepa
         id,
         title: section.title || String(link?.title || ''),
         quote,
+        // 这一条是怎么定下来的：逐字引用（quote）还是块里点了节名（title）
+        match: String(link?.match || 'quote'),
         excerpt: String(link?.excerpt || quote).replace(/\s+/g, ' ').slice(0, 80)
       })
     }
@@ -176,26 +186,50 @@ export function buildSourceMap({ slug = '', noteMarkdown = '', onepageMarkdown =
     const sentences = normalize(plainBlockText(block.text))
       .split(/[。；;！!？?，,、：:（）()【】《》"'`]+/)
       .filter(sentence => sentence.length >= minOverlap)
-    if (!sentences.length) continue
+    // 注意：这里**不能**因为"没有够长的句子"就跳过整块——第二档（块里点了节名）还要用这一块
     const scored = sections.map(section => {
       const hits = sentences.filter(sentence => section.flat.includes(sentence))
       const longest = hits.reduce((max, sentence) => Math.max(max, sentence.length), 0)
       return { section, hits, longest }
     }).filter(item => item.longest >= minOverlap)
       .sort((left, right) => (right.longest - left.longest) || (right.hits.length - left.hits.length))
-    if (!scored.length) continue
 
     const winner = scored[0]
     const runnerUp = scored[1]
     // "唯一"的判定：领先者要比第二名明显长一截，否则宁可不定（两节都像 = 说明分不清）
-    if (runnerUp && runnerUp.longest >= Math.max(minOverlap, winner.longest - 4)) continue
-    const quote = winner.hits.reduce((best, sentence) => (sentence.length > best.length ? sentence : best), '')
+    const ambiguous = runnerUp && runnerUp.longest >= Math.max(minOverlap, winner.longest - 4)
+    let pick = null
+    if (winner && !ambiguous) {
+      const quote = winner.hits.reduce((best, sentence) => (sentence.length > best.length ? sentence : best), '')
+      pick = { section: winner.section, match: 'quote', quote: quote.slice(0, 60) }
+    } else {
+      /**
+       * 第二档：块里**原样出现了某一节的标题**（≥4 字）而且只有一个这样的节。
+       *
+       * 比逐字引用弱，但同样是可核对的：块自己点了这一节的名字。摘录仍然取那一节正文里的
+       * 原话（发布前照旧逐字核对"摘录确实在这一节里"），所以链接不会是死链，也不会指到
+       * 一节根本不含这段内容的别处。两档在数据里分开记（match），覆盖率也分开报。
+       */
+      const flatBlock = normalize(plainBlockText(block.text))
+      const titled = sections.filter(section => {
+        const title = normalize(section.title)
+        // 4 个字起：中文小节标题常常就是四字（"抽样框架""变量测量"）。
+        // 再短（"假释""共犯"）就太容易撞上了，宁可不定。
+        return title.length >= 4 && flatBlock.includes(title)
+      })
+      if (titled.length === 1) {
+        const body = sortedSentences(titled[0].body)[0] || normalize(titled[0].body).slice(0, 40)
+        if (body && body.length >= QUOTE_MIN_CHARS) pick = { section: titled[0], match: 'title', quote: body.slice(0, 60) }
+      }
+    }
+    if (!pick) continue
     entries.push({
       block: block.id,
       label: plainBlockText(block.text).slice(0, 40),
       note: slug,
-      sections: [{ id: winner.section.id, title: winner.section.title, quote: quote.slice(0, 60) }],
-      score: { overlap: winner.longest, hits: winner.hits.length, runnerUp: runnerUp ? runnerUp.longest : 0 }
+      match: pick.match,
+      sections: [{ id: pick.section.id, title: pick.section.title, quote: pick.quote, match: pick.match }],
+      score: { overlap: winner ? winner.longest : 0, hits: winner ? winner.hits.length : 0, runnerUp: runnerUp ? runnerUp.longest : 0 }
     })
     if (entries.length >= 200) break
   }
@@ -229,5 +263,13 @@ export function sourceMapStats(verified = {}) {
   const total = Number(verified.total || 0)
   const located = Number(verified.located || 0)
   const linkedSections = (verified.entries || []).reduce((sum, entry) => sum + entry.sections.length, 0)
-  return { total, located, unmapped: Math.max(0, total - located), linkedSections }
+  // 两档分开报：逐字引用（quote）与块里点了节名（title）——证据强度不一样，不许合成一个数
+  const byMatch = {}
+  for (const entry of verified.entries || []) {
+    for (const section of entry.sections || []) {
+      const key = section.match || 'quote'
+      byMatch[key] = (byMatch[key] || 0) + 1
+    }
+  }
+  return { total, located, unmapped: Math.max(0, total - located), linkedSections, byMatch }
 }

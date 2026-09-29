@@ -83,6 +83,29 @@ test('免费路径：列表项开头就是被引用的那句话时也要认（�
   assert.match(map.entries[0].sections[0].quote, /减刑要经过报请与裁定两个环节/)
 })
 
+test('免费路径第二档：块里原样点了某一节的标题且唯一时也建映射，并标明这一档', () => {
+  const note = [
+    '## 抽样框架',
+    '',
+    '抽样框架要与研究问题对齐，否则外部效度无从谈起。',
+    '',
+    '## 变量测量',
+    '',
+    '测量水平决定可用的统计量。'
+  ].join('\n')
+  // 这块没有逐字引用正文，但标题"抽样框架"原样出现在块里，而且只有一节叫这个名字
+  const onepage = ['- 抽样框架：先定框，再谈代表性。', '- 测什么、怎么测，决定能算什么。'].join('\n\n')
+  const map = buildSourceMap({ slug: 'notes/x', noteMarkdown: note, onepageMarkdown: onepage })
+  assert.equal(map.entries.length, 1, '标题对应的那一块要定位到')
+  assert.equal(map.entries[0].sections[0].id, '抽样框架')
+  assert.equal(map.entries[0].sections[0].match, 'title')
+  // 摘录仍然取自那一节正文（发布前照旧逐字核对），不是拿标题凑数
+  assert.match(map.entries[0].sections[0].quote, /抽样框架要与研究问题对齐/)
+  const verified = verifySourceMap(map, { slug: 'notes/x', noteMarkdown: note, onepageMarkdown: onepage })
+  assert.equal(verified.entries.length, 1)
+  assert.deepEqual(sourceMapStats(verified).byMatch, { title: 1 })
+})
+
 test('免费路径：两节都像就不定，宁可不定位', () => {
   const note = [
     '## 甲节',
