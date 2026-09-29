@@ -10,7 +10,16 @@ import {
   addMaterial, guessMaterialIdentity, listMaterials, ocrMaterial, parseInboxName, pendingOcrMaterials, readDecks, unassignedDir
 } from '@course/materials'
 import { embedTexts, loadEmbeddingIndex, splitSections } from '@course/notes-mcp'
-import { buildIntegrationPlan, checkNoteQuality, formatQualityReport, renderIntegrationMarkdown } from '@course/notes'
+import {
+  SOURCE_MAP_SCHEMA,
+  buildIntegrationPlan,
+  buildPrompt,
+  buildSourceMapSource,
+  checkNoteQuality,
+  formatQualityReport,
+  normalizeSourceMapDraft,
+  renderIntegrationMarkdown
+} from '@course/notes'
 
 import { formatInventory, scanArtifactInventory } from './artifact-inventory.mjs'
 import { collectExceptions, formatExceptions } from './reconcile.mjs'
@@ -19,7 +28,7 @@ import { cacheUrlsFor, extractNoteMetadata, purgeCloudflareCache } from '@course
 import { NOTIFY_POLICY, clearPending, pendingNotifications, planNotification, resolveNotifyPolicy } from './notify-outbox.mjs'
 import { acquirePublishLock, checkRevisionUnchanged, libraryRevision, publishLockPath } from './publish-guard.mjs'
 
-import { hashPassword, validatePassword } from '@course/core'
+import { hashPassword, noteCostCny, resolvePricing, validatePassword } from '@course/core'
 
 import {
   LOW_BALANCE_THRESHOLD_CNY,
@@ -65,6 +74,7 @@ import {
   markdownPath,
   migrateRecordTime,
   noteSlug,
+  onepageBlocks,
   readSiteIndex,
   refreshRecord,
   resolveSourceMapEntries,
@@ -1255,6 +1265,12 @@ export function createCommands(context) {
    *     并且把每一对"块 ↔ 小节 + 摘录"列出来供人工逐项核对（--show）。
    */
   async function sourceMapRun(options) {
+    const useModel = options.flags?.has('model') === true
+    const capCny = Number(options.options['max-cost-cny'] || env.COURSE_SOURCEMAP_MAX_COST_CNY || 0)
+    // 预算纪律与向量化那条命令一致：走模型就必须先给上限，没上限不开跑
+    if (useModel && !(capCny > 0)) {
+      throw new Error('走模型必须给花费上限：--max-cost-cny <元>（预算纪律：没有上限就不开跑）')
+    }
     const siteRoot = path.resolve(options.options['site-root'] || path.join(config.scratchRoot, 'site'))
     const libraryFile = path.resolve(options.options.library || path.join(siteRoot, 'library.json'))
     if (!fs.existsSync(libraryFile)) throw new Error(`找不到发布库 ${libraryFile}`)
@@ -1264,7 +1280,19 @@ export function createCommands(context) {
     const write = options.flags?.has('write') === true
     const show = options.flags?.has('show') === true
 
+    const modelConfig = {
+      apiKey: config.ai.apiKey || 'unset',
+      baseUrl: config.ai.baseUrl,
+      provider: config.ai.provider,
+      source: 'environment',
+      models: config.ai.models
+    }
+    const callForMap = injectedCallModel ||
+      (payload => callCourseModel({ ...payload, config: { ...modelConfig, ...(payload.config || {}) }, onRetry: onModelRetry }))
+    const pricing = resolvePricing(env)
     const rows = []
+    let spentCny = 0
+    let costStopped = false
     let next = library
     for (const record of library) {
       if (wantedCourse && !String(record.courseName || '').includes(wantedCourse)) continue
@@ -1277,16 +1305,66 @@ export function createCommands(context) {
         continue
       }
       const noteMarkdown = fs.readFileSync(noteFile, 'utf8')
-      const built = buildSourceMap({
+      /**
+       * 先跑**免费路径**（逐字引用 / 块里点了节名）。它便宜且只在有硬证据时才认，
+       * 所以永远先跑；--model 只用来补它补不上的那些块。
+       */
+      const freeMap = buildSourceMap({
         slug: record.slug,
         noteMarkdown,
         onepageMarkdown: record.onepage.markdown
       })
+      const covered = new Set(freeMap.entries.map(entry => entry.block))
+      const sectionList = sectionTexts(noteMarkdown).map(section => ({ id: section.id, title: section.title }))
+      let modelEntries = []
+      let usage = null
+      if (useModel && !costStopped) {
+        const blocks = onepageBlocks(record.onepage.markdown).filter(block => block.kind !== 'heading' && !covered.has(block.id))
+        if (blocks.length) {
+          const result = await callForMap({
+            config: modelConfig,
+            role: 'sourcemap',
+            prompt: buildPrompt({
+              role: 'sourcemap',
+              courseSpec: { courseName: record.courseName },
+              lessonBlueprint: { title: record.lessonTitle },
+              sourceText: buildSourceMapSource({
+                courseName: record.courseName,
+                lessonTitle: record.lessonTitle,
+                noteMarkdown,
+                onepageMarkdown: record.onepage.markdown,
+                sections: sectionList
+              }),
+              schema: SOURCE_MAP_SCHEMA
+            })
+          })
+          usage = result?.trace?.usage || null
+          spentCny += noteCostCny({
+            inputTokens: usage?.prompt_tokens ?? usage?.input_tokens ?? 0,
+            cachedTokens: usage?.prompt_cache_hit_tokens ?? usage?.prompt_cache_tokens ?? 0,
+            outputTokens: usage?.completion_tokens ?? usage?.output_tokens ?? 0,
+            pricing
+          })
+          // 与"新一页纸"那条路同一套：先把模型给的"块提示"解析成真正的块 ID、
+          // 筛掉这一篇里不存在的小节，再交给下面的逐字核对
+          const stamped = stampSourceMap(
+            normalizeSourceMapDraft(result?.parsed?.entries || result?.parsed?.sourceMap || []),
+            { slug: record.slug, noteMarkdown, onepageMarkdown: record.onepage.markdown }
+          )
+          modelEntries = stamped ? stamped.entries : []
+        }
+      }
+      const built = {
+        ...freeMap,
+        entries: [...freeMap.entries, ...modelEntries],
+        generatedBy: modelEntries.length ? 'lexical-overlap+model' : freeMap.generatedBy
+      }
+      const sectionsWithBody = sectionTexts(noteMarkdown)
       const verified = verifySourceMap(built, {
         slug: record.slug,
         noteMarkdown,
         onepageMarkdown: record.onepage.markdown,
-        sections: sectionTexts(noteMarkdown)
+        sections: sectionsWithBody
       })
       const stats = sourceMapStats(verified)
       rows.push({
@@ -1294,12 +1372,20 @@ export function createCommands(context) {
         courseName: record.courseName,
         lessonTitle: record.lessonTitle,
         ...stats,
+        model: modelEntries.length,
+        usage: usage ? { input: usage.prompt_tokens ?? usage.input_tokens ?? null, output: usage.completion_tokens ?? usage.output_tokens ?? null } : null,
+        spentCny: Number(spentCny.toFixed(4)),
         entries: verified.entries.map(entry => ({
           block: entry.block,
           label: entry.label,
-          sections: entry.sections.map(section => ({ id: section.id, title: section.title, quote: section.quote }))
+          sections: entry.sections.map(section => ({ id: section.id, title: section.title, quote: section.quote, match: section.match || 'quote' }))
         }))
       })
+      // 预算纪律：超了立刻停，后面的课次一课都不跑（宁可少做，也不越过你给的上限）
+      if (useModel && spentCny >= capCny) {
+        costStopped = true
+        stderr(`已达花费上限 ¥${capCny}（实际 ¥${spentCny.toFixed(4)}），剩余课次不再调用模型`)
+      }
       if (write && verified.entries.length) {
         next = next.map(item => item.slug === record.slug
           ? {
@@ -1310,7 +1396,8 @@ export function createCommands(context) {
                 version: SOURCE_MAP_VERSION,
                 note: { slug: record.slug, checksum: markdownChecksum(noteMarkdown) },
                 onepageChecksum: markdownChecksum(item.onepage.markdown),
-                generatedBy: 'lexical-overlap',
+                // 记清楚这一份是怎么来的：免费路径、模型，还是两者相加
+                generatedBy: built.generatedBy || 'lexical-overlap',
                 entries: verified.entries
               }
             }
@@ -1330,6 +1417,10 @@ export function createCommands(context) {
       lessons: rows.length,
       located: rows.reduce((sum, row) => sum + (row.located || 0), 0),
       unmapped: rows.reduce((sum, row) => sum + (row.unmapped || 0), 0),
+      model: useModel,
+      costStopped,
+      spentCny: Number(spentCny.toFixed(4)),
+      capCny: capCny || null,
       rows: show ? rows : rows.map(row => ({
         slug: row.slug, located: row.located, unmapped: row.unmapped, error: row.error
       }))
@@ -1500,7 +1591,9 @@ function stampSourceMap(draftEntries, { slug = '', noteMarkdown = '', onepageMar
       block: entry.block,
       label: entry.label,
       sections: entry.sections.filter(link => validIds.has(link.id))
-        .map(link => ({ id: link.id, title: link.title, quote: link.quote }))
+        // 这一档的来源是**模型挑的**（摘录仍由发布链路逐字核对）：标注成 model，
+        // 与免费路径的 quote/title 分开报，别把两种证据强度混成一个正确率
+        .map(link => ({ id: link.id, title: link.title, quote: link.quote, match: 'model' }))
     }))
     .filter(entry => entry.sections.length)
   if (!entries.length) return null
@@ -3590,9 +3683,11 @@ export const USAGE = `用法：course <命令> [选项]
                                            只重跑一页纸摘要：把一节笔记压进一张 A4（复习只看这一页）
                                            产物带 sourceChecksum（所依据正文的 SHA-256），发布时校验
   sourcemap  [--course <名称>] [--lesson <课次>] [--site-root <站点目录>] [--library <library.json>]
-             [--write] [--show]
-                                           给已发布的一页纸补来源映射（只补映射；免费路径：
-                                           只认逐字出现且唯一的对照，没有依据就保持未定位）
+             [--write] [--show] [--model --max-cost-cny <元>]
+                                           给已发布的一页纸补来源映射（只补映射，正文一个字不动）。
+                                           默认免费路径：只认逐字引用 / 块里点了节名的对照。
+                                           --model 按**课次**各调一次模型补剩下的块，必须给 --max-cost-cny，
+                                           超上限立刻停；摘录仍逐字核对，抄错的那条作废
   brief      --from <笔记.md 或所在目录> --course <名称> --lesson <课次> [--out <目录>]
              [--replay-key <键>]
                                            只重跑简报这一步：产出简报与首页用的关键词

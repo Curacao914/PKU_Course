@@ -73,8 +73,11 @@ export {
   ONEPAGE_MAX_CHARS,
   ONEPAGE_SCHEMA,
   ONEPAGE_TARGET_CHARS,
+  SOURCE_MAP_SCHEMA,
   buildOnepageSource,
+  buildSourceMapSource,
   generateOnepage,
+  normalizeSourceMapDraft,
   validateOnepage
 } from './onepage.mjs'
 

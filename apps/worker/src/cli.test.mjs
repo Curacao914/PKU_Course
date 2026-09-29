@@ -1116,6 +1116,69 @@ test('course sourcemap：给已发布的一页纸补映射（免费路径），-
   assert.equal(written.onepage.markdown.trim(), onepageMarkdown.trim(), '一页纸正文一个字都不动')
 })
 
+test('course sourcemap --model：按课次一次调用补映射，超上限立刻停，编造的来源被丢掉', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const siteDir = path.join(dir, 'site')
+  fs.mkdirSync(path.join(siteDir, 'md/甲'), { recursive: true })
+  const quoted = '共同犯罪要求共同故意与共同行为同时具备'
+  const noteText = ['# 第1节', '', '## 甲节', '', quoted + '，缺一不可。', '', '## 乙节', '', '片面共犯不成立共同犯罪。'].join('\n')
+  fs.writeFileSync(path.join(siteDir, 'md/甲/第1节.md'), noteText)
+  // 两块都是概括改写：免费路径一条也定不了，正好用来看模型这一档
+  const onepageMarkdown = ['## 一、体系', '', '- 共犯成立看两个要件。', '', '- 片面共犯的争论。'].join('\n')
+  fs.writeFileSync(path.join(siteDir, 'library.json'), JSON.stringify([{
+    slug: 'notes/甲/第1节', courseName: '甲', lessonTitle: '第1节',
+    sections: [{ id: '甲节', title: '甲节', level: 2, chars: 30, fingerprint: '00000000' }],
+    onepage: { title: '一页', markdown: onepageMarkdown, chars: 60 }
+  }, {
+    slug: 'notes/甲/第2节', courseName: '甲', lessonTitle: '第2节',
+    sections: [{ id: '丙节', title: '丙节', level: 2, chars: 30, fingerprint: '00000000' }],
+    onepage: { title: '另一页', markdown: onepageMarkdown, chars: 60 }
+  }]))
+  fs.mkdirSync(path.join(siteDir, 'md/甲'), { recursive: true })
+  fs.writeFileSync(path.join(siteDir, 'md/甲/第2节.md'), noteText)
+
+  const calls = []
+  const callModel = async payload => {
+    calls.push(payload.role)
+    assert.equal(payload.role, 'sourcemap')
+    assert.match(JSON.stringify(payload.prompt), /可用小节清单/)
+    return {
+      parsed: {
+        entries: [
+          // 真来源：摘录逐字出现在"甲节"正文里
+          { block: '共犯成立看两个要件', label: '共犯成立', sections: [{ id: '甲节', quote: quoted }] },
+          // 编造的小节 id：写盘前就该被筛掉
+          { block: '片面共犯的争论', label: '片面共犯', sections: [{ id: '根本不存在', quote: '片面共犯不成立共同犯罪' }] }
+        ]
+      },
+      // 一次调用的真实用量（用于按同一份单价记成本）
+      trace: { role: 'sourcemap', usage: { prompt_tokens: 12000, completion_tokens: 3000 } }
+    }
+  }
+
+  const { deps, lines: output, errors } = harness({ callModel })
+  // 预算纪律：不给上限就不开跑
+  const refused = await runCli(['sourcemap', '--site-root', siteDir, '--model'], deps)
+  assert.equal(refused, 1)
+  assert.match(errors.join('\n'), /必须给花费上限/)
+
+  errors.length = 0
+  assert.equal(await runCli(['sourcemap', '--site-root', siteDir, '--model', '--max-cost-cny', '1', '--write', '--show'], deps), 0,
+    'stderr: ' + errors.join(' | '))
+  const payload = parse(output.at(-1))
+  assert.equal(payload.model, true)
+  assert.equal(calls.length, 2, '每个课次一次调用（不是每个要点一次）')
+  assert.ok(payload.spentCny > 0 && payload.spentCny < 1, '按同一份单价记账：¥' + payload.spentCny)
+
+  const library = JSON.parse(fs.readFileSync(path.join(siteDir, 'library.json'), 'utf8'))
+  const first = library[0].onepage.sourceMap
+  assert.equal(first.entries.length, 1, '编造的小节 id 被丢掉，真来源留下')
+  assert.equal(first.entries[0].sections[0].id, '甲节')
+  assert.equal(first.entries[0].sections[0].match, 'model', '模型挑的条目单独标一档')
+  assert.equal(first.generatedBy, 'lexical-overlap+model')
+  assert.equal(first.note.checksum, markdownChecksum(noteText))
+})
+
 test('老发布库（只有 publishedAt）在下次发布时整体迁移成三个时间字段', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
   const siteDir = path.join(dir, 'site')

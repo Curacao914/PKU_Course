@@ -35,6 +35,44 @@ export const ONEPAGE_SCHEMA = {
 }
 
 /**
+ * 来源映射（**按课次一次调用**）的契约。
+ *
+ * 为什么要有模型这一档：一页纸是概括改写，与正文逐字重合很少，纯词法路径只能定位很小一部分
+ * （真实课次实测 1/22）。让模型读一遍"带小节 id 的笔记 + 一页纸"，为每块挑来源，
+ * 覆盖率才上得去。**一次调用覆盖整节课**，不是每个要点各调一次。
+ *
+ * 两条硬约束写在提示词里，回来还要程序核对：
+ *   · 小节 id 只能从给定清单里挑（编的会被丢掉）；
+ *   · 摘录必须**逐字**抄自那一节正文（发布链路会逐字比对，抄错或改写的一律作废）。
+ */
+export const SOURCE_MAP_SCHEMA = {
+  entries: [{
+    block: 'string（这一条对应一页纸里的哪一块：给出该块**开头的 10—20 个字**，程序据此定位）',
+    label: 'string（这一块在讲什么，不超过 20 字）',
+    sections: [{
+      id: 'string（必须逐字照抄"可用小节清单"里的 id）',
+      quote: 'string（该小节正文里**逐字出现**的一段话，15—60 字，原样照抄，不许改写、不许拼接）'
+    }]
+  }]
+}
+
+export function buildSourceMapSource({ courseName = '', lessonTitle = '', noteMarkdown = '', onepageMarkdown = '', sections = [] } = {}) {
+  return [
+    `课程：${courseName}`,
+    `课次：${lessonTitle}`,
+    '',
+    '## 可用小节清单（sections[].id 只能从这里挑，逐字照抄）',
+    ...sections.map(section => `- ${section.id}｜${section.title}`),
+    '',
+    '## 这一页纸（要为它的每个要点挑来源）',
+    String(onepageMarkdown || '').trim(),
+    '',
+    '## 笔记全文（摘录只能从这些正文里逐字复制）',
+    String(noteMarkdown || '').trim()
+  ].join('\n')
+}
+
+/**
  * 来源映射草稿的形状校验（**只校验形状**）。
  *
  * 为什么不在这一步核对"小节真的存在、摘录真的在那一节里"：那要正文与小节切法，
