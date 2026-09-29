@@ -122,7 +122,9 @@ test('the note page ships reading controls that work without an account', () => 
   assert.match(html, /id="resume"/, '位置记忆的入口要存在（有没有历史由脚本决定）')
   assert.match(html, /course\.readPos:/, '位置按页面路径分别记录')
   assert.match(html, /--font-scale/, '字号要真的驱动正文尺寸，而不是只改一个没人用的变量')
-  assert.match(html, /calc\(18px \* var\(--font-scale\)\)/)
+  // 正文基准收到共享变量里（--text-body: 18px），页面只是引用它——改字阶时不用满仓库找 18px
+  assert.match(html, /--text-body: 18px/)
+  assert.match(html, /article \{ font-family: var\(--serif\); font-size: calc\(var\(--text-body\) \* var\(--font-scale\)\)/)
   assert.match(html, /:root\[data-theme="dark"\]/, '深色是一套完整的令牌覆盖，不是局部反色')
   assert.match(html, /prefers-color-scheme|浅色/, '默认仍是浅色，深色是可选项')
 })
@@ -276,8 +278,10 @@ test('the reading page extras match what the reader asked for', () => {
   assert.match(html, /data-tool="paper"[^>]*><svg/, '底色按钮就是一个图标')
   assert.match(html, /--bg: #c7edcc/, '豆沙绿就是 rgb(199, 237, 204)')
   assert.match(html, /--mark: rgba\(255, 226, 108/, '高亮底色要有定义（以前没定义，等于透明）')
-  // 小浮层挂在按钮正下方，不贴屏幕右边缘
-  assert.match(html, /\.tools \.pop \{ position: absolute; top: 38px; left: 50%; transform: translateX\(-50%\)/)
+  // 小浮层挂在按钮正下方（不贴屏幕右边缘），出现用短过渡而不是硬闪；
+  // 收起时必须是 display:none —— 留着 opacity:0 的浮层会把手机页面撑出横向滚动（实测 416px）
+  assert.match(html, /\.tools \.pop \{ position: absolute; top: 40px; left: 50%; transform: translateX\(-50%\); min-width: 150px/)
+  assert.match(html, /\.tools \.open \.pop \{ display: block; animation: popIn var\(--t-panel\) var\(--ease\); \}/)
   // 回到顶部是图标按钮，且让开右侧目录栏
   assert.match(html, /id="totop"[\s\S]{0,120}<svg/)
   assert.match(html, /\.totop \{ position: fixed; right: calc\(var\(--rail-w\) \+ 34px\)/)

@@ -59,6 +59,25 @@ export const SITE_CSS = `
   --topbar-bg: rgba(255, 255, 255, .86);
   --card-bg: #ffffff;
   --mark: rgba(255, 226, 108, .55);   /* 划词高亮的底色：以前这个变量没定义，高亮一直是透明的 */
+
+  /* ── 字阶与节奏：一套值，各页引用 ──────────────────────────────
+     以前每页各写一组字号/间距（32px 的 h1、44px 的小节间距、14px 的元信息混着 13.5px 的目录），
+     改一处就得找半天。这里收敛成正文字号 + 层级 + 四档间距，页面只引用变量。 */
+  --text-body: 18px;          /* 正文基准（笔记页）；一页纸阅读模式另有 17px 基准 */
+  --text-lead: 1.82;          /* 正文行高：1.75—1.9 之间，长中文在这个区间最省力 */
+  --h1: 30px;
+  --h2: 21px;
+  --h3: 17px;
+  --text-meta: 13.5px;        /* 日期、时长、目录、工具说明：不再用小于 13px 的字 */
+  --space-1: 6px;
+  --space-2: 10px;
+  --space-3: 16px;
+  --space-4: 28px;
+  --space-5: 44px;
+  /* 动效：普通控件 120—200ms，面板 180—260ms（都尊重 prefers-reduced-motion） */
+  --t-fast: 140ms;
+  --t-panel: 220ms;
+  --ease: cubic-bezier(.2, .7, .3, 1);
 }
 /* 护眼背景：豆沙绿与牛皮纸。只换底色与纸面层次，不动正文颜色对比度——
    "护眼"要的是少一点蓝光，不是把字变灰。 */
@@ -169,6 +188,11 @@ a:hover { color: var(--accent-ink); }
   body { font-size: 17px; }
   /* 移动端点击区稍大：目录与课次链接至少 40px 高 */
   .rail nav.toc a, .rail .rail-extra a { display: block; padding: 10px; min-height: 40px; }
+  /* 手机首屏：大标题与说明各收一档，让"这一段讲什么"尽快出现在第一屏 */
+  header.site { padding-bottom: 14px; margin-bottom: 22px; }
+  header.site h1 { font-size: 25px; }
+  .lesson-title-theme { font-size: 15px; }
+  article h2 { margin-top: 34px; }
 }
 
 /* ── 正文：这里是唯一用衬线的地方 ── */
@@ -177,20 +201,25 @@ header.site .eyebrow { font-size: 13px; color: var(--muted); letter-spacing: .04
 header.site h1 { margin: 8px 0 0; font-size: 32px; line-height: 1.25; font-weight: 650; letter-spacing: -.015em; }
 .lesson-title-theme { margin: 6px 0 0; font-family: var(--sans); font-size: 16px; line-height: 1.55;
   color: var(--ink-soft); }
-.meta { color: var(--muted); font-size: 14px; margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; }
+/* 元信息不再用最浅的那一档灰：日期与时长是读者用来定位的信息，不是装饰 */
+.meta { color: var(--ink-soft); font-size: var(--text-meta); margin-top: var(--space-2);
+  display: flex; flex-wrap: wrap; gap: var(--space-1) 14px; align-items: center; }
 .pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px;
   background: var(--bg-soft); border: 1px solid var(--line); color: var(--ink-soft); font-size: 13px; }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
 .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.danger { background: var(--danger); }
-article { font-family: var(--serif); font-size: calc(18px * var(--font-scale)); line-height: 1.85; }
+article { font-family: var(--serif); font-size: calc(var(--text-body) * var(--font-scale));
+  line-height: var(--text-lead); }
 article h1, article h2, article h3, article h4 { font-family: var(--sans); letter-spacing: -.01em; }
-article h1 { font-size: 28px; margin: 0 0 8px; }
-article h2 { font-size: 21px; line-height: 1.35; margin: 44px 0 14px; padding-top: 14px;
-  border-top: 1px solid var(--line); scroll-margin-top: calc(var(--header-h) + 16px); }
-article h3 { font-size: 17px; line-height: 1.45; margin: 30px 0 10px; color: var(--ink-soft);
+article h1 { font-size: var(--h1); margin: 0 0 var(--space-2); }
+/* 小节之间的间隔拉开（换主题），段与段之间保持紧凑（同一个论证里的句子要看着连着） */
+article h2 { font-size: var(--h2); line-height: 1.35; margin: var(--space-5) 0 var(--space-3);
+  padding-top: var(--space-3); border-top: 1px solid var(--line);
   scroll-margin-top: calc(var(--header-h) + 16px); }
+article h3 { font-size: var(--h3); line-height: 1.45; margin: var(--space-4) 0 var(--space-2);
+  color: var(--ink-soft); scroll-margin-top: calc(var(--header-h) + 16px); }
 article h4 { font-size: 16px; margin: 22px 0 8px; color: var(--ink-soft); }
-article p { margin: 14px 0; }
+article p { margin: var(--space-3) 0; }
 article blockquote { margin: 20px 0; padding: 12px 18px; background: var(--bg-soft);
   border-left: 3px solid var(--accent); border-radius: 0 var(--radius) var(--radius) 0; color: var(--ink-soft); }
 article blockquote p { margin: 4px 0; }
@@ -221,11 +250,13 @@ article .brief li { margin: 5px 0; }
   cursor: pointer; }
 .marks-list .mark-jump:hover { background: var(--bg-soft); color: var(--ink); }
 .marks-list .mark-kind { display: block; font-size: 11.5px; color: var(--muted); }
-.marks-list .mark-excerpt { display: block; margin: 2px 0; line-height: 1.5; }
+.marks-list .mark-excerpt { display: block; margin: 2px 0; line-height: 1.55; color: var(--ink); }
 .marks-list .mark-where { display: block; font-size: 11.5px; color: var(--muted); }
 .marks-list li.mark-lost .mark-where { color: var(--warn); }
 .marks-list .mark-drop { border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 15px;
-  padding: 0 7px; border-radius: 8px; }
+  padding: 0 7px; border-radius: 8px; opacity: .55;
+  transition: opacity var(--t-fast) var(--ease), background var(--t-fast) var(--ease), color var(--t-fast) var(--ease); }
+.marks-list li:hover .mark-drop { opacity: 1; }
 .marks-list .mark-drop:hover { background: var(--bg-soft); color: var(--danger); }
 .rail-marks-note { margin: 10px 0 0; font-size: 11.5px; color: var(--muted); line-height: 1.6; }
 .diagram { margin: 22px 0; padding: 12px 8px; overflow-x: auto; background: var(--bg-soft);
@@ -291,8 +322,10 @@ article .brief li { margin: 5px 0; }
 .lesson-dock { display: flex; flex-wrap: wrap; gap: 6px; margin: 14px 0 2px; font-family: var(--sans); }
 .lesson-dock a, .lesson-dock button, .lesson-dock .dock-off { display: inline-flex; align-items: center;
   font: inherit; font-size: 13px; padding: 6px 12px; min-height: 34px; border: 1px solid var(--line);
-  border-radius: 999px; background: var(--card-bg); color: var(--ink-soft); text-decoration: none; cursor: pointer; }
+  border-radius: 999px; background: var(--card-bg); color: var(--ink-soft); text-decoration: none; cursor: pointer;
+  transition: border-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease), background var(--t-fast) var(--ease); }
 .lesson-dock a:hover, .lesson-dock button:hover { border-color: var(--accent); color: var(--accent-ink); }
+.lesson-dock a:active, .lesson-dock button:active { transform: scale(.98); }
 .lesson-dock [aria-current="page"] { background: var(--accent-soft); border-color: var(--accent);
   color: var(--accent-ink); font-weight: 600; }
 .lesson-dock .dock-off { border-style: dashed; color: var(--muted); cursor: default; }
@@ -345,7 +378,8 @@ details.note-meta pre { background: var(--bg-soft); border-radius: var(--radius)
 
 /* ── 卡片（首页、课程页） ── */
 .card { display: block; padding: 20px 22px; margin: 12px 0; background: var(--card-bg);
-  border: 1px solid var(--line); border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); }
+  border: 1px solid var(--line); border-radius: var(--radius-lg); box-shadow: var(--shadow-sm);
+  transition: border-color var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease); }
 .card:hover { border-color: var(--line-strong); box-shadow: var(--shadow-md); }
 .card h3 { margin: 0 0 6px; font-size: 1.06em; color: var(--ink); }
 .card p { margin: 0; color: var(--muted); font-size: .9em; line-height: 1.7; }
@@ -359,7 +393,8 @@ details.note-meta pre { background: var(--bg-soft); border-radius: var(--radius)
 .hit-list { list-style: none; margin: 10px 0 0; padding: 0; }
 .hit-list .hit { border-top: 1px solid var(--line); }
 .hit-list .hit:first-child { border-top: 0; }
-.hit-list a { display: block; padding: 10px 4px; color: inherit; text-decoration: none; border-radius: 8px; }
+.hit-list a { display: block; padding: 10px 4px; color: inherit; text-decoration: none; border-radius: 8px;
+  transition: background var(--t-fast) var(--ease); }
 .hit-list a:hover { background: var(--bg-soft); }
 .hit-list h4 { margin: 0 0 4px; font-size: .98em; color: var(--accent-ink); }
 .hit-list p { margin: 0 0 8px; color: var(--ink-soft); font-size: .9em; line-height: 1.75; }
@@ -390,6 +425,11 @@ details.note-meta pre { background: var(--bg-soft); border-radius: var(--radius)
 .reading.focus ~ .totop, .focus .totop { right: 24px; }
 .totop.show { opacity: 1; pointer-events: auto; }
 @media (prefers-reduced-motion: reduce) { .totop { transition: none; } }
+/* 系统说"少动"，那就把过渡与动画一起收掉；反馈仍然靠颜色与边框看得见 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition-duration: .01ms !important; animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important; scroll-behavior: auto !important; }
+}
 
 /* 打印只留最朴素的兜底（用户明确说复习不靠打印） */
 
@@ -440,20 +480,37 @@ details.note-meta pre { background: var(--bg-soft); border-radius: var(--radius)
 /* ── 顶栏工具栏：全部是图标，点开一个小窄框 ──
    放在顶栏这一排（而不是悬浮在正文右上角）：正文区域不该被浮层盖住，
    而顶栏本来就有位置，读者也习惯在那里找工具。 */
+/* 工具栏：同一个触摸区（34px）、同一个圆角、同一套 hover/pressed/focus 与 140ms 过渡。
+   手机上不做"把图标一直缩小"来解决拥挤——图标保持 18px，触摸区不缩，低频项进小菜单。 */
 .tools { display: flex; gap: 2px; align-items: center; }
-@media (max-width: 720px) { .tools { gap: 0; } .tools button, .tools a { width: 30px; height: 30px; } }
-.tools button, .tools a { width: 32px; height: 32px; border-radius: 50%; border: 0; background: none; color: var(--ink-soft);
+.tools button, .tools a { width: 34px; height: 34px; border-radius: 10px; border: 0; background: none; color: var(--ink-soft);
   display: inline-flex; align-items: center; justify-content: center; cursor: pointer; position: relative;
-  touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+  touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease), transform var(--t-fast) var(--ease); }
+.tools button:active, .tools a:active, .navmenu > summary:active { transform: scale(.94); }
+.tools button:focus-visible, .tools a:focus-visible, .navmenu > summary:focus-visible,
+.lesson-dock a:focus-visible, .lesson-dock button:focus-visible, .marks-list button:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (max-width: 720px) { .tools { gap: 0; } }
 /* 小浮层的定位基准：少了这一条，浮层会以整条顶栏为基准，跑到屏幕另一头去 */
 .tools .tool-wrap { position: relative; display: inline-flex; }
 .tools button:hover, .tools a:hover { background: var(--bg-soft); color: var(--ink); }
 .tools button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-ink); }
-.tools svg { width: 17px; height: 17px; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.tools svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 1.7;
+  stroke-linecap: round; stroke-linejoin: round; }
 /* 小浮层挂在按钮正下方：贴 right:0 会跑到屏幕最右边，和按钮对不上 */
-.tools .pop { position: absolute; top: 38px; left: 50%; transform: translateX(-50%); min-width: 150px; padding: 10px 12px; border-radius: 12px;
-  border: 1px solid var(--line); background: var(--card-bg); box-shadow: var(--shadow-md); display: none; z-index: 70; }
-.tools .open .pop { display: block; }
+/* 浮层贴着触发按钮（不跑出屏幕、不盖住正在读的那句话），出现用短过渡。
+   收起时必须是 display:none —— 留着 opacity:0 的浮层仍在布局里，会在手机上把整页
+   撑出横向滚动（实测 390px 视口 scrollWidth 416）。所以：出现有动画，收起是瞬时的。 */
+.tools .pop { position: absolute; top: 40px; left: 50%; transform: translateX(-50%); min-width: 150px;
+  max-width: calc(100vw - 20px); padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line);
+  background: var(--card-bg); box-shadow: var(--shadow-md); display: none; z-index: 70; }
+.tools .open .pop { display: block; animation: popIn var(--t-panel) var(--ease); }
+@keyframes popIn {
+  from { opacity: 0; transform: translateX(-50%) translateY(-4px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) { .tools .open .pop { animation: none; } }
 .tools .dot-row { display: flex; gap: 8px; }
 .tools .paper { width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--line-strong); cursor: pointer; padding: 0; }
 .tools .paper[aria-pressed="true"] { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -466,11 +523,12 @@ details.note-meta pre { background: var(--bg-soft); border-radius: var(--radius)
 
 /* ── 顶栏里的站点导航：阅读页收进一个下拉，和工具栏图标并排 ── */
 .navmenu { position: relative; font-family: var(--sans); }
-.navmenu > summary { list-style: none; cursor: pointer; width: 32px; height: 32px; border-radius: 50%;
-  display: inline-flex; align-items: center; justify-content: center; color: var(--ink-soft); }
+.navmenu > summary { list-style: none; cursor: pointer; width: 34px; height: 34px; border-radius: 10px;
+  display: inline-flex; align-items: center; justify-content: center; color: var(--ink-soft);
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease), transform var(--t-fast) var(--ease); }
 .navmenu > summary::-webkit-details-marker { display: none; }
 .navmenu > summary:hover { background: var(--bg-soft); color: var(--ink); }
-.navmenu svg { width: 17px; height: 17px; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; }
+.navmenu svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; }
 .navmenu[open] > summary { background: var(--accent-soft); color: var(--accent-ink); }
 .navmenu .nav-pop { position: absolute; top: 38px; right: 0; display: flex; flex-direction: column; gap: 2px;
   min-width: 132px; padding: 6px; border-radius: 12px; border: 1px solid var(--line);
@@ -495,7 +553,9 @@ details.note-meta pre { background: var(--bg-soft); border-radius: var(--radius)
    下拉自身也要收在视口内（它靠右对齐在按钮下方，一旦按钮出屏下拉就跟着出屏） */
 @media (max-width: 720px) {
   .topbar .inner { gap: 10px; padding: 0 12px; }
-  .topbar .brand { font-size: 15px; }
+  /* 站点名挤不下就省略号，不许把顶栏顶出视口（实测 390px 下工具栏 34px×4 会把整页撑到 397） */
+  .topbar .brand { font-size: 15px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .topbar nav, .navmenu, .tools { flex: none; }
   .topbar nav { gap: 10px; font-size: 12.5px; }
   .navmenu .nav-pop { max-width: calc(100vw - 24px); }
   .prefmenu .pref-pop { min-width: 0; width: min(170px, calc(100vw - 24px)); }

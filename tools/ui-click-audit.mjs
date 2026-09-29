@@ -900,6 +900,12 @@ async function auditNotePage(page, site, noteUrl, failures) {
   }
   console.log('笔记阅读页')
   const scale = () => page.evaluate(() => document.documentElement.style.getPropertyValue('--font-scale'))
+  /**
+   * 浮层"开着没有"的判据：**看得见才算开着**，而不是某一种具体实现。
+   * 收起可以用 display:none，也可以用 opacity:0 + pointer-events:none——后者做得了过渡，
+   * 但闭着的浮层仍在布局里；两种实现都要能被正确判断（判据写死在 display 上就会误判）。
+   * 判断就地写进每次 evaluate：addInitScript 只对**之后**加载的文档生效。
+   */
 
   await page.goto(site.url + noteUrl, { waitUntil: 'domcontentloaded' })
   await page.waitForSelector('article h2', { timeout: 8000 })
@@ -981,11 +987,14 @@ async function auditNotePage(page, site, noteUrl, failures) {
 
   // 调色盘：小浮层要挂在按钮正下方（以前贴在屏幕最右边），选中的颜色要有标记
   await page.click('[data-tool="paper"]')
+  // 浮层出现是 220ms 的短过渡：等它落定再量位置，否则量到的是动画中途
+  await page.waitForTimeout(280)
   const popPlacement = await page.evaluate(() => {
     const button = document.querySelector('[data-tool="paper"]').getBoundingClientRect()
     const pop = document.getElementById('paperPop').getBoundingClientRect()
     return {
-      visible: getComputedStyle(document.getElementById('paperPop')).display !== 'none',
+      // "开着"= 在布局里且没被藏起来；正在淡入也算开着，所以这里不看 opacity
+      visible: (() => { const n = document.getElementById('paperPop'); if (!n) return false; const s = getComputedStyle(n); return s.display !== 'none' && s.visibility !== 'hidden' })(),
       dx: Math.round(Math.abs((pop.left + pop.width / 2) - (button.left + button.width / 2))),
       below: pop.top >= button.bottom - 2
     }
@@ -1004,11 +1013,19 @@ async function auditNotePage(page, site, noteUrl, failures) {
     '页面底色 ' + paperState.body)
   await record('选中的颜色有标记', paperState.pressed === 'true', 'aria-pressed=' + paperState.pressed)
   // 选完颜色浮层会自动收起（免得盖住别的按钮），所以再选一次要重新点开调色盘
-  const closedAfterPick = await page.evaluate(() =>
-    getComputedStyle(document.getElementById('paperPop')).display === 'none')
+  const closedAfterPick = await page.evaluate(() => {
+    const n = document.getElementById('paperPop')
+    if (!n) return true
+    const s = getComputedStyle(n)
+    return s.display === 'none' || s.visibility === 'hidden' || Number(s.opacity || 1) <= 0.5
+  })
   await record('选完颜色自动收起', closedAfterPick, closedAfterPick ? '浮层已收起' : '浮层还开着')
-  const paperPopOpen = async () => page.evaluate(() =>
-    getComputedStyle(document.getElementById('paperPop')).display !== 'none')
+  const paperPopOpen = async () => page.evaluate(() => {
+    const n = document.getElementById('paperPop')
+    if (!n) return false
+    const s = getComputedStyle(n)
+    return s.display !== 'none' && s.visibility !== 'hidden'
+  })
   if (!(await paperPopOpen())) await page.click('[data-tool="paper"]')
   await page.click('button.paper[data-paper=""]')
   await page.keyboard.press('Escape')
