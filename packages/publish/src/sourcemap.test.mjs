@@ -51,6 +51,17 @@ test('一页纸块：按空行切、表格与列表合并、ID 由内容决定',
   assert.match(twins[1].id, /-2$/)
 })
 
+test('块切法：标题后面还有内容的块要算有内容的块（否则整块被排除在映射之外）', () => {
+  // 一页纸常见的写法：标题与列表之间没有空行
+  const md = ['### 一、课程定位、板块与考核 ★', '- 范围：刑法总则第 32 条以后至第 100 条。', '- 方法：法教义学 + 立法论。',
+    '', '### 二、只有标题的这一块', '', '- 另一块独立的内容项。'].join('\n')
+  const blocks = onepageBlocks(md)
+  assert.deepEqual(blocks.map(block => block.kind), ['section', 'heading', 'list'])
+  // 纯标题不配来源入口，有内容的块要配
+  assert.match(blocks[0].text, /课程定位/)
+  assert.match(blocks[0].text, /范围：刑法总则/)
+})
+
 test('摘录核对：忽略换行与空白，但短于 8 字的"重合"不算证据', () => {
   assert.equal(quoteInSection('生效判决与裁定是执行的唯一依据', NOTE), true)
   assert.equal(quoteInSection('生效判决与裁定\n是执行的唯一依据', NOTE), true)

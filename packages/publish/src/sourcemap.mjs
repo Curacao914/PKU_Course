@@ -25,10 +25,19 @@ export const OVERLAP_MIN_CHARS = 12
 
 const normalize = value => String(value ?? '').replace(/\s+/g, '')
 
-/** 块的类型：决定它在页面上长什么样，也决定要不要给它配来源入口。 */
+/**
+ * 块的类型：决定它在页面上长什么样，也决定要不要给它配来源入口。
+ *
+ * 这里有个踩过的坑：**"标题 + 内容"要算有内容的块**，不能算纯标题。
+ * 一页纸常用这种写法（`### 一、课程定位\n- 范围：…`，标题与列表之间没有空行）——
+ * 早先只看首行，整块被当成 heading 排除在映射之外，于是那种页面一条「看原文」都配不上
+ * （真实课次：刑事执行法 09-07 全篇 6 块皆如此 → 0/6；样板课 09-21 有 8 块如此）。
+ */
 function blockKind(text) {
-  const first = String(text).split('\n')[0].trim()
-  if (/^#{1,6}\s/.test(first)) return 'heading'
+  const lines = String(text).split('\n')
+  const first = lines[0].trim()
+  const rest = lines.slice(1).join('\n').trim()
+  if (/^#{1,6}\s/.test(first)) return rest ? 'section' : 'heading'
   if (/^\|/.test(first)) return 'table'
   if (/^\s*([-*]|\d+[.、)])\s/.test(first)) return 'list'
   if (/^\s*>/.test(first)) return 'quote'
