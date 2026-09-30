@@ -1330,8 +1330,22 @@ export function createCommands(context) {
          * 截断风险小；某一批失败只重试那一批，不影响已经拿到的部分。
          */
         const chunkSize = Math.max(1, Number(options.options['chunk'] || 12))
+        let lastChunkCny = 0
         for (let start = 0; start < pending.length; start += chunkSize) {
+          /**
+           * **开跑前预扣额度**：上限要真的挡得住，不能只在事后发现超了。
+           * 单批的成本事先不知道（输出 token 波动很大），所以按"上一批实际花费 × 1.5"预留，
+           * 第一批用 ¥0.03 兜底。预留之后放不下就不开这一批——宁可少标几块，也不越你给的上限。
+           * （这一步是因为实测两次都越线才补的：09-07 花了 ¥0.108 而上限是 ¥0.06。）
+           */
+          const reserve = Math.max(lastChunkCny * 1.5, 0.03)
+          if (useModel && spentCny + reserve > capCny) {
+            costStopped = true
+            stderr(`预算不足：已花 ¥${spentCny.toFixed(4)}，下一批预估 ¥${reserve.toFixed(4)}，上限 ¥${capCny} —— 停下，剩余块保持未定位`)
+            break
+          }
           const chunk = pending.slice(start, start + chunkSize)
+          const beforeChunkCny = spentCny
           for (let attempt = 1; attempt <= 2; attempt += 1) {
             let result = null
             try {
@@ -1375,6 +1389,7 @@ export function createCommands(context) {
             )
             const ids = new Set(chunk.map(block => block.id))
             const kept = (stamped ? stamped.entries : []).filter(entry => ids.has(entry.block))
+            lastChunkCny = spentCny - beforeChunkCny
             if (kept.length) {
               modelEntries.push(...kept)
               break

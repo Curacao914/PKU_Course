@@ -1168,6 +1168,7 @@ test('course sourcemap --model：按课次一次调用补映射，超上限立�
   const payload = parse(output.at(-1))
   assert.equal(payload.model, true)
   assert.equal(calls.length, 2, '每个课次一次调用（不是每个要点一次）')
+  assert.ok(payload.spentCny > 0, '有花费就要如实报')
   assert.ok(payload.spentCny > 0 && payload.spentCny < 1, '按同一份单价记账：¥' + payload.spentCny)
 
   const library = JSON.parse(fs.readFileSync(path.join(siteDir, 'library.json'), 'utf8'))
