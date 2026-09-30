@@ -1383,10 +1383,23 @@ export function createCommands(context) {
           if (useModel && spentCny >= capCny) break
         }
       }
+      /**
+       * 已有的映射要**留住**。
+       *
+       * 踩过的坑：单独跑一次免费路径（不带 --model）时，这里只装了免费路径的结果，
+       * 写回就把上一次模型标好的条目整份冲掉了——花了钱的成果被一次"只跑免费路径"抹掉。
+       * 现在的规矩：既有条目按块保留，块还在、来源还在就继续用；新算出来的覆盖同块的新结果。
+       */
+      const previousEntries = Array.isArray(record.onepage?.sourceMap?.entries) ? record.onepage.sourceMap.entries : []
+      const freshBlocks = new Set([...freeMap.entries, ...modelEntries].map(entry => entry.block))
+      const carried = previousEntries.filter(entry => !freshBlocks.has(entry.block))
       const built = {
         ...freeMap,
-        entries: [...freeMap.entries, ...modelEntries],
-        generatedBy: modelEntries.length ? 'lexical-overlap+model' : freeMap.generatedBy
+        entries: [...carried, ...freeMap.entries, ...modelEntries],
+        // 来源如实记：这一轮新标的算模型；这一轮没重算、但从上一版留下来的，保留它原来的来源标记
+        generatedBy: modelEntries.length
+          ? 'lexical-overlap+model'
+          : (carried.length ? (record.onepage.sourceMap.generatedBy || 'lexical-overlap+model') : freeMap.generatedBy)
       }
       void usage
       const sectionsWithBody = sectionTexts(noteMarkdown)

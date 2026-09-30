@@ -1179,6 +1179,40 @@ test('course sourcemap --model：按课次一次调用补映射，超上限立�
   assert.equal(first.note.checksum, markdownChecksum(noteText))
 })
 
+test('单独跑免费路径不许冲掉已有映射（模型标好的条目要留住）', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
+  const siteDir = path.join(dir, 'site')
+  fs.mkdirSync(path.join(siteDir, 'md/甲'), { recursive: true })
+  const quoted = '共同犯罪要求共同故意与共同行为同时具备'
+  const noteText = ['# 第1节', '', '## 甲节', '', quoted + '，缺一不可。', '', '## 乙节', '', '片面共犯不成立共同犯罪，因为缺少共同故意。'].join('\n')
+  fs.writeFileSync(path.join(siteDir, 'md/甲/第1节.md'), noteText)
+  const onepageMarkdown = ['## 一、体系', '', '- ' + quoted + '。', '', '- 片面共犯的争论。'].join('\n')
+  // 库里已经有一份"模型标好的"映射（只覆盖第二块）
+  const secondBlock = 'ob-00000000'
+  fs.writeFileSync(path.join(siteDir, 'library.json'), JSON.stringify([{
+    slug: 'notes/甲/第1节', courseName: '甲', lessonTitle: '第1节',
+    sections: [{ id: '甲节', title: '甲节', level: 2, chars: 30, fingerprint: '00000000' },
+      { id: '乙节', title: '乙节', level: 2, chars: 30, fingerprint: '00000000' }],
+    onepage: {
+      title: '一页', markdown: onepageMarkdown, chars: 60,
+      sourceMap: {
+        version: 1,
+        note: { slug: 'notes/甲/第1节', checksum: markdownChecksum(noteText) },
+        onepageChecksum: markdownChecksum(onepageMarkdown),
+        generatedBy: 'lexical-overlap+model',
+        entries: [{ block: secondBlock, label: '片面共犯', sections: [{ id: '乙节', title: '乙节', quote: '片面共犯不成立共同犯罪，因为缺少共同故意', match: 'model' }] }]
+      }
+    }
+  }]))
+  const { deps, lines: output } = harness()
+  assert.equal(await runCli(['sourcemap', '--site-root', siteDir, '--write'], deps), 0)
+  const after = JSON.parse(fs.readFileSync(path.join(siteDir, 'library.json'), 'utf8'))[0].onepage.sourceMap
+  const labels = after.entries.map(entry => entry.label)
+  assert.ok(labels.some(label => /片面共犯/.test(label)), '模型标的那条必须还在：' + JSON.stringify(labels))
+  assert.ok(after.entries.length >= 1)
+  void output
+})
+
 test('老发布库（只有 publishedAt）在下次发布时整体迁移成三个时间字段', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
   const siteDir = path.join(dir, 'site')
