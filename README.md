@@ -54,7 +54,7 @@ node apps/worker/bin/course.mjs help
 - 简报 / 一页纸用 `sourceChecksum` 绑定正文；不同源默认阻止发布。
 - source map 同时绑定正文与一页纸，两边任一变化都会失效。
 - 章级整合把每个参与课次的 checksum / content fingerprint 写进产物。
-- embedding 逐小节绑定 fingerprint；正文变化时旧索引不会继承到新的内容 release。
+- embedding 逐小节绑定 fingerprint；旧索引可随 release 继承，但正文已变化的小节会被检索层自动跳过，未变化向量继续复用。
 - `course artifacts` / `course reconcile` 会把 stale / orphan 等异常显式报出来。
 
 内容站支持 versioned release：`site.releases/.staging-*` 完整生成并校验成功后，再一次切换
