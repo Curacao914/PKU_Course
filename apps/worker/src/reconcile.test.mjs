@@ -33,6 +33,24 @@ test('阻塞项：卡住的任务、失败的通知、过期的投递、缺课�
   assert.match(text, /刑法分论·第1节（needs_attention）/, '要带上"哪一节、停在哪一步"')
 })
 
+test('源修订漂移只提醒，但要明确提示 republish 风险', () => {
+  const report = collectExceptions({
+    sourceRevisions: {
+      items: [
+        { status: 'source-state-drift', courseName: '刑事执行法', lessonTitle: '2026-09-21第5-6节' },
+        { status: 'unpublished-change', courseName: '商法概论', lessonTitle: '2026-09-20第2-4节' },
+        { status: 'fresh', courseName: '国际刑法学', lessonTitle: '2026-09-23第5-6节' }
+      ]
+    }
+  })
+  assert.equal(report.blocking, false)
+  assert.equal(report.counts.warning, 2)
+  assert.deepEqual(report.exceptions.map(item => item.code).sort(), ['source-state-drift', 'source-unpublished'])
+  const text = formatExceptions(report)
+  assert.match(text, /直接 republish 可能把旧内容覆盖回来/)
+  assert.match(text, /尚未发布的修订/)
+})
+
 test('提醒项：产物过期与余额偏低只提醒，不算阻塞', () => {
   const report = collectExceptions({
     artifacts: { items: [{ status: 'stale', kind: 'brief', courseName: '商法概论', lessonTitle: '第2-4节' }, { status: 'fresh', kind: 'onepage' }] },
