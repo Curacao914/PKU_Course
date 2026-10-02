@@ -632,6 +632,15 @@ test('最近任务：状态保留，但实现边界不塞进前端', async () =>
 test('管理台只呈现产品概念，不把原型和实现说明端给用户', () => {
   assert.match(ADMIN_HTML, /站点版本/)
   assert.match(ADMIN_HTML, /长期章节/)
+  assert.match(ADMIN_HTML, />处理队列</)
+  assert.match(ADMIN_HTML, />刷新课程</)
+  assert.match(ADMIN_HTML, />发送通知</)
+  assert.match(ADMIN_HTML, />系统检查</)
+  assert.match(ADMIN_HTML, />查看可清理项</)
+  assert.match(ADMIN_HTML, />清理原件</)
+  assert.match(ADMIN_HTML, /'course-note': '课程笔记'/)
+  assert.match(ADMIN_HTML, /sent: '已发送'/)
+
   assert.doesNotMatch(ADMIN_HTML, /<span class="meta">规划中<\/span>/)
   assert.doesNotMatch(ADMIN_HTML, /已有原型（控制台未接线）/)
   assert.doesNotMatch(ADMIN_HTML, /命令行可用/)
@@ -640,6 +649,12 @@ test('管理台只呈现产品概念，不把原型和实现说明端给用户',
   assert.doesNotMatch(ADMIN_HTML, /从当前阶段继续跑到发布/)
   assert.doesNotMatch(ADMIN_HTML, /清掉失败状态与退避时间/)
   assert.doesNotMatch(ADMIN_HTML, /原子重建站点/)
+  assert.doesNotMatch(ADMIN_HTML, />跑一轮完整链路</)
+  assert.doesNotMatch(ADMIN_HTML, />投递通知</)
+  assert.doesNotMatch(ADMIN_HTML, />备份账本</)
+  assert.doesNotMatch(ADMIN_HTML, />清理预演</)
+  assert.doesNotMatch(ADMIN_HTML, /跟随环境变量/)
+  assert.doesNotMatch(ADMIN_HTML, /esc\(c\.path \|\| ''\)/, '配置文件路径不应直接出现在设置正文里')
 })
 
 test('run 立刻返回 jobId，结果由 job 接口查（不再挂着一个请求等几分钟）', async () => {
