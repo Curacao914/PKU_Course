@@ -294,8 +294,8 @@ button.item:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
           <button class="act" data-act="refresh">刷新</button>
           <a class="act" href="/" target="_blank" rel="noopener" style="padding:7px 14px;border:1px solid var(--line-2);border-radius:980px">看站点</a>
         </div>
-        <label>管理密码或主令牌</label>
-        <input id="token" type="password" placeholder="粘贴后回车" autocomplete="current-password">
+        <label>管理密码或备用令牌</label>
+        <input id="token" type="password" placeholder="输入后回车" autocomplete="current-password">
         <div class="row" style="margin-top:8px"><button class="act primary" data-act="save">保存</button></div>
       </div>
     </details>
@@ -454,7 +454,7 @@ function busyButton (btn, text) {
 function fail (error) {
   var text = (error && error.message) || String(error)
   out('操作失败：' + text)
-  toast('操作失败：' + text, 'error')
+  toast(/Failed to fetch|NetworkError|Load failed/i.test(text) ? '连接中断，请稍后重试' : ('操作未完成：' + text), 'error')
 }
 function run (fn) {
   try {
@@ -475,9 +475,9 @@ async function load (options) {
   var res = await fetch('/api/admin/status', { headers: headers(false) })
   var data = await res.json().catch(function () { return {} })
   if (!res.ok) {
-    var reason = data.error === 'admin_token_unconfigured' ? '服务端没有配置 COURSE_ADMIN_TOKEN'
-      : data.error === 'too_many_attempts' ? '凭据错误次数过多，请等 5 分钟'
-      : $('token').value.trim() ? '凭据不对' : '未登录：点右上角 ··· 填入密码或主令牌'
+    var reason = data.error === 'admin_token_unconfigured' ? '管理端尚未配置登录凭据'
+      : data.error === 'too_many_attempts' ? '尝试次数过多，请 5 分钟后再试'
+      : $('token').value.trim() ? '密码或令牌不正确' : '未登录：点右上角 ··· 输入管理密码'
     $('tab-overview').innerHTML = card('<h2>需要登录</h2><p class="muted">' + esc(reason) + '</p>')
     setRunState('未登录', 'bad')
     return false
@@ -515,13 +515,12 @@ function refreshBalance () {
 }
 function renderRunState () {
   var running = state.status && state.status.running
-  setRunState(running ? '正在运行 ' + running.action : '空闲', running ? 'warn' : 'ok')
+  var label = running ? (LABELS[running.action] || '后台任务') : ''
+  setRunState(running ? ('处理中 · ' + label) : '空闲', running ? 'warn' : 'ok')
   var hint = $('outHint')
-  if (hint) hint.textContent = running ? ('正在运行：' + (LABELS[running.action] || running.action)) : '最近一次命令的完整结果'
+  if (hint) hint.textContent = running ? label : '后台任务与最近操作'
   renderRecentJobs()
 }
-/** 最近任务：**进程内**的四态（排队/运行中/完成/失败）。重启会丢，所以旁边就写着这句话。 */
-var JOB_STATUS_TEXT = { queued: '排队', running: '运行中', done: '完成', failed: '失败' }
 function renderRecentJobs () {
   var jobsBox = $('recentJobs')
   var ocrBox = $('ocrJobs')
@@ -1241,7 +1240,7 @@ function storageHtml () {
 }
 function passwordPanel () {
   var auth = (state.status && state.status.auth) || {}
-  return (auth.masterTokenSet ? '' : '<p class="small" style="color:var(--danger)">主令牌未配置：忘记密码只能去服务器重设。</p>') +
+  return (auth.masterTokenSet ? '' : '<p class="small" style="color:var(--danger)">未配置备用登录方式；忘记密码后需要在服务器端重设。</p>') +
     '<div class="field"><label>新密码（至少 8 位）</label><input data-pw="next" type="password" autocomplete="new-password" placeholder="新密码"></div>' +
     '<div class="row"><button class="act primary" data-act="save-password">保存新密码</button>' +
     '<button class="act" data-act="clear-password">清除密码</button></div>'
