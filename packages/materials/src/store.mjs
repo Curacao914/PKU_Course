@@ -229,7 +229,10 @@ export async function ocrMaterial({
   const target = path.join(dir, name)
   const progress = ocrProgressOf(progressFile)
   const images = Number(entry.imageCount || 0)
-  writeOcrProgress(progress, { name, status: 'running', images, pending: Number(entry.ocrPending || 0), at: at.toISOString() })
+  writeOcrProgress(progress, {
+    name, status: 'running', images, completed: 0,
+    pending: Number(entry.ocrPending || 0), at: at.toISOString()
+  })
   if (!fs.existsSync(target)) {
     const skipped = { at: at.toISOString(), engine: '', attempted: 0, pending: entry.ocrPending || 0, skipped: '原件已删除，无法补识别' }
     meta.materials[index] = { ...entry, ocr: skipped }
@@ -241,7 +244,16 @@ export async function ocrMaterial({
 
   let deck
   try {
-    deck = await extractSlides({ filePath: target, runPython, python, env, ocr: true, ocrMaxPages, ocrConcurrency })
+    deck = await extractSlides({
+      filePath: target, runPython, python,
+      env: {
+        ...env,
+        COURSE_OCR_PROGRESS_FILE: progress,
+        COURSE_OCR_PROGRESS_NAME: name,
+        COURSE_OCR_PROGRESS_TOTAL: String(images || entry.ocrPending || 0)
+      },
+      ocr: true, ocrMaxPages, ocrConcurrency
+    })
   } catch (error) {
     writeOcrProgress(progress, {
       name, status: 'failed', images, pending: Number(entry.ocrPending || 0),
@@ -265,6 +277,7 @@ export async function ocrMaterial({
   fs.writeFileSync(metaPath, `${JSON.stringify(meta, null, 2)}\n`)
   writeOcrProgress(progress, {
     name, status: 'done', images: (deck.images || []).length || images,
+    completed: Math.max(0, ((deck.images || []).length || images) - Number(deck.ocrPending || 0)),
     pending: Number(deck.ocrPending || 0), at: at.toISOString()
   })
   return { entry: meta.materials[index], deck, skipped: false }
