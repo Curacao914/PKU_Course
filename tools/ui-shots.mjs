@@ -65,7 +65,7 @@ for (const [name, width, height] of [['desktop', 1180, 900], ['mobile', 420, 900
   await page.route('**/api/admin/balance', route => route.fulfill({ status: 200, contentType: 'application/json',
     body: JSON.stringify({ ok: true, threshold: 5, balances: [{ provider: 'deepseek', total: 6.7, rechargeUrl: 'https://platform.deepseek.com/top_up' }, { provider: 'aliyun', total: 11.62, rechargeUrl: 'https://bailian.console.aliyun.com/' }] }) }))
   await page.goto(site.url + '/admin', { waitUntil: 'domcontentloaded' })
-const tabs = ['overview', 'courses', 'settings']
+const tabs = ['overview', 'courses', 'content', 'settings']
 for (const tab of tabs) {
   await page.click('.seg button[data-tab="' + tab + '"]')
   // 课程区是分栏：要选中课程与课次，详情面板才有东西可看
