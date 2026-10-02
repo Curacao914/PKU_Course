@@ -198,6 +198,7 @@ export function createRequestHandler({
       const semanticIndex = String(process.env.COURSE_EMBED_INDEX || path.join(normalizedRoot, 'embeddings.json'))
       const semantic = createSemanticFallback({
         indexFile: semanticIndex,
+        libraryFile: libraryPath,
         apiKey: semanticKey,
         model: String(process.env.COURSE_EMBED_MODEL || 'text-embedding-v3'),
         timeoutMs: Number(process.env.COURSE_EMBED_TIMEOUT_MS || 1000),
