@@ -105,6 +105,54 @@ test('指纹口径：简报的 sourceChecksum 是**规范化**指纹，不能拿
 
 
 
+test('semantic index: missing is optional, unbound and mismatched revisions are visible, matching revision is fresh', () => {
+  const root = tmp()
+  const file = path.join(root, 'embeddings.json')
+  const base = { version: 1, provider: 'dashscope', model: 'text-embedding-v3', dim: 3, items: {} }
+
+  const absent = scanArtifactInventory({
+    dirs: [],
+    records: [],
+    semanticIndexFile: file,
+    libraryRevision: 'rev-current'
+  })
+  assert.equal(absent.total, 0, '从未建过 semantic index 不应制造假异常')
+
+  fs.writeFileSync(file, JSON.stringify(base))
+  const unbound = scanArtifactInventory({
+    dirs: [],
+    records: [],
+    semanticIndexFile: file,
+    libraryRevision: 'rev-current'
+  })
+  assert.equal(unbound.total, 1)
+  assert.equal(unbound.items[0].kind, 'semantic-index')
+  assert.equal(unbound.items[0].status, 'unbound')
+
+  fs.writeFileSync(file, JSON.stringify({ ...base, libraryRevision: 'rev-old' }))
+  const stale = scanArtifactInventory({
+    dirs: [],
+    records: [],
+    semanticIndexFile: file,
+    libraryRevision: 'rev-current'
+  })
+  assert.equal(stale.items[0].status, 'stale')
+  assert.equal(stale.items[0].boundChecksum, 'rev-old')
+  assert.equal(stale.items[0].currentChecksum, 'rev-current')
+
+  fs.writeFileSync(file, JSON.stringify({ ...base, libraryRevision: 'rev-current' }))
+  const fresh = scanArtifactInventory({
+    dirs: [],
+    records: [],
+    semanticIndexFile: file,
+    libraryRevision: 'rev-current'
+  })
+  assert.equal(fresh.items[0].status, 'fresh')
+  assert.match(formatInventory(fresh), /semantic-index/)
+
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
 test('configured integration missing from disk is reported instead of disappearing from inventory', () => {
   const root = tmp()
   const integrationDir = path.join(root, 'integrations')
