@@ -657,6 +657,13 @@ async function auditAdmin(page, site, fixture, calls, dialogs, failures) {
     // 课程区是分栏：详情面板里的按钮要先选中课程与课次才会出现；
     // 筛选栏默认收起，也要先展开——"藏在收起栏里的按钮点不动"正是要测的东西。
     if (tab === 'courses') {
+      // 概览状态数字的专项测试会留下筛选条件。进入课程功能全量审计前先恢复“全部”，
+      // 避免夹具恰好没有某一状态时把课程列筛空，污染后续按钮测试。
+      const stageClear = await page.$('#tab-courses [data-act="clear-stage"]')
+      if (stageClear) {
+        await stageClear.click()
+        await page.waitForTimeout(120)
+      }
       // 收起筛选栏之后右侧要向左补齐（用户：'不然整体左边是空白的也很难受'）。
       // 这一条同时是给一个真 bug 立的桩：早先用 display:none 收起，栅格少一格，
       // 后面的列各自顶到前一格上，课程列落进 0 宽的那一格——按钮看得见却点不动。
