@@ -1994,14 +1994,76 @@ function stampSourceMap(draftEntries, { slug = '', noteMarkdown = '', onepageMar
  */
 function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepageMarkdown = '' } = {}) {
   if (!sourceMap || !Array.isArray(sourceMap.entries) || !sourceMap.entries.length) return { sourceMap: null, report: null }
+  const sections = sectionTexts(noteMarkdown)
   const verified = verifySourceMap(sourceMap, {
     slug,
     noteMarkdown,
     onepageMarkdown,
-    sections: sectionTexts(noteMarkdown)
+    sections
   })
+
+  /**
+   * 版本变了 ≠ 证据关系一定失效。
+   *
+   * 历史修订最常见的是在别的小节改了几行（例如去重自测题）；旧 sourceMap 因正文 checksum
+   * 改变会整份失效，但它指向的小节、块与逐字摘录可能一个字都没动。此前只能从旧 release
+   * 手工捞映射再逐条核验。
+   *
+   * 现在只在“仍是同一篇笔记”时尝试重新盖当前版本指纹，再跑**完整逐条验证**：
+   *   · 当前一页纸里必须还有同一个 block id；
+   *   · 当前正文里必须还有同一个 section id；
+   *   · quote 必须仍逐字存在于该 section。
+   * 三关任何一关不过，该条就丢。slug 不同则绝不重绑。
+   */
+  const sameNote = String(sourceMap?.note?.slug || '') === String(slug || '')
+  const versionDrift = !verified.bound && sameNote
+  if (versionDrift) {
+    const rebound = {
+      ...sourceMap,
+      note: {
+        ...(sourceMap.note || {}),
+        slug,
+        checksum: markdownChecksum(noteMarkdown)
+      },
+      onepageChecksum: markdownChecksum(onepageMarkdown)
+    }
+    const reverified = verifySourceMap(rebound, {
+      slug,
+      noteMarkdown,
+      onepageMarkdown,
+      sections
+    })
+    const restats = sourceMapStats(reverified)
+    const revalidationReport = {
+      ...restats,
+      bound: reverified.bound,
+      revalidated: true,
+      revalidatedFrom: {
+        noteChecksum: String(sourceMap?.note?.checksum || ''),
+        onepageChecksum: String(sourceMap?.onepageChecksum || '')
+      },
+      problems: reverified.problems.slice(0, 6)
+    }
+    if (!reverified.entries.length) return { sourceMap: null, report: revalidationReport }
+    return {
+      sourceMap: {
+        version: SOURCE_MAP_VERSION,
+        note: { slug, checksum: markdownChecksum(noteMarkdown) },
+        onepageChecksum: markdownChecksum(onepageMarkdown),
+        generatedBy: sourceMap.generatedBy || 'model',
+        revalidatedAt: clockNow().toISOString(),
+        revalidatedFrom: {
+          noteChecksum: String(sourceMap?.note?.checksum || ''),
+          onepageChecksum: String(sourceMap?.onepageChecksum || '')
+        },
+        entries: reverified.entries
+      },
+      report: revalidationReport
+    }
+  }
+
   const stats = sourceMapStats(verified)
-  const report = { ...stats, bound: verified.bound, problems: verified.problems.slice(0, 6) }
+  const report = { ...stats, bound: verified.bound, revalidated: false, problems: verified.problems.slice(0, 6) }
   if (!verified.entries.length) return { sourceMap: null, report }
   return {
     sourceMap: {
