@@ -25,7 +25,7 @@ export const ADMIN_HTML = `<!doctype html>
 :root{
   --bg:#fbfbfd;--card:#fff;--sunken:#f5f5f7;--ink:#1d1d1f;--ink-2:#6e6e73;--ink-3:#86868b;
   --line:#e8e8ed;--line-2:#d2d2d7;--accent:#94070a;--accent-ink:#760507;--accent-soft:#f8ecec;
-  --danger:#b42318;--danger-soft:#fdecea;--warn:#8a5a00;--warn-soft:#fff5e0;--ok:#1c7c4a;
+  --danger:#b42318;--danger-soft:#fdecea;--warn:#8a5a00;--warn-soft:#fff5e0;--ok:#1c7c4a;--ok-soft:#eaf6ef;
   --r-lg:18px;--r-md:12px;--r-sm:9px;
   --shadow:0 1px 2px rgba(0,0,0,.04),0 10px 30px -22px rgba(0,0,0,.3);
   --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
@@ -103,7 +103,7 @@ details.d[open]>summary::after{transform:rotate(45deg)}
 .body{padding:0 2px 18px}
 .pill{display:inline-flex;align-items:center;gap:6px;padding:2px 10px;border-radius:999px;background:var(--sunken);
   color:var(--ink-2);font-size:12.5px}
-.pill.ok{background:var(--accent-soft);color:var(--accent-ink)}
+.pill.ok{background:var(--ok-soft);color:var(--ok)}
 .pill.warn{background:var(--warn-soft);color:var(--warn)}
 .pill.bad{background:var(--danger-soft);color:var(--danger)}
 .pill .dot{width:6px;height:6px;border-radius:50%;background:currentColor;opacity:.7}
@@ -228,6 +228,8 @@ button.item:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
   nav.seg{width:100%;display:grid;grid-template-columns:repeat(4,1fr)}
   nav.seg button{padding:7px 4px;min-width:0}
   .card{padding:18px 16px;border-radius:16px}
+  .grid.three{grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+  .grid.three .stat{font-size:26px}
   .release-row{grid-template-columns:auto minmax(0,1fr)}
   .release-meta{grid-column:2;white-space:normal;font-size:12.5px}
   .content-grid .card{overflow:hidden}
