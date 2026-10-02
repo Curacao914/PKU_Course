@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { createQueryEmbedder, createSemanticFallback, loadEmbeddingIndex, parseEmbeddingIndex, semanticHits } from './semantic.mjs'
+import { createQueryEmbedder, createSemanticFallback, libraryFileRevision, loadEmbeddingIndex, parseEmbeddingIndex, semanticHits } from './semantic.mjs'
 
 /**
  * 语义回退的四件事，每件一组用例：
@@ -52,6 +52,10 @@ test('解析索引：坏条目跳过而不是整份作废；维度不一致也�
   assert.equal(index.items.size, 2)
   assert.equal(index.skipped, 2)
   assert.equal(index.dim, 3)
+  assert.equal(index.libraryRevision, '')
+  const bound = parseEmbeddingIndex({ ...INDEX, version: 2, libraryRevision: 'lib-rev-1' })
+  assert.equal(bound.version, 2)
+  assert.equal(bound.libraryRevision, 'lib-rev-1')
   assert.equal(parseEmbeddingIndex('不是 JSON'), null)
   assert.equal(parseEmbeddingIndex({}), null)
 })
@@ -135,6 +139,45 @@ test('降级不影响上层：索引缺失 / 查询失败时 search() 返回空�
   const hits = await working.search({ query: '乙是什么', records: RECORDS })
   assert.equal(hits.length, 1)
   assert.equal(hits[0].location.id, '二-乙')
+})
+
+test('整份索引绑定 libraryRevision：当前库换版时立刻拒绝旧索引，不靠重启', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-semantic-library-rev-'))
+  const libraryFile = path.join(dir, 'library.json')
+  const indexFile = path.join(dir, 'embeddings.json')
+  fs.writeFileSync(libraryFile, JSON.stringify([{ slug: 'notes/刑法分论/第1节', revision: 1 }], null, 2) + '\n')
+  const rev1 = libraryFileRevision(libraryFile).revision
+  fs.writeFileSync(indexFile, JSON.stringify({ ...INDEX, version: 2, libraryRevision: rev1 }))
+
+  // 底层 loader：匹配才能用；同一个 index 文件在 cache 命中时也必须重新比较 expected revision。
+  assert.ok(loadEmbeddingIndex(indexFile, { expectedLibraryRevision: rev1 }).index)
+  const mismatch = loadEmbeddingIndex(indexFile, { expectedLibraryRevision: 'another-revision' })
+  assert.equal(mismatch.index, null)
+  assert.equal(mismatch.reason, 'library_revision_mismatch')
+  assert.equal(mismatch.actualLibraryRevision, rev1)
+
+  const oldFormat = path.join(dir, 'old-index.json')
+  fs.writeFileSync(oldFormat, JSON.stringify(INDEX))
+  assert.equal(loadEmbeddingIndex(oldFormat, { expectedLibraryRevision: rev1 }).reason, 'library_revision_missing')
+
+  let calls = 0
+  const semantic = createSemanticFallback({
+    indexFile,
+    libraryFile,
+    apiKey: 'k',
+    fetchImpl: async () => {
+      calls += 1
+      return { ok: true, json: async () => ({ output: { embeddings: [{ embedding: vector(0, 1, 0) }] } }) }
+    }
+  })
+  assert.equal((await semantic.search({ query: '乙', records: RECORDS })).length, 1)
+  assert.equal(calls, 1)
+
+  // 只改 library 字节、不动 index 文件：下一次 search 必须在发 embedding 请求前就拒绝整份旧索引。
+  fs.writeFileSync(libraryFile, JSON.stringify([{ slug: 'notes/刑法分论/第1节', revision: 2 }], null, 2) + '\n')
+  assert.deepEqual(await semantic.search({ query: '另一个问题', records: RECORDS }), [])
+  assert.equal(calls, 1, 'library revision 不符时不该连查询向量的钱都花出去')
+  fs.rmSync(dir, { recursive: true, force: true })
 })
 
 test('查询向量化有进程内缓存：同一句话第二次不再请求', async () => {
