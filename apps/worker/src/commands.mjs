@@ -22,6 +22,12 @@ import {
 } from '@course/notes'
 
 import { formatInventory, scanArtifactInventory } from './artifact-inventory.mjs'
+import {
+  emptyIntegrationManifest,
+  normalizeIntegrationManifest,
+  selectConfiguredIntegrations,
+  upsertIntegrationDefinition
+} from './integration-manifest.mjs'
 import { collectExceptions, formatExceptions } from './reconcile.mjs'
 import { cacheUrlsFor, extractNoteMetadata, purgeCloudflareCache } from '@course/publish'
 
@@ -1171,6 +1177,80 @@ export function createCommands(context) {
     return report.blocking ? 1 : 0
   }
 
+  function integrationManifestPath(options = {}) {
+    return path.resolve(options.options?.manifest || path.join(config.scratchRoot, 'integration-manifest.json'))
+  }
+
+  function readIntegrationManifest(file) {
+    if (!fs.existsSync(file)) return emptyIntegrationManifest()
+    let raw
+    try {
+      raw = JSON.parse(fs.readFileSync(file, 'utf8'))
+    } catch (error) {
+      throw new Error(`整合清单不是合法 JSON：${file}（${error instanceof Error ? error.message : String(error)}）`)
+    }
+    return normalizeIntegrationManifest(raw)
+  }
+
+  function writeIntegrationPlan(plan, outputDir) {
+    fs.mkdirSync(outputDir, { recursive: true })
+    const base = `${slugify(plan.course, 'course')}-${slugify(plan.topic, 'topic')}`
+    const markdownFile = path.join(outputDir, `${base}.md`)
+    const planFile = path.join(outputDir, `${base}.json`)
+    writeJsonAtomic(planFile, plan)
+    fs.writeFileSync(markdownFile, renderIntegrationMarkdown(plan))
+    const problems = plan.findings || []
+    const errors = problems.filter(item => item.level === 'error')
+    return { markdownFile, planFile, problems, errors }
+  }
+
+  function buildConfiguredIntegration({ records, definition, outputDir }) {
+    const plan = buildIntegrationPlan({
+      records,
+      course: definition.course,
+      lessons: definition.lessons,
+      topic: definition.topic,
+      generatedAt: clockNow().toISOString()
+    })
+    const written = writeIntegrationPlan(plan, outputDir)
+    return {
+      id: definition.id,
+      course: plan.course,
+      topic: plan.topic,
+      lessons: plan.lessons.map(item => item.lessonTitle),
+      sourceProblems: written.problems.length,
+      errors: written.errors.length,
+      markdownFile: written.markdownFile,
+      planFile: written.planFile
+    }
+  }
+
+  /**
+   * 正文变化以后，只重建“明确包含这一课次”的已配置整合。
+   * 这是纯规则抽取，不调模型、不花钱；失败不回滚已经正确发布的单课正文，
+   * 而是把错误返回给发布结果，reconcile / artifacts 仍会把旧整合标 stale。
+   */
+  function refreshConfiguredIntegrations({ records, course, lessonTitle } = {}) {
+    const manifestFile = path.join(config.scratchRoot, 'integration-manifest.json')
+    if (!fs.existsSync(manifestFile)) return { manifestFile, configured: false, matched: 0, refreshed: [], errors: [] }
+    const manifest = readIntegrationManifest(manifestFile)
+    const definitions = selectConfiguredIntegrations(manifest, { course, lesson: lessonTitle })
+    const outputDir = path.join(config.scratchRoot, 'integrations')
+    const refreshed = []
+    const errors = []
+    for (const definition of definitions) {
+      try {
+        refreshed.push(buildConfiguredIntegration({ records, definition, outputDir }))
+      } catch (error) {
+        errors.push({
+          id: definition.id,
+          message: error instanceof Error ? error.message : String(error)
+        })
+      }
+    }
+    return { manifestFile, configured: true, matched: definitions.length, refreshed, errors }
+  }
+
   /**
    * 工件依赖失效记录（Phase 5.2 C1）。
    *
@@ -1228,11 +1308,55 @@ export function createCommands(context) {
     const libraryFile = path.resolve(options.options.library || path.join(siteRoot, 'library.json'))
     if (!fs.existsSync(libraryFile)) throw new Error(`找不到发布库 ${libraryFile}（先 course publish，或用 --library 指一份）`)
     const records = JSON.parse(fs.readFileSync(libraryFile, 'utf8'))
-    const course = requireOption(options.options, 'course', 'integrate')
-    const lessons = String(options.options.lessons || '').split(',').map(item => item.trim()).filter(Boolean)
+    const outputDir = path.resolve(options.options['out-dir'] || path.join(config.scratchRoot, 'integrations'))
+    const manifestFile = integrationManifestPath(options)
+
     if (options.flags?.has('live')) {
       throw new Error('--live 还没接：章级整合目前只做确定性抽取（结构 + 出处）；让模型补写正文需要单独评审与预算，见 docs/14')
     }
+
+    /**
+     * --configured：按持久化清单重建。
+     * 可以 --id 精确跑一个，也可以不给 id 全部重建；范围来自 manifest，不重新猜课次。
+     */
+    if (options.flags?.has('configured')) {
+      const manifest = readIntegrationManifest(manifestFile)
+      const definitions = selectConfiguredIntegrations(manifest, {
+        id: options.options.id || '',
+        course: options.options.course || ''
+      })
+      if (!definitions.length) {
+        throw new Error(
+          options.options.id
+            ? `整合清单里找不到启用的 id=${options.options.id}`
+            : `整合清单没有匹配项：${manifestFile}`
+        )
+      }
+      const results = []
+      let errors = 0
+      for (const definition of definitions) {
+        try {
+          const result = buildConfiguredIntegration({ records, definition, outputDir })
+          results.push(result)
+          errors += result.errors
+        } catch (error) {
+          errors += 1
+          results.push({ id: definition.id, course: definition.course, topic: definition.topic, error: error instanceof Error ? error.message : String(error) })
+        }
+      }
+      emit({
+        configured: true,
+        manifestFile,
+        outputDir,
+        count: results.length,
+        errors,
+        results
+      }, options)
+      return errors ? 1 : 0
+    }
+
+    const course = requireOption(options.options, 'course', 'integrate')
+    const lessons = String(options.options.lessons || '').split(',').map(item => item.trim()).filter(Boolean)
     const plan = buildIntegrationPlan({
       records,
       course,
@@ -1240,17 +1364,27 @@ export function createCommands(context) {
       topic: options.options.topic || '',
       generatedAt: clockNow().toISOString()
     })
-    const outputDir = path.resolve(options.options['out-dir'] || path.join(config.scratchRoot, 'integrations'))
-    fs.mkdirSync(outputDir, { recursive: true })
-    const base = `${slugify(plan.course, 'course')}-${slugify(plan.topic, 'topic')}`
-    const markdownFile = path.join(outputDir, `${base}.md`)
-    const planFile = path.join(outputDir, `${base}.json`)
-    writeJsonAtomic(planFile, plan)
-    fs.writeFileSync(markdownFile, renderIntegrationMarkdown(plan))
+    const written = writeIntegrationPlan(plan, outputDir)
 
-    const problems = plan.findings || []
-    const errors = problems.filter(item => item.level === 'error')
-    if (errors.length) stderr(`出处检查：${errors.length} 行没有出处（应当为 0）——${errors[0].message}`)
+    let saved = null
+    if (options.flags?.has('save')) {
+      if (!String(options.options.topic || '').trim()) {
+        throw new Error('把整合写入长期清单时必须显式给 --topic：主题名是这组课次的稳定身份，不能用默认占位文字')
+      }
+      const manifest = readIntegrationManifest(manifestFile)
+      const next = upsertIntegrationDefinition(manifest, {
+        id: options.options.id || '',
+        course: plan.course,
+        topic: plan.topic,
+        // 永远保存本次实际解析到的明确课次，不保存“整门课”这种会随时间变宽的范围。
+        lessons: plan.lessons.map(item => item.lessonTitle),
+        enabled: true
+      })
+      writeJsonAtomic(manifestFile, next)
+      saved = next.integrations.find(item => item.id === (options.options.id || `${plan.course}::${plan.topic}`)) || null
+    }
+
+    if (written.errors.length) stderr(`出处检查：${written.errors.length} 行没有出处（应当为 0）——${written.errors[0].message}`)
     emit({
       course: plan.course,
       topic: plan.topic,
@@ -1258,11 +1392,12 @@ export function createCommands(context) {
       concepts: { total: plan.concepts.length, crossLesson: plan.concepts.filter(item => item.rows.length >= 2).length },
       issues: plan.issues.length,
       openMarkers: plan.openMarkers.length,
-      sourceProblems: problems.length,
-      markdownFile,
-      planFile
+      sourceProblems: written.problems.length,
+      markdownFile: written.markdownFile,
+      planFile: written.planFile,
+      manifest: saved ? { file: manifestFile, id: saved.id, lessons: saved.lessons } : null
     }, options)
-    return errors.length ? 1 : 0
+    return written.errors.length ? 1 : 0
   }
 
   /**
