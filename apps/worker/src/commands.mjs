@@ -1016,6 +1016,7 @@ export function createCommands(context) {
     const siteRoot = path.resolve(options.options['site-root'] || path.join(config.scratchRoot, 'site'))
     const libraryFile = path.resolve(options.options.library || path.join(siteRoot, 'library.json'))
     if (!fs.existsSync(libraryFile)) throw new Error(`找不到发布库 ${libraryFile}（先 course publish，或用 --library 指一份）`)
+    const revisionBefore = libraryRevision(libraryFile)
     const records = JSON.parse(fs.readFileSync(libraryFile, 'utf8'))
     const indexFile = path.resolve(options.options.out || path.join(siteRoot, 'embeddings.json'))
     const apiKey = String(env.COURSE_EMBED_API_KEY || env.DASHSCOPE_API_KEY || '').trim()
@@ -1045,8 +1046,12 @@ export function createCommands(context) {
     }
     if (!units.length) throw new Error('发布库里没有任何可向量化的小节（先跑一次 course publish --rebuild --write-back 让记录带上小节索引）')
 
-    // ② 增量：指纹一致的小节复用旧向量
-    const existing = loadEmbeddingIndex(indexFile).index
+    // ② 增量：旧索引即使绑定的是上一版 library，也可以作为**缓存**读取；
+    // 真正能复用的仍必须逐小节 fingerprint 一致。查询侧则更严格：整库 revision 不匹配时直接禁用。
+    const existing = loadEmbeddingIndex(indexFile, {
+      expectedLibraryRevision: revisionBefore.revision,
+      allowRevisionMismatch: true
+    }).index
     const items = {}
     const todo = []
     for (const unit of units) {
@@ -1081,6 +1086,7 @@ export function createCommands(context) {
 
     const payload = {
       version: 1,
+      libraryRevision: revisionBefore.revision,
       provider: 'dashscope',
       model,
       dim: Object.values(items)[0]?.vector?.length || 0,
@@ -1089,7 +1095,35 @@ export function createCommands(context) {
       counts: { units: units.length, reused: units.length - todo.length, embedded: todo.length },
       items
     }
-    writeJsonAtomic(indexFile, payload)
+    const commitIndex = () => {
+      const check = checkRevisionUnchanged({ file: libraryFile, expected: revisionBefore.revision })
+      if (!check.ok) {
+        throw new Error(
+          `${check.message} 向量已写入本地 cache；重跑 course embed 会复用，不会为同一文本重复付费。`
+        )
+      }
+      writeJsonAtomic(indexFile, payload)
+    }
+
+    // 默认站点索引与内容发布共享同一把短提交锁：不在昂贵的向量化阶段占锁，
+    // 只在“最终复核 revision → 写 embeddings.json”这几毫秒阻止 site symlink 被并发切换。
+    const defaultLibrary = path.resolve(libraryFile) === path.resolve(path.join(siteRoot, 'library.json'))
+    const defaultIndex = path.resolve(indexFile) === path.resolve(path.join(siteRoot, 'embeddings.json'))
+    if (defaultLibrary && defaultIndex) {
+      const lock = acquirePublishLock({
+        lockPath: publishLockPath(siteRoot),
+        info: { kind: 'embed-commit', libraryRevision: revisionBefore.revision },
+        warnings: line => stderr(line)
+      })
+      if (!lock.ok) {
+        throw new Error(
+          `${lock.message} 向量化结果已进入本地 cache；等当前发布结束后重跑 embed 即可复用。`
+        )
+      }
+      try { commitIndex() } finally { lock.release() }
+    } else {
+      commitIndex()
+    }
 
     emit({
       indexFile,
@@ -1099,7 +1133,8 @@ export function createCommands(context) {
       dim: payload.dim,
       costCny: payload.cost.cny,
       capCny,
-      library: libraryFile
+      library: libraryFile,
+      libraryRevision: revisionBefore.revision
     }, options)
     return 0
   }
