@@ -143,15 +143,19 @@ export function scanArtifactInventory ({
     })
   }
 
-  const counts = { fresh: 0, stale: 0, unbound: 0, orphan: 0, missing: 0 }
-  for (const item of items) counts[item.status] += 1
+  const counts = { fresh: 0, stale: 0, unbound: 0, orphan: 0 }
+  for (const item of items) {
+    if (!(item.status in counts)) counts[item.status] = 0
+    counts[item.status] += 1
+  }
   return { items, counts, total: items.length }
 }
 
 /** 给人看的一行行报告。 */
 export function formatInventory (inventory = { items: [], counts: {} }) {
   if (!inventory.items.length) return '工件依赖：还没发现任何派生视图（简报/一页纸/整合）。'
-  const lines = [`工件依赖：共 ${inventory.total} 件——新鲜 ${inventory.counts.fresh}，失效 ${inventory.counts.stale}，缺失 ${inventory.counts.missing || 0}，未绑定 ${inventory.counts.unbound}，孤立 ${inventory.counts.orphan}`]
+  const missing = inventory.counts.missing ? `，缺失 ${inventory.counts.missing}` : ''
+  const lines = [`工件依赖：共 ${inventory.total} 件——新鲜 ${inventory.counts.fresh}，失效 ${inventory.counts.stale}${missing}，未绑定 ${inventory.counts.unbound}，孤立 ${inventory.counts.orphan}`]
   for (const item of inventory.items) {
     const where = [item.courseName, item.lessonTitle].filter(Boolean).join(' · ')
     const detail = item.status === 'stale' && item.staleLessons?.length
