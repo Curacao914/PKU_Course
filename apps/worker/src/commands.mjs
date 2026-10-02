@@ -1207,13 +1207,16 @@ export function createCommands(context) {
   }
 
   function buildConfiguredIntegration({ records, definition, outputDir }) {
-    const plan = buildIntegrationPlan({
-      records,
-      course: definition.course,
-      lessons: definition.lessons,
-      topic: definition.topic,
-      generatedAt: clockNow().toISOString()
-    })
+    const plan = {
+      ...buildIntegrationPlan({
+        records,
+        course: definition.course,
+        lessons: definition.lessons,
+        topic: definition.topic,
+        generatedAt: clockNow().toISOString()
+      }),
+      integrationId: definition.id
+    }
     const written = writeIntegrationPlan(plan, outputDir)
     return {
       id: definition.id,
