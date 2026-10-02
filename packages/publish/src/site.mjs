@@ -282,8 +282,9 @@ article .brief li { margin: 5px 0; }
 .map-head { margin: 0 0 14px; }
 .map-head h2 { margin: 0 0 4px; font-size: 1.06em; }
 .map-legend { margin: 0; color: var(--muted); font-size: .78em; }
+.map-swipe-hint { display: none; margin: 0 0 8px; color: var(--muted); font-family: var(--sans); font-size: .78em; }
 .map-holder { overflow-x: auto; padding: 10px; border: 1px solid var(--line); border-radius: var(--radius);
-  background: var(--card-bg); }
+  background: var(--card-bg); overscroll-behavior-x: contain; -webkit-overflow-scrolling: touch; }
 .map-holder svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
 
 /* 不止一节讲过的术语：复习时最该先看的那些 */
@@ -371,6 +372,10 @@ article .brief li { margin: 5px 0; }
   }
   .filter-rail button[aria-pressed="true"] { border-color: color-mix(in srgb, var(--accent) 28%, var(--line)); }
   .index-body { min-width: 0; width: 100%; }
+  /* Mermaid 默认把整张图缩到容器宽度。手机上虽然“不溢出”，文字会小到不可读。
+     保留约两屏宽的画布，交给 holder 横向滑动；桌面仍然自适应整栏。 */
+  .map-swipe-hint { display: block; }
+  .map-holder svg { min-width: 680px; max-width: none; width: 680px; }
   .wrap.wide { padding: 22px 16px 80px; }
   .hero { margin-bottom: 20px; padding-bottom: 18px; }
   .hero h1 { font-size: 28px; }
@@ -1460,6 +1465,7 @@ export function renderKnowledgeMapPage({ notes = [], siteOrigin = '' } = {}) {
         rail,
         '<div class="index-body">',
         '<div class="map-head"><h2 id="map-title"></h2><p class="map-legend">实线连接的是同一门课里出现过两次以上的概念</p></div>',
+        '<p class="map-swipe-hint" aria-hidden="true">← 左右滑动查看完整关系图 →</p>',
         '<div class="map-holder" id="map-holder"></div>',
         '<div class="map-fallback" id="map-fallback" hidden></div>',
         '</div></div>',
