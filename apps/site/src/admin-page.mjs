@@ -202,11 +202,13 @@ pre{background:var(--sunken);border-radius:var(--r-md);padding:14px;overflow:aut
 button.item{width:100%;border:0;background:none;font:inherit;text-align:left;color:inherit}
 button.item:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
 
+.content-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.25fr);gap:16px}
 @media (max-width:900px){
   .board,.board.rail-hidden{grid-template-columns:1fr}
   .board .col{max-height:none;border-right:0;border-bottom:1px solid var(--line)}
   .split{grid-template-columns:1fr}
   .split .col{max-height:none;border-right:0;border-bottom:1px solid var(--line)}
+  .content-grid{grid-template-columns:1fr}
 }
 
 /* 通知记录：宽屏四列一行，窄屏两行卡片。 */
@@ -983,7 +985,7 @@ function renderContent () {
     '</div>' + form
   )
 
-  box.innerHTML = '<div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.25fr);gap:16px">' +
+  box.innerHTML = '<div class="content-grid">' +
     '<div>' + releaseCard + '</div><div>' + integrationsCard + '</div></div>'
 }
 
