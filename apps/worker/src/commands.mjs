@@ -22,6 +22,7 @@ import {
 } from '@course/notes'
 
 import { formatInventory, scanArtifactInventory } from './artifact-inventory.mjs'
+import { activeArtifactDirs } from './artifact-sources.mjs'
 import {
   emptyIntegrationManifest,
   normalizeIntegrationManifest,
@@ -1235,22 +1236,8 @@ export function createCommands(context) {
       store.close()
     }
 
-    const dirs = []
-    const walk = (dir, depth) => {
-      if (depth > 3 || !fs.existsSync(dir)) return
-      let entries = []
-      try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
-      let hasArtifact = false
-      for (const entry of entries) {
-        if (!entry.isDirectory()) {
-          if (entry.name === 'brief.json' || entry.name === 'onepage.json') hasArtifact = true
-          continue
-        }
-        walk(path.join(dir, entry.name), depth + 1)
-      }
-      if (hasArtifact) dirs.push(dir)
-    }
-    walk(path.resolve(config.scratchRoot), 0)
+    // 对账也只看当前 replay 产物，避免历史实验/备份制造假 unbound。
+    const dirs = activeArtifactDirs(config.scratchRoot)
     // 期望值用**规范化**指纹（与发布时的 checkBriefBinding / verifyDerived 同一套）
     const manifestFile = path.join(config.scratchRoot, 'integration-manifest.json')
     const configuredIntegrations = fs.existsSync(manifestFile)
@@ -1405,22 +1392,8 @@ export function createCommands(context) {
     const records = JSON.parse(fs.readFileSync(libraryFile, 'utf8'))
 
     // 产物散在各课次的输出目录里（course notes --output-dir 的产物），所以按名字找、不猜路径
-    const dirs = []
-    const walk = (dir, depth) => {
-      if (depth > 3 || !fs.existsSync(dir)) return
-      let entries = []
-      try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
-      let hasArtifact = false
-      for (const entry of entries) {
-        if (!entry.isDirectory()) {
-          if (entry.name === 'brief.json' || entry.name === 'onepage.json') hasArtifact = true
-          continue
-        }
-        walk(path.join(dir, entry.name), depth + 1)
-      }
-      if (hasArtifact) dirs.push(dir)
-    }
-    walk(path.resolve(config.scratchRoot), 0)
+    // 只扫 replays/ 下当前可再发布的派生物；experiments/ 与各种 backup 是历史副本，不算活跃工件。
+    const dirs = activeArtifactDirs(config.scratchRoot)
 
     const integrationDir = path.resolve(options.options['integrations'] || path.join(config.scratchRoot, 'integrations'))
     const manifestFile = integrationManifestPath(options)
@@ -1576,6 +1549,7 @@ export function createCommands(context) {
     const libraryFile = path.resolve(options.options.library || path.join(siteRoot, 'library.json'))
     if (!fs.existsSync(libraryFile)) throw new Error(`找不到发布库 ${libraryFile}`)
     const library = JSON.parse(fs.readFileSync(libraryFile, 'utf8'))
+    const revisionBefore = options.flags?.has('write') ? libraryRevision(libraryFile) : null
     const wantedCourse = String(options.options.course || '').trim()
     const wantedLesson = String(options.options.lesson || '').trim()
     const write = options.flags?.has('write') === true
@@ -1764,14 +1738,61 @@ export function createCommands(context) {
       }
     }
 
+    let writeResult = {
+      written: false,
+      published: false,
+      atomicRelease: false,
+      release: null,
+      cache: null
+    }
     if (write && next !== library) {
-      writeJsonAtomic(libraryFile, next)
-      stderr(`已写回 ${rows.filter(row => !row.error && row.located).length} 篇的来源映射（正文与一页纸未改动）`)
-      stderr('页面要重新生成才会出现"看原文"：course publish --rebuild')
+      const liveLibrary = path.resolve(libraryFile) === path.resolve(path.join(siteRoot, 'library.json'))
+      const atomic = liveLibrary && usesAtomicSiteReleases(siteRoot)
+      if (atomic) {
+        /**
+         * live release 不能先改 library.json 再叫人手工 rebuild：那会让当前 release 在一段时间内
+         * 处于“API/MCP 看见新映射、静态页面还是旧映射”的半提交状态，而且旧 release 也被原地改脏。
+         * 这里直接复用 content publish transaction：完整新站 → 校验 → 原子切换。
+         */
+        const outcome = publishViaRelease({
+          siteRoot,
+          records: next,
+          expectedRevision: revisionBefore.revision,
+          origin: options.options.origin || 'https://course.law-tech.dev',
+          carryEmbeddings: true
+        })
+        const purge = await purgeCache(options, { reason: '更新一页纸来源映射', files: outcome.site.written || [] })
+        writeResult = {
+          written: true,
+          published: true,
+          atomicRelease: true,
+          release: {
+            current: outcome.release.current,
+            previous: outcome.release.previous,
+            validatedNotes: outcome.release.validation.notes
+          },
+          cache: purge
+        }
+        stderr(`已把 ${rows.filter(row => !row.error && row.located).length} 篇来源映射随完整站点原子发布；无需再手工 publish --rebuild`)
+      } else {
+        // 自定义 --library 或尚未迁移的旧式实体 site：保持旧行为，不偷偷改变部署拓扑。
+        const check = checkRevisionUnchanged({ file: libraryFile, expected: revisionBefore.revision })
+        if (!check.ok) throw new Error(check.message)
+        writeJsonAtomic(libraryFile, next)
+        writeResult = { ...writeResult, written: true }
+        stderr(`已写回 ${rows.filter(row => !row.error && row.located).length} 篇的来源映射（正文与一页纸未改动）`)
+        if (liveLibrary) stderr('当前还是旧式实体站点；页面要重新生成才会出现"看原文"：course publish --rebuild')
+        else stderr('写入的是自定义 --library；没有切换正式站点')
+      }
     }
     emit({
       library: libraryFile,
-      written: write && next !== library,
+      written: writeResult.written,
+      published: writeResult.published,
+      atomicRelease: writeResult.atomicRelease,
+      release: writeResult.release,
+      cachePurged: writeResult.cache?.ok === true,
+      cache: writeResult.cache,
       lessons: rows.length,
       located: rows.reduce((sum, row) => sum + (row.located || 0), 0),
       unmapped: rows.reduce((sum, row) => sum + (row.unmapped || 0), 0),
@@ -4277,9 +4298,11 @@ export const USAGE = `用法：course <命令> [选项]
                                            按长期清单重建整合；不给 --id 时重建所有启用项。
                                            普通 publish 修改正文后，也会免费重建包含该课次的配置项
   sourcemap  [--course <名称>] [--lesson <课次>] [--site-root <站点目录>] [--library <library.json>]
-             [--write] [--show] [--model --max-cost-cny <元>]
+             [--write] [--show] [--model --max-cost-cny <元>] [--no-purge]
                                            给已发布的一页纸补来源映射（只补映射，正文一个字不动）。
                                            默认免费路径：只认逐字引用 / 块里点了节名的对照。
+                                           release 模式下 --write 会完整重建并原子切换站点，
+                                           不再先改正式 library 再要求手工 publish --rebuild。
                                            --model 按**课次**各调一次模型补剩下的块，必须给 --max-cost-cny，
                                            超上限立刻停；摘录仍逐字核对，抄错的那条作废
   brief      --from <笔记.md 或所在目录> --course <名称> --lesson <课次> [--out <目录>]

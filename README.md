@@ -53,9 +53,11 @@ node apps/worker/bin/course.mjs help
 
 - 简报 / 一页纸用 `sourceChecksum` 绑定正文；不同源默认阻止发布。
 - source map 同时绑定正文与一页纸，两边任一变化都会失效。
+- live `sourcemap --write` 在 release 模式下直接随完整站点原子发布，不再产生“库先变、页面后变”的中间状态。
 - 章级整合把每个参与课次的 checksum / content fingerprint 写进产物。
 - embedding 逐小节绑定 fingerprint；旧索引可随 release 继承，但正文已变化的小节会被检索层自动跳过，未变化向量继续复用。
 - `course artifacts` / `course reconcile` 会把 stale / orphan 等异常显式报出来。
+- 工件清单只统计 `replays/` 下活跃 brief/onepage；实验与历史备份副本不计入 active inventory。
 - `course reconcile` 还会比较 replay Markdown / lesson-state.finalNote / 正式正文；历史源漂移时普通 republish 会被保护性拦截。
 - `course source-sync --replay-key <键> --yes` 可在完整备份旧源后，以当前正式正文建立新的历史修订基线。
 
