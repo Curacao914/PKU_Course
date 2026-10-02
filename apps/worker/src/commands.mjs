@@ -1111,6 +1111,113 @@ export function createCommands(context) {
    * 退出码也是 0——定时任务的价值在于安静；有 blocking 时才返回 1 交给 cron 告警。
    * --notify 只在有异常时排一条通知（去重键按天+内容指纹，不刷屏）。
    */
+  /**
+   * 把“当前正式正文”显式认领为某个 replay 的新本地基线。
+   *
+   * 用途不是日常发布，而是处理历史漂移：旧的 note.md / lesson-state 与线上已经分叉时，
+   * 先以发布库（项目唯一事实源）为准把两者同步，再做局部修订。必须 --yes，且会完整备份
+   * 原 note/state/summary；不会改 brief/onepage、不会发布、不会通知。
+   */
+  async function sourceSync(options) {
+    if (!options.flags?.has('yes')) {
+      throw new Error('source-sync 会改写 replay 目录里的笔记源与 lesson-state；确认后加 --yes')
+    }
+    const replayKey = requireOption(options.options, 'replay-key', 'source-sync')
+    const siteRoot = path.resolve(options.options['site-root'] || path.join(config.scratchRoot, 'site'))
+    const libraryFile = path.resolve(options.options.library || path.join(siteRoot, 'library.json'))
+    if (!fs.existsSync(libraryFile)) throw new Error(`找不到发布库 ${libraryFile}`)
+    const records = JSON.parse(fs.readFileSync(libraryFile, 'utf8'))
+    const matches = records.filter(record => {
+      if (String(record.replayKey || '') !== replayKey) return false
+      if (options.options.course && String(record.courseName || '') !== String(options.options.course)) return false
+      if (options.options.lesson && String(record.lessonTitle || '') !== String(options.options.lesson)) return false
+      return true
+    })
+    if (!matches.length) throw new Error(`发布库里找不到 replayKey=${replayKey} 的笔记`)
+    if (matches.length > 1) {
+      throw new Error(
+        `replayKey=${replayKey} 对应 ${matches.length} 篇笔记；为避免认错课次，请再给 --course 与/或 --lesson 精确指定`
+      )
+    }
+
+    const record = matches[0]
+    const paths = sourceRevisionPaths({ scratchRoot: config.scratchRoot, record })
+    if (!paths) throw new Error('这条发布记录没有可定位的 replay 源目录')
+    if (!fs.existsSync(paths.statePath)) {
+      throw new Error(`找不到 lesson-state：${paths.statePath}；不能在缺失生成状态时伪造一份基线`)
+    }
+
+    const before = inspectSourceRevision({ scratchRoot: config.scratchRoot, record })
+    const stamp = clockNow().toISOString()
+    const backupStamp = stamp.replace(/[:.]/g, '-')
+    const backupDir = path.join(config.scratchRoot, 'source-sync-backups', backupStamp, replayKey)
+    fs.mkdirSync(backupDir, { recursive: true })
+    for (const source of [paths.notePath, paths.statePath, paths.summaryPath]) {
+      if (!fs.existsSync(source)) continue
+      fs.copyFileSync(source, path.join(backupDir, path.basename(source)))
+    }
+
+    const state = JSON.parse(fs.readFileSync(paths.statePath, 'utf8'))
+    if (!state.lesson || !state.lesson.finalNote) {
+      throw new Error(`lesson-state 里没有 lesson.finalNote：${paths.statePath}`)
+    }
+    const previousFinal = String(state.lesson.finalNote.markdown || '')
+    if (markdownChecksum(previousFinal) !== markdownChecksum(record.markdown || '')) {
+      const versions = Array.isArray(state.lesson.finalNoteVersions) ? state.lesson.finalNoteVersions : []
+      state.lesson.finalNoteVersions = [
+        ...versions.slice(-19),
+        {
+          version: versions.length + 1,
+          at: stamp,
+          value: String(record.markdown || ''),
+          source: 'source-sync:library'
+        }
+      ]
+    }
+    state.lesson.finalNote = {
+      ...state.lesson.finalNote,
+      markdown: String(record.markdown || ''),
+      stale: false,
+      updatedAt: stamp
+    }
+    state.savedAt = stamp
+    writeJsonAtomic(paths.statePath, state)
+
+    fs.mkdirSync(path.dirname(paths.notePath), { recursive: true })
+    const tempNote = `${paths.notePath}.tmp-${process.pid}`
+    try {
+      fs.writeFileSync(tempNote, String(record.markdown || ''))
+      fs.renameSync(tempNote, paths.notePath)
+    } finally {
+      try { fs.rmSync(tempNote, { force: true }) } catch {}
+    }
+
+    const after = inspectSourceRevision({ scratchRoot: config.scratchRoot, record })
+    if (after.status !== 'fresh') {
+      throw new Error(`source-sync 后仍未对齐：${after.status}`)
+    }
+    emit({
+      synced: true,
+      replayKey,
+      course: record.courseName,
+      lesson: record.lessonTitle,
+      backupDir,
+      before: {
+        status: before.status,
+        sourceMatchesState: before.sourceMatchesState,
+        sourceMatchesPublished: before.sourceMatchesPublished,
+        stateMatchesPublished: before.stateMatchesPublished
+      },
+      after: {
+        status: after.status,
+        sourceMatchesState: after.sourceMatchesState,
+        sourceMatchesPublished: after.sourceMatchesPublished,
+        stateMatchesPublished: after.stateMatchesPublished
+      }
+    }, options)
+    return 0
+  }
+
   async function reconcileRun(options) {
     const siteRoot = path.resolve(options.options['site-root'] || path.join(config.scratchRoot, 'site'))
     const libraryFile = path.resolve(options.options.library || path.join(siteRoot, 'library.json'))
@@ -2144,6 +2251,24 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
     const previousBySlug = library.find(item => item.slug === slug) || null
     const previousByReplayKey = replayKey ? library.find(item => item.replayKey === replayKey) : null
     const previous = previousBySlug || previousByReplayKey || null
+
+    // 同一 replay 已经发布过时，note.md 与 lesson-state.finalNote 自己都必须先对得上。
+    // 二者不一致意味着“publish 会读哪一版”已经不可信：历史上真实出现过线上正文后来修过，
+    // replay 目录仍留着旧稿的情况。默认停手；source-sync 明确认领当前正式版为基线后再修。
+    const localStatePath = path.join(from, 'lesson-state.json')
+    const localState = fs.existsSync(localStatePath) ? safeJsonFile(localStatePath) : null
+    const stateMarkdown = String(localState?.lesson?.finalNote?.markdown || '')
+    if (previous && stateMarkdown.trim() && markdownChecksum(stateMarkdown) !== markdownChecksum(markdown)) {
+      if (!options.flags?.has('allow-source-drift')) {
+        throw new Error(
+          '要发布的 Markdown 与 lesson-state.finalNote 不一致，已中止：直接 republish 可能把旧内容覆盖回正式站。' +
+          `先运行 course source-sync --replay-key ${replayKey || previous.replayKey || '…'} --yes 对齐基线，` +
+          '再做修订；确认就是要绕过保护时才加 --allow-source-drift'
+        )
+      }
+      stderr('警告：已用 --allow-source-drift 绕过源一致性保护；请确认这是有意的人工修订')
+    }
+
     const nowIso = clockNow().toISOString()
     // 首次进站时间一旦定下就不再动：RSS 的 pubDate 靠它，重新发布旧课不该改这个时间
     const firstPublishedAt = String(previous?.firstPublishedAt || previous?.publishedAt || '') || nowIso
@@ -4073,7 +4198,7 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
     doctor, discover, download, transcribe, notes, materials, balance, publish,
     notify, cycle, verify, status, retry, prune, backup, digest, 'ppt-reminder': pptReminder,
     brief: briefRun, onepage: onepageRun, sourcemap: sourceMapRun, integrate: integrateRun,
-    artifacts: artifactsRun, reconcile: reconcileRun, embed: embedRun,
+    artifacts: artifactsRun, reconcile: reconcileRun, 'source-sync': sourceSync, embed: embedRun,
     'admin-passwd': adminPassword, mcp
   }
 }
@@ -4127,8 +4252,12 @@ export const USAGE = `用法：course <命令> [选项]
                                            生成一页纸摘要（A4 一张，模型写，输出 onepage.json）
   reconcile  [--notify] [--site-root <站点目录>] [--library <library.json>]
                                            只报异常的对账：卡住的任务 / 失败或过期的通知 / 与正文不同源的
-                                           派生产物 / 缺课件 / 余额偏低。没有异常时一个字都不说；
+                                           派生产物 / replay 源漂移 / 缺课件 / 余额偏低。
                                            有阻塞项才返回 1（交给 cron 告警），--notify 才排通知
+  source-sync --replay-key <键> --yes [--course <名称>] [--lesson <课次>]
+                                           历史修订前的显式基线同步：以当前发布库正文为准，
+                                           备份旧 replay 笔记/state 后，把 note.md 与 finalNote 对齐；
+                                           不调用模型、不发布、不通知。replayKey 不唯一时须加课程/课次
   embed      [--site-root <站点目录>] [--library <library.json>] [--out <embeddings.json>]
              --max-cost <元> [--model <名称>]
                                            建立/更新语义检索的向量索引（一小节一条向量，带内容指纹）：
@@ -4168,6 +4297,8 @@ export const USAGE = `用法：course <命令> [选项]
              --rollback-site --yes          回到当前 release 之外最新的一份完整内容快照；
                                            切换前重新校验，切换后定向清理新旧两版涉及的 CDN URL
              --no-notify                   更新站点但这一次不排推送
+             --allow-source-drift          仅在明确知道 note.md 与 lesson-state 不一致且仍要发布时绕过保护；
+                                           历史修订通常应先 source-sync，而不是使用这个开关
              --regenerate-derived          简报/一页纸与当前正文对不上时用模型重新生成
                                            （默认：直接中止发布——串课的简报比发布失败更糟；
                                            原因与输出 JSON 里的 reason 都会写明）
