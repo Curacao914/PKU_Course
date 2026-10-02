@@ -26,6 +26,7 @@ try {
  */
 const semantic = createSemanticFallback({
   indexFile: String(process.env.COURSE_EMBED_INDEX || (settings.library ? path.join(path.dirname(settings.library), 'embeddings.json') : '')),
+  libraryFile: String(settings.library || ''),
   apiKey: String(process.env.COURSE_EMBED_API_KEY || process.env.DASHSCOPE_API_KEY || ''),
   model: String(process.env.COURSE_EMBED_MODEL || 'text-embedding-v3'),
   timeoutMs: Number(process.env.COURSE_EMBED_TIMEOUT_MS || 1000),
