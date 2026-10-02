@@ -2409,6 +2409,67 @@ async function auditMobileLayout (page, site, noteUrl, failures) {
     return Boolean(link && link.getBoundingClientRect().height >= 36)
   }), '首个目录链接高度 ≥36px')
 
+  // 公开站移动端：首页 / 概念 / 法条 / 地图共用“课程筛选 + 内容”骨架。
+  // 曾经 .wrap.wide .index-shell 的 specificity 把移动端单栏覆盖掉，390px 里左栏硬占 164px，
+  // 右侧正文只剩约 180px。这里逐页量，不再靠截图肉眼记得去看。
+  for (const target of [
+    ['首页', '/index.html'],
+    ['概念索引', '/concepts/'],
+    ['法条索引', '/statutes/'],
+    ['知识地图', '/map/']
+  ]) {
+    await page.goto(site.url + target[1], { waitUntil: 'domcontentloaded' })
+    await page.waitForTimeout(180)
+    const layout = await page.evaluate(() => {
+      const shell = document.querySelector('.index-shell')
+      const rail = document.querySelector('.filter-rail')
+      const body = document.querySelector('.index-body, .map-body') || (shell ? shell.children[1] : null)
+      const brand = document.querySelector('.topbar:not(:has(#tools)) .brand')
+      const rect = node => {
+        if (!node) return null
+        const r = node.getBoundingClientRect()
+        return { top: Math.round(r.top), left: Math.round(r.left), width: Math.round(r.width), height: Math.round(r.height) }
+      }
+      return {
+        shell: rect(shell), rail: rect(rail), body: rect(body), brand: rect(brand),
+        brandText: brand ? (brand.textContent || '').trim() : '',
+        columns: shell ? getComputedStyle(shell).gridTemplateColumns : '',
+        bodyScrollWidth: document.body.scrollWidth,
+        innerWidth: window.innerWidth
+      }
+    })
+    await record(target[0] + '筛选栏不挤正文',
+      Boolean(layout.shell && layout.rail && layout.body &&
+        layout.body.top >= layout.rail.top &&
+        layout.body.width >= 340 &&
+        layout.bodyScrollWidth <= layout.innerWidth + 1),
+      '正文 ' + (layout.body?.width ?? -1) + 'px，rail ' + (layout.rail?.width ?? -1) + 'px，columns=' + layout.columns)
+    await record(target[0] + '顶栏品牌完整',
+      layout.brandText === '课程笔记' && (layout.brand?.width ?? 0) >= 60,
+      '品牌「' + layout.brandText + '」宽 ' + (layout.brand?.width ?? -1) + 'px')
+  }
+
+  // 桌面首页：日期式课次标题在 1440px 下应该保持一行，不能明明有空间还把“节”掉到下一行。
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto(site.url + '/index.html', { waitUntil: 'domcontentloaded' })
+  await page.waitForTimeout(180)
+  const desktopLesson = await page.evaluate(() => {
+    const cell = document.querySelector('.lesson-table tbody tr:not(.onepage-row) .lesson-title')
+    const link = cell && cell.querySelector('a')
+    return {
+      width: cell ? Math.round(cell.getBoundingClientRect().width) : -1,
+      linkHeight: link ? Math.round(link.getBoundingClientRect().height) : -1,
+      lineHeight: link ? parseFloat(getComputedStyle(link).lineHeight) || 0 : 0,
+      text: link ? (link.textContent || '').trim() : ''
+    }
+  })
+  await record('桌面课次列不无谓换行',
+    desktopLesson.width >= 160 && desktopLesson.linkHeight <= Math.max(28, desktopLesson.lineHeight * 1.6),
+    '「' + desktopLesson.text + '」列宽 ' + desktopLesson.width + 'px，高 ' + desktopLesson.linkHeight + 'px')
+
+  // 管理台继续在 390px 下审计。
+  await page.setViewportSize({ width: 390, height: 844 })
+
   // 管理台：通知记录在窄屏是卡片，且不用逐字换行
   await page.goto(site.url + '/admin', { waitUntil: 'domcontentloaded' })
   await page.waitForTimeout(400)
@@ -2468,6 +2529,24 @@ async function auditMobileLayout (page, site, noteUrl, failures) {
     'columns=' + contentLayout.columns + '，第一块 ' +
       (contentLayout.first ? contentLayout.first.width + 'px' : '无') + '，第二块 top=' +
       (contentLayout.second ? contentLayout.second.top : '无'))
+
+  const choiceBox = await page.evaluate(() => {
+    const input = document.querySelector('[data-integration-lesson]')
+    const label = input && input.closest('label')
+    const ir = input ? input.getBoundingClientRect() : null
+    const lr = label ? label.getBoundingClientRect() : null
+    return {
+      inputWidth: ir ? Math.round(ir.width) : -1,
+      inputHeight: ir ? Math.round(ir.height) : -1,
+      labelWidth: lr ? Math.round(lr.width) : -1,
+      accent: getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()
+    }
+  })
+  await record('章节 checkbox 不再撑满整行',
+    choiceBox.inputWidth >= 14 && choiceBox.inputWidth <= 22 && choiceBox.inputHeight >= 14 && choiceBox.inputHeight <= 22,
+    'checkbox ' + choiceBox.inputWidth + '×' + choiceBox.inputHeight + 'px，label ' + choiceBox.labelWidth + 'px')
+  await record('管理台主题使用北大红', /^#?94070a$/i.test(choiceBox.accent),
+    '--accent=' + choiceBox.accent)
 
   await page.setViewportSize({ width: 1280, height: 900 })
   return results

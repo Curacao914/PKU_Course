@@ -24,8 +24,8 @@ export const ADMIN_HTML = `<!doctype html>
 <style>
 :root{
   --bg:#fbfbfd;--card:#fff;--sunken:#f5f5f7;--ink:#1d1d1f;--ink-2:#6e6e73;--ink-3:#86868b;
-  --line:#e8e8ed;--line-2:#d2d2d7;--accent:#2f6f61;--accent-ink:#245a4f;--accent-soft:#eef4f2;
-  --danger:#b3261e;--danger-soft:#fdecea;--warn:#8a5a00;--warn-soft:#fff5e0;--ok:#1c7c4a;
+  --line:#e8e8ed;--line-2:#d2d2d7;--accent:#94070a;--accent-ink:#760507;--accent-soft:#f8ecec;
+  --danger:#b42318;--danger-soft:#fdecea;--warn:#8a5a00;--warn-soft:#fff5e0;--ok:#1c7c4a;
   --r-lg:18px;--r-md:12px;--r-sm:9px;
   --shadow:0 1px 2px rgba(0,0,0,.04),0 10px 30px -22px rgba(0,0,0,.3);
   --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
@@ -114,7 +114,12 @@ tbody tr:last-child td{border-bottom:0}
 label{display:block;font-size:13px;color:var(--ink-3);margin:0 0 5px}
 input,select{font:inherit;font-size:15px;padding:9px 12px;border:1px solid var(--line-2);border-radius:var(--r-sm);
   background:var(--card);color:var(--ink);width:100%}
+input[type="checkbox"],input[type="radio"]{
+  width:16px;height:16px;padding:0;margin:0;flex:none;accent-color:var(--accent);
+  border-radius:4px;box-shadow:none;
+}
 input:focus,select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+input[type="checkbox"]:focus,input[type="radio"]:focus{outline:2px solid var(--accent-soft);outline-offset:2px;box-shadow:none}
 .field{margin-bottom:14px}
 .hidden-file{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);border:0}
 .status{font-size:13.5px;color:var(--ink-3)}
@@ -203,12 +208,31 @@ button.item{width:100%;border:0;background:none;font:inherit;text-align:left;col
 button.item:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
 
 .content-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.25fr);gap:16px}
+.release-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:8px;align-items:center;padding:7px 0;border-bottom:1px solid var(--line)}
+.release-name{font-family:var(--mono);font-size:12px;min-width:0;overflow-wrap:anywhere}
+.release-meta{white-space:nowrap}
+.integration-lessons{padding:8px 10px;border:1px solid var(--line);border-radius:10px;max-height:220px;overflow:auto}
+.integration-choice{display:flex;align-items:center;gap:9px;min-height:34px;margin:1px 0;color:var(--ink-2);font-size:13.5px;cursor:pointer}
+.integration-choice:hover{color:var(--ink);background:var(--sunken);border-radius:8px;padding-left:6px;margin-left:-6px}
+.integration-choice span{min-width:0}
+.integration-enabled{display:inline-flex;align-items:center;gap:8px;min-height:36px;margin:6px 0 12px;color:var(--ink-2);cursor:pointer}
 @media (max-width:900px){
   .board,.board.rail-hidden{grid-template-columns:1fr}
   .board .col{max-height:none;border-right:0;border-bottom:1px solid var(--line)}
   .split{grid-template-columns:1fr}
   .split .col{max-height:none;border-right:0;border-bottom:1px solid var(--line)}
   .content-grid{grid-template-columns:1fr}
+}
+@media (max-width:560px){
+  .wrap{padding-left:16px;padding-right:16px}
+  nav.seg{width:100%;display:grid;grid-template-columns:repeat(4,1fr)}
+  nav.seg button{padding:7px 4px;min-width:0}
+  .card{padding:18px 16px;border-radius:16px}
+  .release-row{grid-template-columns:auto minmax(0,1fr)}
+  .release-meta{grid-column:2;white-space:normal;font-size:12.5px}
+  .content-grid .card{overflow:hidden}
+  header.top .wrap{padding-left:16px;padding-right:16px}
+  .brand em{display:none}
 }
 
 /* 通知记录：宽屏四列一行，窄屏两行卡片。 */
@@ -910,11 +934,10 @@ function renderContent () {
   var release = data.release || { mode: 'missing', releases: [] }
   var atomic = release.mode === 'atomic'
   var releaseRows = (release.releases || []).map(function (item) {
-    return '<div class="row" style="padding:7px 0;border-bottom:1px solid var(--line);gap:8px">' +
+    return '<div class="release-row">' +
       '<span class="pill ' + (item.current ? 'ok' : '') + '">' + (item.current ? '当前' : (item.legacy ? '初始版' : '历史')) + '</span>' +
-      '<span style="font-family:var(--mono);font-size:12px">' + esc(item.name) + '</span>' +
-      '<span class="spacer"></span>' +
-      '<span class="small muted">' + (item.notes == null ? '' : item.notes + ' 篇 · ') + esc(releaseTime(item.modifiedAt)) + '</span></div>'
+      '<span class="release-name">' + esc(item.name) + '</span>' +
+      '<span class="small muted release-meta">' + (item.notes == null ? '' : item.notes + ' 篇 · ') + esc(releaseTime(item.modifiedAt)) + '</span></div>'
   }).join('')
   var releaseCard = card(
     '<h2>正式站版本</h2>' +
@@ -959,7 +982,7 @@ function renderContent () {
   }).join('')
   var lessonChecks = (courseMap[draft.course] || []).map(function (lesson) {
     var checked = (draft.lessons || []).includes(lesson)
-    return '<label class="row small" style="gap:7px;margin:4px 0"><input type="checkbox" data-integration-lesson="' + esc(lesson) + '"' +
+    return '<label class="integration-choice"><input type="checkbox" data-integration-lesson="' + esc(lesson) + '"' +
       (checked ? ' checked' : '') + '><span>' + esc(lesson) + '</span></label>'
   }).join('')
 
@@ -967,10 +990,10 @@ function renderContent () {
     '<span class="spacer"></span>' + (draft.id ? '<span class="tiny muted">' + esc(draft.id) + '</span>' : '') + '</div>' +
     '<div class="field"><label>课程</label><select data-integration-course>' + courseOptions + '</select></div>' +
     '<div class="field"><label>章节主题</label><input data-integration-text="topic" value="' + esc(draft.topic || '') + '" placeholder="例如：罪刑均衡与以刑制罪"></div>' +
-    '<div class="field"><label>固定课次</label><div style="padding:8px 10px;border:1px solid var(--line);border-radius:10px;max-height:220px;overflow:auto">' +
+    '<div class="field"><label>固定课次</label><div class="integration-lessons">' +
       (lessonChecks || '<span class="small muted">这门课还没有课次</span>') + '</div></div>' +
-    '<label class="row small" style="gap:8px;margin:8px 0 14px"><input type="checkbox" data-integration-enabled' +
-      (draft.enabled !== false ? ' checked' : '') + '>自动维护这一章</label>' +
+    '<label class="integration-enabled"><input type="checkbox" data-integration-enabled' +
+      (draft.enabled !== false ? ' checked' : '') + '><span>自动维护这一章</span></label>' +
     '<div class="row"><button class="act primary" data-act="save-integration">保存章节</button>' +
       '<button class="act" data-act="new-integration">清空表单</button></div>' +
     '<p class="tiny muted" style="margin-top:8px">保存的是明确课次范围；以后同课程新增课次不会自动混进来。正文变化后，包含该课次的章节会自动重建。</p>' +
