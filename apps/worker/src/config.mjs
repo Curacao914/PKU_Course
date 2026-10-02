@@ -9,6 +9,7 @@ import { DEFAULT_ENV_FILE } from './env-file.mjs'
 const SECRET_KEYS = [
   'PKU_USERNAME',
   'PKU_PASSWORD',
+  'PADDLEOCR_ACCESS_TOKEN',
   'DASHSCOPE_API_KEY',
   'R2_ACCESS_KEY_ID',
   'R2_SECRET_ACCESS_KEY',
@@ -39,6 +40,13 @@ export function resolveWorkerConfig(env = process.env, options = {}) {
     options.scratchRoot || env.COURSE_WORKER_SCRATCH_DIR || DEFAULT_SCRATCH_ROOT
   )
   const runtime = readRuntimeConfig(scratchRoot)
+  const resourceClass = String(env.COURSE_RESOURCE_CLASS || 'owner').trim() === 'member' ? 'member' : 'owner'
+  const ownerId = String(env.COURSE_ACCOUNT_OWNER_ID || '').trim()
+  let selectedCourseKeys = []
+  try {
+    const parsed = JSON.parse(env.COURSE_SELECTED_COURSE_KEYS || '[]')
+    if (Array.isArray(parsed)) selectedCourseKeys = parsed.map(String).filter(Boolean)
+  } catch {}
   const profileDir = path.resolve(
     options.profileDir || env.COURSE_BROWSER_PROFILE_DIR || path.join(scratchRoot, 'browser-profile')
   )
@@ -47,6 +55,13 @@ export function resolveWorkerConfig(env = process.env, options = {}) {
     envFile: options.envFile || { path: DEFAULT_ENV_FILE, loaded: false, keys: [] },
     scratchRoot,
     profileDir,
+    storageStatePath: String(env.COURSE_BROWSER_STORAGE_STATE || ''),
+    account: {
+      ownerId,
+      resourceClass,
+      priority: Number(env.COURSE_TASK_PRIORITY || (resourceClass === 'member' ? 10 : 100)),
+      selectedCourseKeys
+    },
     mediaRoot: path.join(scratchRoot, 'replays'),
     // 课件（PPT）归档与收件箱。教学网上没有课件，只能由用户上传；
     // 收件箱是"拖文件进去"的入口，materials 命令按 课程__课次.pptx 命名归档。
@@ -62,7 +77,11 @@ export function resolveWorkerConfig(env = process.env, options = {}) {
     headless: (options.headless ?? env.COURSE_HEADLESS) !== '0',
     // 开始下载前的磁盘下限：一节课媒体有 1—2G 峰值，且 swap 与数据同盘，
     // 写满不只是下不了课，而是整机开始出问题。
-    minFreeBytes: Number(runtime.minFreeBytes || env.COURSE_WORKER_MIN_FREE_BYTES || DEFAULT_MIN_FREE_BYTES),
+    minFreeBytes: Number(
+      resourceClass === 'member'
+        ? (env.COURSE_MEMBER_MIN_FREE_BYTES || 12 * 1024 * 1024 * 1024)
+        : (runtime.minFreeBytes || env.COURSE_WORKER_MIN_FREE_BYTES || DEFAULT_MIN_FREE_BYTES)
+    ),
     // 转写成功后是否保留原始媒体。默认删除：一节课 600MB—2GB，
     // 全部留着会很快吃满盘，而视频本来就在教学平台上，转录稿才是要留的东西。
     keepMedia: runtime.keepMedia === true || env.COURSE_KEEP_MEDIA === '1',
@@ -132,6 +151,7 @@ export function resolveWorkerConfig(env = process.env, options = {}) {
     sources: {
       PKU_USERNAME: env.PKU_USERNAME || '',
       PKU_PASSWORD: env.PKU_PASSWORD || '',
+      PADDLEOCR_ACCESS_TOKEN: env.PADDLEOCR_ACCESS_TOKEN || '',
       DASHSCOPE_API_KEY: env.DASHSCOPE_API_KEY || '',
       R2_ACCESS_KEY_ID: env.R2_ACCESS_KEY_ID || '',
       R2_SECRET_ACCESS_KEY: env.R2_SECRET_ACCESS_KEY || '',
@@ -144,7 +164,7 @@ export function resolveWorkerConfig(env = process.env, options = {}) {
 
 /** 子进程需要的环境变量：只透传转录真正要用的那些。 */
 export function pythonEnvironment(config, env = process.env) {
-  const passthrough = ['DASHSCOPE_API_KEY', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_ENDPOINT', 'R2_BUCKET']
+  const passthrough = ['PADDLEOCR_ACCESS_TOKEN', 'DASHSCOPE_API_KEY', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_ENDPOINT', 'R2_BUCKET']
   const result = { ...env }
   for (const key of passthrough) result[key] = config.sources[key] || ''
   return result
@@ -162,6 +182,7 @@ export function describeConfig(config) {
       keys: config.envFile.keys || []
     },
     scratchRoot: config.scratchRoot,
+    account: config.account,
     ledgerPath: config.ledgerPath,
     profileDir: config.profileDir,
     headless: config.headless,
