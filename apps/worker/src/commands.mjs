@@ -1357,6 +1357,9 @@ export function createCommands(context) {
 
     const course = requireOption(options.options, 'course', 'integrate')
     const lessons = String(options.options.lessons || '').split(',').map(item => item.trim()).filter(Boolean)
+    if (options.flags?.has('save') && !String(options.options.topic || '').trim()) {
+      throw new Error('把整合写入长期清单时必须显式给 --topic：主题名是这组课次的稳定身份，不能用默认占位文字')
+    }
     const plan = buildIntegrationPlan({
       records,
       course,
@@ -1368,9 +1371,6 @@ export function createCommands(context) {
 
     let saved = null
     if (options.flags?.has('save')) {
-      if (!String(options.options.topic || '').trim()) {
-        throw new Error('把整合写入长期清单时必须显式给 --topic：主题名是这组课次的稳定身份，不能用默认占位文字')
-      }
       const manifest = readIntegrationManifest(manifestFile)
       const next = upsertIntegrationDefinition(manifest, {
         id: options.options.id || '',
