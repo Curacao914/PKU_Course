@@ -2343,16 +2343,16 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
        * release 模式：页面、Markdown、公开索引与 library.json 全部先写到新目录，
        * 校验通过以后一次切换 site symlink。旧版目录完整保留，可一键切回。
        *
-       * embedding 是正文的派生物：正文一个字没变时可以原样带过去；正文变了就**不带**，
-       * 让语义回退暂时关闭在“没有索引”的安全状态，等 course embed 按新指纹增量重建。
-       * 宁可少一个语义结果，也不能让旧向量替新正文说话。
+       * embedding 按“小节 fingerprint”逐条绑定：旧索引可以整体带到新 release，
+       * 检索层会自动跳过正文已经变化的那几条，未变化小节继续可用；
+       * 下一次 course embed 也能复用旧向量，只为变化部分付费。
        */
       const outcome = publishViaRelease({
         siteRoot,
         records: nextLibrary,
         expectedRevision: revisionBefore.revision,
         origin: options.options.origin || 'https://course.law-tech.dev',
-        carryEmbeddings: !changed
+        carryEmbeddings: true
       })
       site = outcome.site
       release = outcome.release
@@ -2444,7 +2444,9 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
           validatedNotes: release.validation.notes
         } : null,
         semanticIndex: release
-          ? (changed ? 'stale_not_carried' : (fs.existsSync(path.join(siteRoot, 'embeddings.json')) ? 'carried' : 'absent'))
+          ? (fs.existsSync(path.join(siteRoot, 'embeddings.json'))
+              ? (changed ? 'carried_with_fingerprint_guard' : 'carried')
+              : 'absent')
           : 'legacy_site',
         integrationRefresh: {
           configured: Boolean(integrationRefresh.configured),
