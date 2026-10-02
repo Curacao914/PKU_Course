@@ -51,6 +51,36 @@ test('源修订漂移只提醒，但要明确提示 republish 风险', () => {
   assert.match(text, /尚未发布的修订/)
 })
 
+test('semantic index 未绑定或过期要单独提醒；历史 brief 的 unbound 继续保持安静', () => {
+  const unbound = collectExceptions({
+    artifacts: {
+      items: [
+        { kind: 'brief', status: 'unbound', courseName: '刑事执行法', lessonTitle: '历史课次' },
+        { kind: 'semantic-index', status: 'unbound', courseName: '', lessonTitle: '' }
+      ]
+    }
+  })
+  assert.equal(unbound.blocking, false)
+  assert.equal(unbound.counts.warning, 1)
+  assert.equal(unbound.exceptions[0].code, 'semantic-index-unbound')
+  assert.match(unbound.exceptions[0].detail, /course embed/)
+
+  const stale = collectExceptions({
+    artifacts: {
+      items: [
+        { kind: 'semantic-index', status: 'stale', courseName: '', lessonTitle: '' },
+        { kind: 'brief', status: 'stale', courseName: '刑法', lessonTitle: '第1节' }
+      ]
+    }
+  })
+  assert.equal(stale.counts.warning, 2)
+  assert.deepEqual(
+    stale.exceptions.map(item => item.code).sort(),
+    ['artifact-stale', 'semantic-index-stale']
+  )
+  assert.equal(stale.exceptions.find(item => item.code === 'artifact-stale').count, 1, 'semantic stale 不应再被通用 artifact-stale 重复计数')
+})
+
 test('提醒项：产物过期与余额偏低只提醒，不算阻塞', () => {
   const report = collectExceptions({
     artifacts: { items: [{ status: 'stale', kind: 'brief', courseName: '商法概论', lessonTitle: '第2-4节' }, { status: 'fresh', kind: 'onepage' }] },
