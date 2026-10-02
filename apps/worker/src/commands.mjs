@@ -3453,6 +3453,15 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
           results.push({ file: entry.file, ok: check.ok, detail: check.ok ? `能解析：${check.detail}` : check.detail })
           continue
         }
+        if (entry.kind === 'integration-manifest') {
+          try {
+            const parsed = normalizeIntegrationManifest(JSON.parse(fs.readFileSync(file, 'utf8')))
+            results.push({ file: entry.file, ok: true, detail: `能解析：${parsed.integrations.length} 个长期整合定义` })
+          } catch (error) {
+            results.push({ file: entry.file, ok: false, detail: error instanceof Error ? error.message : String(error) })
+          }
+          continue
+        }
         results.push({ file: entry.file, ok: true, detail: 'sha256 一致' })
       }
       const failed = results.filter(item => !item.ok)
@@ -3501,12 +3510,30 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
       written.push(describe(target, { kind: 'library', verified: check.ok, detail: check.detail }))
     }
 
-    // 3) 清单：有了它，日后任意时刻都能回答这份备份还是不是好的
+    // 3) 章级整合清单：它是“哪些课属于哪一章”的长期人工决定，不能靠正文重新猜。
+    // 整合正文可以由 library 确定性重建；manifest 丢了则范围定义本身丢失，所以必须随账本一起备份。
+    const integrationManifestSource = path.join(config.scratchRoot, 'integration-manifest.json')
+    if (fs.existsSync(integrationManifestSource)) {
+      const target = path.join(dir, `integration-manifest-${stamp}.json`)
+      fs.copyFileSync(integrationManifestSource, target)
+      let verified = false
+      let detail = ''
+      try {
+        const parsed = normalizeIntegrationManifest(JSON.parse(fs.readFileSync(target, 'utf8')))
+        verified = true
+        detail = `${parsed.integrations.length} 个长期整合定义`
+      } catch (error) {
+        detail = error instanceof Error ? error.message : String(error)
+      }
+      written.push(describe(target, { kind: 'integration-manifest', verified, detail }))
+    }
+
+    // 4) 清单：有了它，日后任意时刻都能回答这份备份还是不是好的
     const manifestPath = path.join(dir, `manifest-${stamp}.json`)
     const manifest = { generatedAt: new Date().toISOString(), host: os.hostname(), files: written }
     fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
 
-    // 4) 异地：没配就明说（本地备份不叫备份），配了就必须成功
+    // 5) 异地：没配就明说（本地备份不叫备份），配了就必须成功
     const offsiteTemplate = String(env.COURSE_BACKUP_OFFSITE || '').trim()
     const offsite = { configured: Boolean(offsiteTemplate), command: offsiteTemplate, copied: [], failed: [] }
     if (offsiteTemplate) {
@@ -3517,12 +3544,12 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
       }
     }
 
-    // 5) 本地轮转：只留最近 keep 份（按文件名里的时间戳排序即按时间排序）
+    // 6) 本地轮转：只留最近 keep 份（按文件名里的时间戳排序即按时间排序）
     const all = fs.readdirSync(dir)
-      .filter(name => /^(ledger|library|manifest)-/.test(name))
+      .filter(name => /^(ledger|library|integration-manifest|manifest)-/.test(name))
       .sort()
     const removed = []
-    const stamps = [...new Set(all.map(name => name.replace(/^(ledger|library|manifest)-/, '').replace(/\.(sqlite|json)$/, '')))].sort()
+    const stamps = [...new Set(all.map(name => name.replace(/^(integration-manifest|ledger|library|manifest)-/, '').replace(/\.(sqlite|json)$/, '')))].sort()
     for (const old of stamps.slice(0, Math.max(0, stamps.length - keep))) {
       for (const name of all.filter(item => item.includes(old))) {
         fs.rmSync(path.join(dir, name), { force: true })
