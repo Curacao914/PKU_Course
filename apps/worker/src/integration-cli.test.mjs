@@ -60,6 +60,7 @@ test('integrate --save freezes the resolved lessons; --configured rebuilds from 
     '--course', '刑事执行法',
     '--lessons', '09-07,09-14',
     '--topic', '罪刑均衡',
+    '--id', 'criminal-balance',
     '--save'
   ], first.deps)
   assert.equal(saved, 0, first.errors.join('\n'))
@@ -67,10 +68,12 @@ test('integrate --save freezes the resolved lessons; --configured rebuilds from 
   const manifestFile = path.join(root, 'integration-manifest.json')
   const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'))
   assert.equal(manifest.integrations.length, 1)
+  assert.equal(manifest.integrations[0].id, 'criminal-balance')
   assert.deepEqual(manifest.integrations[0].lessons, ['09-07', '09-14'], '09-21 不能因为同课程就被自动带进来')
 
   const planFile = path.join(root, 'integrations', '刑事执行法-罪刑均衡.json')
   const before = JSON.parse(fs.readFileSync(planFile, 'utf8'))
+  assert.equal(before.integrationId, 'criminal-balance', '第一次 --save 写出的产物就必须带同一个长期身份')
   assert.equal(before.lessons.find(item => item.lessonTitle === '09-14').checksum, 'sum-b')
 
   fs.writeFileSync(library, JSON.stringify([
@@ -80,7 +83,7 @@ test('integrate --save freezes the resolved lessons; --configured rebuilds from 
   ]))
 
   const second = harness(root)
-  const rebuilt = await runCli(['integrate', '--configured'], second.deps)
+  const rebuilt = await runCli(['integrate', '--configured', '--id', 'criminal-balance'], second.deps)
   assert.equal(rebuilt, 0, second.errors.join('\n'))
   const after = JSON.parse(fs.readFileSync(planFile, 'utf8'))
   assert.equal(after.lessons.find(item => item.lessonTitle === '09-14').checksum, 'sum-b2')
