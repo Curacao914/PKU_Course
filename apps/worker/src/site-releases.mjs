@@ -155,6 +155,20 @@ export function listSiteReleases(siteRoot) {
     .sort((left, right) => right.mtimeMs - left.mtimeMs || right.name.localeCompare(left.name))
 }
 
+export function listReleaseFiles(rootDir) {
+  const root = path.resolve(String(rootDir || ''))
+  const files = []
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name)
+      if (entry.isDirectory()) walk(full)
+      else if (entry.isFile()) files.push(path.relative(root, full))
+    }
+  }
+  if (fs.existsSync(root)) walk(root)
+  return files.sort()
+}
+
 export function previousSiteRelease(siteRoot) {
   const state = inspectSiteRoot(siteRoot)
   if (state.kind !== 'symlink' || !state.managed || !state.target) {
