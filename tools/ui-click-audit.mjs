@@ -102,8 +102,7 @@ function buildFixture() {
       status: 'notes_ready',
       finalNote: { markdown: '# 刑事执行法\n正文' },
       nodes: [
-        { id: 'node-1', outlineNodeId: 'node-1', title: '执行程序总论', status: 'approved', draft: '正文一', revisionCount: 0 },
-        { id: 'node-2', outlineNodeId: 'node-2', title: '执行措施', status: 'approved', draft: '正文二', revisionCount: 1 }
+        { id: 'node-1', outlineNodeId: 'node-1', title: '执行程序总论 / 执行措施', status: 'approved', draft: '正文一', revisionCount: 0 }
       ]
     }
   }, null, 2))
@@ -382,7 +381,7 @@ function buildFixture() {
   fs.mkdirSync(path.dirname(ocrProgressPath), { recursive: true })
   fs.writeFileSync(ocrProgressPath, JSON.stringify({
     updatedAt: '2026-09-25T10:03:00.000Z',
-    records: [{ name: '图片版课件.pptx', status: 'running', images: 4, pending: 2, at: '2026-09-25T10:03:00.000Z' }]
+    records: [{ name: '图片版课件.pptx', status: 'running', images: 4, completed: 1, pending: 3, at: '2026-09-25T10:03:00.000Z' }]
   }, null, 2))
   fs.writeFileSync(ocrStatePath, JSON.stringify([{
     course: '刑事执行法',
@@ -446,7 +445,7 @@ const EXPECTED = {
   'refresh-balance': '正在查余额',
   pick: '已归档',
   retry: '完成',
-  republish: '完成',
+  'refresh-note': '完成',
   cycle: '完成',
   'cycle-all': '完成',
   revise: '完成',
@@ -461,7 +460,6 @@ const EXPECTED = {
   'save-config': '设置已保存',
   'save-password': '密码已更新',
   'clear-password': '已清除密码',  // 「已清除密码；当前浏览器用的是主令牌，仍然有效」也匹配
-  // 整合材料生成还没实现：按钮点了要如实说自己没做，这不算缺陷（下一步实现）
   'pick-file': '已归档',
   'ocr-material': '完成',
   'rebuild-content': '完成',
@@ -469,7 +467,6 @@ const EXPECTED = {
   'rebuild-integration': '完成',
   'rebuild-integrations': '完成',
   'save-integration': '章节已保存',
-  integrate: '还没做',
   'add-tag': '先写标签名',   // 审计不填标签输入框：这条分支本来就要说"先写标签名"
   'cancel-upload': '取消',
   'delete-material': '已删除',
@@ -533,6 +530,25 @@ async function auditAdmin(page, site, fixture, calls, dialogs, failures) {
    * 顺带把"点了真有反应"这件事验实（比读一条提示条更接近用户看到的画面）。
    */
   const stateActs = {
+    'view-stage': async (selector) => {
+      const value = await page.getAttribute(selector, 'data-value')
+      await page.click(selector)
+      await page.waitForTimeout(160)
+      const coursesOn = await page.getAttribute('.seg button[data-tab="courses"]', 'aria-selected').catch(() => null)
+      const pill = (await page.textContent('#tab-courses .view-filter .pill').catch(() => '')).trim()
+      const wanted = value === 'published' ? '已发布' : value === 'active' ? '进行中' : '排队中'
+      if (coursesOn !== 'true' || pill !== wanted) {
+        failures.push('管理台 概览 · 状态数字没有跳到课程筛选（' + value + ' → ' + pill + '）')
+      }
+      return '筛选 ' + wanted
+    },
+    'clear-stage': async (selector) => {
+      await page.click(selector)
+      await page.waitForTimeout(100)
+      const pill = await page.$('#tab-courses .view-filter')
+      if (pill) failures.push('管理台 课程 · 清除状态筛选后筛选条仍在')
+      return '清除状态筛选'
+    },
     'pick-pane': async (selector) => {
       const pane = await page.getAttribute(selector, 'data-value')
       await page.click(selector)
@@ -594,20 +610,43 @@ async function auditAdmin(page, site, fixture, calls, dialogs, failures) {
     }
   }
 
-  // 后台识别的进度要看得见：夹具里塞了一个"正在跑"的识别任务，
-  // 先断言进度条与 done/total 文案，再把状态清掉，好让后面「重新识别」按钮露出来
+  // OCR 是跨课程后台任务：切到别的课也应在底部运行面板持续可见。
   await selectLesson()
-  const ocrText = await page.textContent('#detail .ocr').catch(() => '')
-  const ocrWidth = await page.$eval('#detail .ocr .bar > i', el => el.style.width).catch(() => '0%')
-  if (!/已识别 2\/4 张图/.test(ocrText) || !/正在处理 图片版课件\.pptx/.test(ocrText) || parseFloat(ocrWidth) <= 0) {
-    failures.push('管理台 课程 · 识别进度没显示出来（「' + String(ocrText).trim() + '」，条宽 ' + ocrWidth + '）')
+  await page.$eval('#outCard', node => { node.open = true })
+  await page.waitForTimeout(120)
+  const ocrState = await page.evaluate(() => {
+    const consoleBox = document.querySelector('.run-console')
+    const detail = document.querySelector('#detail .status')
+    const global = document.querySelector('#ocrJobs')
+    const style = consoleBox ? getComputedStyle(consoleBox) : null
+    return {
+      detail: detail ? (detail.textContent || '').trim() : '',
+      global: global ? (global.textContent || '').replace(/\s+/g, ' ').trim() : '',
+      maxHeight: style ? style.maxHeight : '',
+      overflowY: style ? style.overflowY : ''
+    }
+  })
+  if (!/图片识别 1\/4/.test(ocrState.detail)) {
+    failures.push('管理台 课程 · 课次里的 OCR 状态不够简洁或进度不对（「' + ocrState.detail + '」）')
   } else {
-    console.log('  [课件] 识别进度 ✓ ' + String(ocrText).trim() + '（条宽 ' + ocrWidth + '）')
+    console.log('  [课件] 课次 OCR 状态 ✓ ' + ocrState.detail)
   }
+  if (!/图片识别.*刑事执行法.*第5-6节.*图片版课件\.pptx.*1\/4/.test(ocrState.global)) {
+    failures.push('管理台 · 切换课次后底部没有持续显示 OCR 进度（「' + ocrState.global + '」）')
+  } else {
+    console.log('  [运行状态] 跨课程 OCR ✓ ' + ocrState.global)
+  }
+  if (parseFloat(ocrState.maxHeight) > 340 || !/auto|scroll/.test(ocrState.overflowY)) {
+    failures.push('管理台 · 运行状态没有固定高度滚动（max-height=' + ocrState.maxHeight + '，overflow=' + ocrState.overflowY + '）')
+  }
+
+  // 清掉后台任务，让后面的恢复动作“补识别”露出来。
   fs.writeFileSync(fixture.ocrStatePath, '[]\n')
   await page.evaluate(() => window.load())
   await page.waitForTimeout(300)
-  if (await page.$('#detail .ocr')) failures.push('管理台 课程 · 识别任务清掉之后进度条还在')
+  if (/图片识别/.test((await page.textContent('#ocrJobs').catch(() => '')) || '')) {
+    failures.push('管理台 · OCR 任务结束后底部仍显示正在识别')
+  }
   await page.evaluate(() => window.load({ quiet: true }))
   await page.waitForTimeout(200)
 
@@ -640,7 +679,7 @@ async function auditAdmin(page, site, fixture, calls, dialogs, failures) {
           '（栅格 left=' + Math.round(collapsed.boardLeft) + '）宽=' + Math.round(collapsed.coursesWidth))
       }
       await page.click('#courses .item[data-act="pick-course"]')
-      // 选一节**有转录稿**的课次：详情面板里的"重新发布/只重写这个模块"只在有产物时出现
+      // 选一节有转录稿与成品状态的课次，详情里的课件、笔记与操作都在这里验
       await page.click('#lessons .item[data-act="pick-lesson"][data-value="replay-audit-1"]')
       await page.waitForTimeout(150)
     }
@@ -812,7 +851,7 @@ async function auditAdmin(page, site, fixture, calls, dialogs, failures) {
   const paneKept = await page.getAttribute('#settingsDetail', 'data-pane').catch(() => null)
   const outOpen = await page.$eval('#outCard', node => node.open)
   if (paneKept !== 'params') failures.push('管理台 · 重绘之后设置分类被重置（当前 ' + paneKept + '）')
-  else if (!outOpen) failures.push('管理台 · 重绘之后「运行输出」被收回')
+  else if (!outOpen) failures.push('管理台 · 重绘之后「运行状态」被收回')
   else console.log('  [设置] 重绘后分类与展开状态都保持 ✓')
 
   const settingFolds = await page.$$eval('#tab-settings details', nodes => nodes.length)
@@ -845,11 +884,11 @@ async function auditAdmin(page, site, fixture, calls, dialogs, failures) {
   for (const row of results) console.log('  [' + row.tab + '] ' + row.act.padEnd(16) + row.toast + (row.argv ? '  →  course ' + row.argv.join(' ') : ''))
   if (dialogs.length) console.log('  确认弹窗 ' + dialogs.length + ' 次：' + dialogs.join(' / '))
 
-  // 关键点：整轮跑要一次处理 5 节（与定时任务一致），单节重跑只推 1 节
-  if (!calls.some(argv => argv[0] === 'cycle' && argv[2] === '5')) failures.push('「跑一轮完整链路」没有按 --max-tasks 5 发出去（与定时任务不一致）')
-  if (!calls.some(argv => argv[0] === 'cycle' && argv[2] === '1')) failures.push('课次行里的「跑一轮」没有按 --max-tasks 1 发出去')
-  if (!calls.some(argv => argv[0] === 'notes' && argv.includes('--revise'))) failures.push('「只重写这个模块」没有走到 notes --revise')
-  if (!calls.some(argv => argv[0] === 'prune' && argv.includes('--apply'))) failures.push('「清理并删除」没有带 --apply')
+  // 动作名称可以简化，底层命令语义不能漂。
+  if (!calls.some(argv => argv[0] === 'cycle' && argv[2] === '5')) failures.push('「处理队列」没有按 --max-tasks 5 发出去')
+  if (!calls.some(argv => argv[0] === 'cycle' && argv[2] === '1')) failures.push('「继续处理」没有按单课次执行')
+  if (!calls.some(argv => argv[0] === 'notes' && argv.includes('--revise'))) failures.push('「重写笔记」没有走到 notes --revise')
+  if (!calls.some(argv => argv[0] === 'prune' && argv.includes('--apply'))) failures.push('「清理原件」没有带 --apply')
 
   // 课件这一块单开一段：拖放/粘贴/取消/删除都要求按顺序来，
   // 塞进"每个按钮点一遍"的循环里会互相拆台（删掉的那份正是后面要用的）
