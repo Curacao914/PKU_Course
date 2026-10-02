@@ -8,8 +8,10 @@ export function safeNoteFileName(value) {
   return String(value || 'note')
     .normalize('NFKC')
     .replace(/[<>:"/\\|?*\u0000-\u001F]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim() || 'note'
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 100) || 'note'
 }
 
 export function normalizedMarkdown(markdown = '') {
