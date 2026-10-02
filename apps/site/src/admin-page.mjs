@@ -1143,17 +1143,17 @@ function paneMeta (key) {
 
 function maintenancePane () {
   return '<h2>维护</h2>' +
-    '<div class="row" style="margin-bottom:14px"><button class="act primary" data-act="cycle-all">跑一轮完整链路</button>' +
-    '<button class="act" data-act="discover">扫描教学网</button></div>' +
-    '<div class="row"><button class="act" data-act="notify">投递通知</button>' +
-    '<button class="act" data-act="doctor">体检</button><button class="act" data-act="backup">备份账本</button>' +
-    '<button class="act" data-act="prune">清理预演</button><button class="act danger" data-act="prune-apply">清理并删除</button></div>'
+    '<div class="row" style="margin-bottom:14px"><button class="act primary" data-act="cycle-all">处理队列</button>' +
+    '<button class="act" data-act="discover">刷新课程</button></div>' +
+    '<div class="row"><button class="act" data-act="notify">发送通知</button>' +
+    '<button class="act" data-act="doctor">系统检查</button><button class="act" data-act="backup">备份</button>' +
+    '<button class="act" data-act="prune">查看可清理项</button><button class="act danger" data-act="prune-apply">清理原件</button></div>'
 }
 
 function deliveriesPane (deliveries, rows, failed) {
   return '<h2>通知记录</h2><p class="small muted">最近 ' + Math.min(10, deliveries.length) + ' 条</p>' +
-    (rows ? '<ul class="notify-list">' + rows + '</ul>' : '<p class="muted small">队列为空</p>') +
-    (failed ? '<div class="row" style="margin-top:10px"><button class="act primary" data-act="notify-retry">把 ' + failed + ' 条失败通知放回队列</button></div>' : '')
+    (rows ? '<ul class="notify-list">' + rows + '</ul>' : '<p class="muted small">暂无通知</p>') +
+    (failed ? '<div class="row" style="margin-top:10px"><button class="act primary" data-act="notify-retry">重试 ' + failed + ' 条失败通知</button></div>' : '')
 }
 
 function renderSettings () {
@@ -1171,11 +1171,11 @@ function renderSettings () {
     } else if (spec.type === 'boolean') {
       var on = value === true || String(value) === 'true'
       var off = value === false || String(value) === 'false'
-      input = '<select data-cfg="' + key + '"><option value=""' + (on || off ? '' : ' selected') + '>跟随环境变量</option>' +
+      input = '<select data-cfg="' + key + '"><option value=""' + (on || off ? '' : ' selected') + '>默认</option>' +
         '<option value="true"' + (on ? ' selected' : '') + '>开启</option>' +
         '<option value="false"' + (off ? ' selected' : '') + '>关闭</option></select>'
     } else {
-      input = '<input data-cfg="' + key + '" type="' + (spec.type === 'number' ? 'number' : 'text') + '" value="' + esc(value) + '" placeholder="跟随环境变量">'
+      input = '<input data-cfg="' + key + '" type="' + (spec.type === 'number' ? 'number' : 'text') + '" value="' + esc(value) + '" placeholder="默认">'
     }
     return '<div class="field"><label>' + esc(spec.label || key) + '</label>' + input + '</div>'
   }).join('')
@@ -1185,13 +1185,20 @@ function renderSettings () {
   // 每条通知一项。用列表而不是表格：表格在窄屏要把四列塞进手机宽度，
   // 结果 course-note、failed、日期这些拉丁串被逐字硬换行（一列竖着的字母）。
   // 列表项在宽屏是四列、窄屏是两行卡片（见 .notify-list 的 ≤720px 规则）。
+  var purposeText = {
+    'course-note': '课程笔记', 'new-lesson': '新课提醒', 'digest': '课程日报',
+    'ppt-reminder': '课件提醒'
+  }
+  var deliveryText = {
+    sent: '已发送', failed: '失败', pending: '排队中', claimed: '发送中'
+  }
   var rows = deliveries.slice(0, 10).map(function (x) {
     var cls = x.status === 'sent' ? 'ok' : x.status === 'failed' ? 'bad' : ''
     var when = String(x.sent_at || x.created_at || '').slice(5, 16).replace('T', ' ')
     var error = String(x.last_error || '').slice(0, 60)
     return '<li class="notify-item">' +
-      '<span class="notify-purpose small">' + esc(x.purpose) + '</span>' +
-      '<span class="notify-status"><span class="pill ' + cls + '">' + esc(x.status) + '</span></span>' +
+      '<span class="notify-purpose small">' + esc(purposeText[x.purpose] || '通知') + '</span>' +
+      '<span class="notify-status"><span class="pill ' + cls + '">' + esc(deliveryText[x.status] || '处理中') + '</span></span>' +
       '<span class="notify-when small muted">' + esc(when) + '</span>' +
       '<span class="notify-error tiny muted">' + esc(error) + '</span>' +
       '</li>'
@@ -1208,8 +1215,7 @@ function renderSettings () {
     : pane === 'deliveries' ? deliveriesPane(deliveries, rows, failed)
       : pane === 'storage' ? '<h2>存储占用</h2><div id="storageBody">' + storageHtml() + '</div>'
         : pane === 'params' ? '<h2>运行参数</h2>' + fields +
-          '<div class="row"><button class="act primary" data-act="save-config">保存设置</button></div>' +
-          '<div class="tiny muted" style="margin-top:8px">' + esc(c.path || '') + '</div>'
+          '<div class="row"><button class="act primary" data-act="save-config">保存设置</button></div>'
           : '<h2>登录密码</h2>' + passwordPanel()
 
   $('tab-settings').innerHTML = '<div class="split">' +
@@ -1245,7 +1251,7 @@ function passwordPanel () {
 function go (tab) { state.tab = tab; render(); window.scrollTo({ top: 0, behavior: 'smooth' }) }
 
 async function doAction (action, extra, btn) {
-  if (state.busy || (state.status && state.status.running)) { toast('服务端已经有任务在跑，等它结束再点', 'error'); return }
+  if (state.busy || (state.status && state.status.running)) { toast('已有任务正在处理，请稍后', 'info'); return }
   var label = LABELS[action] || action
   var restore = busyButton(btn, '处理中…')
   state.busy = true
@@ -1255,12 +1261,12 @@ async function doAction (action, extra, btn) {
   try {
     var res = await fetch('/api/admin/run', { method: 'POST', headers: headers(true), body: JSON.stringify(Object.assign({ action: action }, extra || {})) })
     var data = await res.json().catch(function () { return {} })
-    if (res.status === 409) toast('服务端已有任务在跑（' + (data.action || '别的任务') + '），改为等待它结束', 'info')
+    if (res.status === 409) toast('已有其他任务正在处理，请稍后', 'info')
     var jobId = data.jobId
     if (!jobId) {
       // 老服务端（或参数被拒）没有 jobId：照旧把响应打出来
       out(JSON.stringify(data, null, 2))
-      if (res.status !== 409) toast('没成功：' + label + ' —— ' + (data.message || data.error || ('退出码 ' + data.exitCode)), 'error')
+      if (res.status !== 409) toast('操作未完成：' + (data.message || data.error || label), 'error')
       return
     }
     // 长动作动辄几分钟：拿 jobId 轮询，而不是挂着一个请求等（刷新页面也能接着看）
@@ -1274,9 +1280,9 @@ async function doAction (action, extra, btn) {
       if (attempt % 8 === 7) out('仍在运行：' + label + '（已等 ' + Math.round((attempt + 1) * 1.5) + ' 秒）')
     }
     out(JSON.stringify(snapshot, null, 2))
-    if (snapshot.status === 'done') toast('完成：' + label + '（退出码 ' + snapshot.exitCode + '）', 'ok')
-    else if (snapshot.status === 'running') toast('还在跑：' + label + '（可以离开这个页面，服务端会继续）', 'info')
-    else toast('没成功：' + label + ' —— ' + (snapshot.error || snapshot.message || ('退出码 ' + snapshot.exitCode)), 'error')
+    if (snapshot.status === 'done') toast('已完成：' + label, 'ok')
+    else if (snapshot.status === 'running') toast(label + '仍在后台处理', 'info')
+    else toast('操作未完成：' + (snapshot.error || snapshot.message || label), 'error')
   } catch (error) {
     out('请求失败：' + ((error && error.message) || error))
     toast('连接中断，请稍后重试', 'error')
