@@ -2424,7 +2424,7 @@ async function auditMobileLayout (page, site, noteUrl, failures) {
       const shell = document.querySelector('.index-shell')
       const rail = document.querySelector('.filter-rail')
       const body = document.querySelector('.index-body, .map-body') || (shell ? shell.children[1] : null)
-      const brand = document.querySelector('.topbar[data-layout="site"] .brand')
+      const brand = document.querySelector('.topbar:not(:has(#tools)) .brand')
       const rect = node => {
         if (!node) return null
         const r = node.getBoundingClientRect()
