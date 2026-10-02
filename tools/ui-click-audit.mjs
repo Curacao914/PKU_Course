@@ -2506,13 +2506,20 @@ async function auditMobileLayout (page, site, noteUrl, failures) {
       const r = node.getBoundingClientRect()
       return { top: Math.round(r.top), width: Math.round(r.width) }
     })
-    const ok = document.querySelector('#tab-overview .pill.ok')
+    const probe = document.createElement('span')
+    probe.className = 'pill ok'
+    probe.textContent = '正常'
+    probe.style.position = 'fixed'
+    probe.style.left = '-9999px'
+    document.body.appendChild(probe)
+    const okColor = getComputedStyle(probe).color
+    probe.remove()
     const root = getComputedStyle(document.documentElement)
     return {
       count: rects.length,
       tops: rects.map(r => r.top),
       widths: rects.map(r => r.width),
-      okColor: ok ? getComputedStyle(ok).color : '',
+      okColor,
       okToken: root.getPropertyValue('--ok').trim(),
       accentToken: root.getPropertyValue('--accent').trim()
     }
