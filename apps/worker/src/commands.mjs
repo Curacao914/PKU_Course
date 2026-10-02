@@ -27,6 +27,16 @@ import { cacheUrlsFor, extractNoteMetadata, purgeCloudflareCache } from '@course
 
 import { NOTIFY_POLICY, clearPending, pendingNotifications, planNotification, resolveNotifyPolicy } from './notify-outbox.mjs'
 import { acquirePublishLock, checkRevisionUnchanged, libraryRevision, publishLockPath } from './publish-guard.mjs'
+import {
+  beginSiteRelease,
+  copyReleaseFileIfPresent,
+  discardSiteRelease,
+  inspectSiteRoot,
+  migrateLegacySiteRoot,
+  promoteSiteRelease,
+  sealSiteRelease,
+  validateSiteRelease
+} from './site-releases.mjs'
 
 import { hashPassword, noteCostCny, resolvePricing, validatePassword } from '@course/core'
 
@@ -1694,7 +1704,56 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
   }
 }
 
-async function publish(options) {
+
+  /**
+   * 构建一份完整站点快照并原子切到它。
+   *
+   * 只在 siteRoot 已经是本项目管理的 symlink（或全新不存在）时使用；旧式实体目录继续走
+   * 兼容路径，必须显式 --migrate-site-root 才切换，避免一次普通发布偷偷改部署拓扑。
+   */
+  function publishViaRelease({ siteRoot, records, expectedRevision = '', origin = '', carryEmbeddings = false } = {}) {
+    const transaction = beginSiteRelease({ siteRoot, now: clockNow() })
+    let sealed = ''
+    try {
+      const site = writeSite({
+        records,
+        outputDir: transaction.stagingDir,
+        siteOrigin: origin || 'https://course.law-tech.dev',
+        docs: readPublicDocs()
+      })
+      writeJsonAtomic(path.join(transaction.stagingDir, 'library.json'), records)
+      if (carryEmbeddings && fs.existsSync(siteRoot)) {
+        copyReleaseFileIfPresent({ fromRoot: siteRoot, toRoot: transaction.stagingDir, name: 'embeddings.json' })
+      }
+      const validation = validateSiteRelease(transaction.stagingDir)
+
+      // 最后一次检查必须发生在切换指针之前：读库后有人发布过，就丢掉这份快照重跑，
+      // 不能把别人的新版本整个切回去。
+      const revisionCheck = checkRevisionUnchanged({
+        file: path.join(siteRoot, 'library.json'),
+        expected: expectedRevision
+      })
+      if (!revisionCheck.ok) throw new Error(revisionCheck.message)
+
+      sealed = sealSiteRelease({ siteRoot, stagingDir: transaction.stagingDir, now: clockNow() })
+      const promoted = promoteSiteRelease({ siteRoot, releaseDir: sealed })
+      return {
+        site: { ...site, outputDir: siteRoot, releaseDir: sealed },
+        release: { current: sealed, previous: promoted.previous, validation }
+      }
+    } catch (error) {
+      // seal 之前删 staging；seal 之后但切换失败时删未上线 release。已经成功切换后不会进这里。
+      if (sealed) fs.rmSync(sealed, { recursive: true, force: true })
+      else discardSiteRelease(transaction.stagingDir)
+      throw error
+    }
+  }
+
+  function usesAtomicSiteReleases(siteRoot) {
+    const state = inspectSiteRoot(siteRoot)
+    return state.kind === 'missing' || (state.kind === 'symlink' && state.managed)
+  }
+  async function publish(options) {
     const siteRoot = path.resolve(options.options.out || path.join(config.scratchRoot, 'site'))
     const libraryForRebuild = path.join(siteRoot, 'library.json')
 
