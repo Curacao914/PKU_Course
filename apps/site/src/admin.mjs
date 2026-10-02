@@ -1391,6 +1391,72 @@ export function createAdminHandler({
     }
 
     /**
+     * 内容版本与章级整合。
+     *
+     * 这里只负责“看状态 / 改 manifest”；真正的 release 切换和整合重建仍走 /run → worker CLI，
+     * 这样管理台没有第二套发布实现。
+     */
+    if (pathname === `${ADMIN_PREFIX}content` && req.method === 'GET') {
+      try {
+        sendJson(res, 200, contentAdminReport({ root, scratchRoot }))
+      } catch (error) {
+        sendJson(res, 500, { ok: false, error: 'content_state_failed', message: error instanceof Error ? error.message : String(error) })
+      }
+      return true
+    }
+
+    if (pathname === `${ADMIN_PREFIX}integrations` && (req.method === 'PUT' || req.method === 'POST')) {
+      let payload = {}
+      try {
+        payload = safeJson(await readBody(req)) || {}
+      } catch (error) {
+        sendJson(res, 400, { ok: false, error: 'bad_body', message: error.message })
+        return true
+      }
+      try {
+        const current = readIntegrationManifestState(scratchRoot)
+        const next = upsertIntegrationDefinition(current, payload.definition || payload)
+        const saved = writeIntegrationManifestState(scratchRoot, next)
+        sendJson(res, 200, {
+          ok: true,
+          manifest: saved.manifest,
+          content: contentAdminReport({ root, scratchRoot })
+        })
+      } catch (error) {
+        sendJson(res, 400, { ok: false, error: 'invalid_integration', message: error instanceof Error ? error.message : String(error) })
+      }
+      return true
+    }
+
+    if (pathname === `${ADMIN_PREFIX}integrations` && req.method === 'DELETE') {
+      const id = String(url.searchParams.get('id') || '').trim()
+      if (!id) {
+        sendJson(res, 400, { ok: false, error: 'missing_integration_id' })
+        return true
+      }
+      try {
+        const current = readIntegrationManifestState(scratchRoot)
+        const next = removeIntegrationDefinition(current, id)
+        if (!next.removed) {
+          sendJson(res, 404, { ok: false, error: 'integration_not_found', id })
+          return true
+        }
+        const saved = writeIntegrationManifestState(scratchRoot, next)
+        const removedArtifacts = removeIntegrationArtifacts(scratchRoot, id)
+        sendJson(res, 200, {
+          ok: true,
+          removed: id,
+          removedArtifacts,
+          manifest: saved.manifest,
+          content: contentAdminReport({ root, scratchRoot })
+        })
+      } catch (error) {
+        sendJson(res, 500, { ok: false, error: 'integration_delete_failed', message: error instanceof Error ? error.message : String(error) })
+      }
+      return true
+    }
+
+    /**
      * 课件文字预览。
      *
      * 预览用的是**解析出来的每页文字**，不是把 PPT 渲染成图——几十兆的原件在浏览器里
