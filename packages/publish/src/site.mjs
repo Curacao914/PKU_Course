@@ -38,9 +38,11 @@ export const SITE_CSS = `
   --muted: #787f87;
   --line: #e7e9ec;
   --line-strong: #d5d9dd;
-  --accent: #2f6f61;
-  --accent-ink: #245a4f;
-  --accent-soft: #eef4f2;
+  /* 北京大学视觉识别系统 Web 标准色：北大红 #94070A。品牌色与状态色分开：
+     success 仍用绿色，warning 仍用琥珀色，避免“红色既代表北大又代表错误”。 */
+  --accent: #94070a;
+  --accent-ink: #760507;
+  --accent-soft: #f8ecec;
   --warn: #a8641b;
   --warn-soft: #fdf5e9;
   --danger: #a33a3a;
@@ -91,7 +93,7 @@ export const SITE_CSS = `
   --bg: #14171a; --bg-soft: #1b1f23; --bg-sunken: #22272c;
   --ink: #e8eaed; --ink-soft: #c3c9d0; --muted: #8b939c;
   --line: #2a2f34; --line-strong: #3a4046;
-  --accent: #79b8a8; --accent-ink: #9ccfc2; --accent-soft: #1d2b28;
+  --accent: #e27d82; --accent-ink: #f1a8ac; --accent-soft: #351b1d;
   --warn: #d9a05b; --warn-soft: #2a2318; --danger: #d97b7b; --danger-soft: #2b1c1c; --ok: #6dbb8e;
   --topbar-bg: rgba(20, 23, 26, .88);
   --card-bg: #1b1f23;
@@ -130,6 +132,10 @@ a:hover { color: var(--accent-ink); }
 /* 表格页（首页/索引/地图）用宽版：一行里有课次、关键词、时长、日期，760px 会挤成一团 */
 .wrap.wide { max-width: 1360px; padding: 30px 22px 96px; }
 .wrap.wide .index-shell { grid-template-columns: 164px minmax(0, 1fr); gap: 22px; }
+@media (min-width: 721px) and (max-width: 1100px) {
+  .wrap.wide .index-shell { grid-template-columns: 142px minmax(0, 1fr); gap: 18px; }
+  .lesson-table .lesson-title { width: 160px; min-width: 160px; }
+}
 /* 长文页：左栏目录 + 正文 */
 .shell { display: grid; grid-template-columns: var(--rail-w) minmax(0, 1fr); gap: 56px;
   max-width: 1140px; margin: 0 auto; padding: 36px 24px 112px; }
@@ -305,8 +311,12 @@ article .brief li { margin: 5px 0; }
 .lesson-table th.num, .lesson-table td.num { text-align: right; }
 .lesson-table td { padding: 10px; border-bottom: 1px solid var(--line); vertical-align: baseline; }
 .lesson-table tbody tr:hover { background: var(--bg-soft); }
+.lesson-table .lesson-title { width: 176px; min-width: 176px; }
 .lesson-table .lesson-title a { color: var(--ink); font-size: .97em; }
 .lesson-table .lesson-title a:hover { color: var(--accent-ink); }
+@media (min-width: 721px) {
+  .lesson-table .lesson-title { white-space: nowrap; }
+}
 .lesson-keywords { display: flex; flex-wrap: wrap; gap: 4px 6px; }
 .lesson-table .lesson-keywords { border-bottom: 1px solid var(--line); }
 .kw { display: inline-block; padding: 1px 8px; border-radius: 999px; background: var(--bg-soft);
@@ -345,9 +355,30 @@ article .brief li { margin: 5px 0; }
   .lesson-table th:nth-child(3), .lesson-table th:nth-child(4) { display: none; }
 }
 @media (max-width: 720px) {
-  .index-shell { grid-template-columns: minmax(0, 1fr); gap: 16px; }
-  .filter-rail { position: static; flex-direction: row; flex-wrap: wrap; }
-  .index-body { min-width: 0; }
+  /* .wrap.wide .index-shell 的桌面规则 specificity 更高，必须在移动端用同等 specificity 覆盖。
+     这是首页/概念/法条/知识地图曾被 164px 左栏挤窄的根因。 */
+  .wrap.wide .index-shell, .index-shell { grid-template-columns: minmax(0, 1fr); gap: 14px; }
+  .filter-rail {
+    position: static; min-width: 0; width: 100%;
+    flex-direction: row; flex-wrap: nowrap; gap: 5px;
+    overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none;
+    padding: 0 0 4px;
+  }
+  .filter-rail::-webkit-scrollbar { display: none; }
+  .filter-rail button {
+    flex: none; min-height: 38px; padding: 7px 11px;
+    border: 1px solid var(--line); background: var(--card-bg); white-space: nowrap;
+  }
+  .filter-rail button[aria-pressed="true"] { border-color: color-mix(in srgb, var(--accent) 28%, var(--line)); }
+  .index-body { min-width: 0; width: 100%; }
+  .wrap.wide { padding: 22px 16px 80px; }
+  .hero { margin-bottom: 20px; padding-bottom: 18px; }
+  .hero h1 { font-size: 28px; }
+  .lesson-table .lesson-title { width: 118px; min-width: 118px; }
+  .lesson-table td { padding: 10px 6px; }
+  .lesson-table th { padding-left: 6px; padding-right: 6px; }
+  .lesson-keywords { gap: 4px; }
+  .kw { padding: 1px 7px; }
   .strip { grid-auto-columns: minmax(200px, 76%); }
 }
 kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
@@ -360,7 +391,7 @@ article table { width: 100%; border-collapse: collapse; margin: 20px 0; font-siz
   font-family: var(--sans); line-height: 1.6; }
 article th, article td { border: 1px solid var(--line); padding: 9px 11px; text-align: left; vertical-align: top; }
 article th { background: var(--bg-soft); font-weight: 600; color: var(--ink-soft); }
-article tbody tr:hover { background: #fcfcfd; }
+article tbody tr:hover { background: var(--bg-soft); }
 article ul, article ol { padding-left: 24px; }
 article li { margin: 6px 0; }
 article li.task { list-style: none; margin-left: -20px; }
@@ -555,11 +586,34 @@ details.note-meta pre { background: var(--bg-soft); border-radius: var(--radius)
 /* 窄屏：顶栏那一排本来就挤，收紧间距免得把最右边的设置按钮挤出屏幕；
    下拉自身也要收在视口内（它靠右对齐在按钮下方，一旦按钮出屏下拉就跟着出屏） */
 @media (max-width: 720px) {
-  .topbar .inner { gap: 10px; padding: 0 12px; }
-  /* 站点名挤不下就省略号，不许把顶栏顶出视口（实测 390px 下工具栏 34px×4 会把整页撑到 397） */
-  .topbar .brand { font-size: 15px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .topbar nav, .navmenu, .tools { flex: none; }
-  .topbar nav { gap: 10px; font-size: 12.5px; }
+  /* 阅读页工具栏仍保持单行；首页/索引/搜索则改成“品牌+设置 / 横向导航”两层，
+     不再为了把 5 个入口硬塞进 390px 而把“课程笔记”压成“课…”。 */
+  .reader-topbar .inner { gap: 8px; padding: 0 10px; }
+  .reader-topbar .brand { display: none; }
+  .reader-topbar .spacer { display: none; }
+  .reader-topbar .tools { margin-left: auto; }
+  .site-topbar { height: auto; }
+  .site-topbar .inner {
+    min-height: var(--header-h); height: auto; padding: 7px 14px 6px;
+    display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 4px 10px;
+  }
+  .site-topbar .brand {
+    grid-column: 1; grid-row: 1; align-self: center;
+    font-size: 16px; min-width: 0; overflow: visible; white-space: nowrap;
+  }
+  .site-topbar .spacer { display: none; }
+  .site-topbar nav {
+    grid-column: 1 / -1; grid-row: 2;
+    display: flex; gap: 4px; overflow-x: auto; overscroll-behavior-x: contain;
+    scrollbar-width: none; padding: 2px 0 1px; font-size: 13px;
+  }
+  .site-topbar nav::-webkit-scrollbar { display: none; }
+  .site-topbar nav a {
+    flex: none; padding: 5px 8px; min-height: 32px; display: inline-flex; align-items: center;
+    border-radius: 8px; white-space: nowrap;
+  }
+  .site-topbar .prefmenu { grid-column: 2; grid-row: 1; align-self: center; justify-self: end; }
+  .topbar .navmenu, .topbar .tools { flex: none; }
   .navmenu .nav-pop { max-width: calc(100vw - 24px); }
   .prefmenu .pref-pop { min-width: 0; width: min(170px, calc(100vw - 24px)); }
   /* 手机首屏：大标题与说明各收一档，让"这一段讲什么"尽快出现在第一屏。
@@ -972,7 +1026,7 @@ ${canonical ? `<link rel="canonical" href="${escapeHtml(canonical)}">` : ''}
 ${PREF_SCRIPT}
 </head>
 <body>
-<header class="topbar"><div class="inner">
+<header class="topbar ${topRight ? 'reader-topbar' : 'site-topbar'}"><div class="inner">
   <a class="brand" href="/">课程笔记</a>
   <span class="spacer"></span>
   ${topRight}
