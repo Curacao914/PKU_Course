@@ -12,7 +12,8 @@ test('active artifact scan only sees replay output trees, not experiments or bac
   const experiment = path.join(root, 'experiments', 'replay-1', 'E1')
   const syncBackup = path.join(root, 'source-sync-backups', '2026-10-02', 'replay-1')
   const revisionBackup = path.join(root, 'source-revision-backups', '2026-10-02', 'replay-1')
-  for (const dir of [live, experiment, syncBackup, revisionBackup]) {
+  const nestedExperiment = path.join(root, 'replays', 'replay-1', 'experiments', 'singleshot-v1')
+  for (const dir of [live, experiment, syncBackup, revisionBackup, nestedExperiment]) {
     fs.mkdirSync(dir, { recursive: true })
     fs.writeFileSync(path.join(dir, 'brief.json'), '{}')
   }
