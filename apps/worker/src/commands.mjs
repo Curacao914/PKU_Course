@@ -4089,7 +4089,9 @@ export const USAGE = `用法：course <命令> [选项]
                                            不跑模型、不发通知；--write-back 同时把派生字段写回库）
              --migrate-site-root --yes      一次性把旧实体 site/ 迁成 versioned release + symlink。
                                            生产上先停 public/admin 两个站点进程再执行；
-                                           完成后每次发布均“完整快照校验 → 原子切换”，旧版可回滚
+                                           完成后每次发布均“完整快照校验 → 原子切换”
+             --rollback-site --yes          回到当前 release 之外最新的一份完整内容快照；
+                                           切换前重新校验，切换后定向清理新旧两版涉及的 CDN URL
              --no-notify                   更新站点但这一次不排推送
              --regenerate-derived          简报/一页纸与当前正文对不上时用模型重新生成
                                            （默认：直接中止发布——串课的简报比发布失败更糟；
