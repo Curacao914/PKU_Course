@@ -123,11 +123,11 @@ function readMeta(dir) {
  * 识别进度快照。
  *
  * 识别进程是脱离管理台那个进程跑的（上传请求等不起几分钟），所以"识别到哪一步了"
- * 只能由它自己写下来。文件路径由管理台通过 COURSE_OCR_PROGRESS_FILE 传进来：
- * 命令行直接跑 materials --ocr 时这个变量是空的，磁盘上不会多出任何文件。
+ * 由识别进程自己写回独立进度文件。文件路径由管理台通过 COURSE_OCR_PROGRESS_FILE 传入；
+ * 命令行直接跑 materials --ocr 时这个变量为空，不额外落盘。
  *
- * 粒度是"每份课件"：底层 Python 一次调用做完整份课件的图，中途没有可挂的钩子，
- * 与其报一个假的百分比，不如老实说"这份正在做、之前几份做完了"。
+ * Python 识别器会在每张待识别图片完成后原子更新 completed / pending，因此管理台可以按
+ * 图片粒度显示真实进度；旧版进度文件仍由读取侧兼容。
  */
 function ocrProgressOf(file) {
   return String(file || process.env.COURSE_OCR_PROGRESS_FILE || '')
@@ -238,7 +238,7 @@ export async function ocrMaterial({
     const skipped = { at: at.toISOString(), engine: '', attempted: 0, pending: entry.ocrPending || 0, skipped: '原件已删除，无法补识别' }
     meta.materials[index] = { ...entry, ocr: skipped }
     meta.updatedAt = at.toISOString()
-    writeOcrProgress(progress, { name, status: 'skipped', images, pending: Number(entry.ocrPending || 0), reason: skipped.skipped, at: at.toISOString() })
+    writeOcrProgress(progress, { name, status: 'skipped', images: targetImages, completed: 0, pending: targetImages, reason: skipped.skipped, at: at.toISOString() })
     fs.writeFileSync(metaPath, `${JSON.stringify(meta, null, 2)}\n`)
     return { entry: meta.materials[index], skipped: true, reason: skipped.skipped }
   }
@@ -257,7 +257,7 @@ export async function ocrMaterial({
     })
   } catch (error) {
     writeOcrProgress(progress, {
-      name, status: 'failed', images, pending: Number(entry.ocrPending || 0),
+      name, status: 'failed', images: targetImages, completed: 0, pending: targetImages,
       error: error instanceof Error ? error.message : String(error), at: new Date().toISOString()
     })
     throw error
