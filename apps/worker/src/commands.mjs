@@ -1139,10 +1139,15 @@ export function createCommands(context) {
     }
     walk(path.resolve(config.scratchRoot), 0)
     // 期望值用**规范化**指纹（与发布时的 checkBriefBinding / verifyDerived 同一套）
+    const manifestFile = path.join(config.scratchRoot, 'integration-manifest.json')
+    const configuredIntegrations = fs.existsSync(manifestFile)
+      ? readIntegrationManifest(manifestFile).integrations
+      : []
     const artifacts = scanArtifactInventory({
       dirs,
       records,
       integrationDir: path.join(config.scratchRoot, 'integrations'),
+      configuredIntegrations,
       checksumOf: record => markdownChecksum(record.markdown || '')
     })
 
@@ -1287,7 +1292,17 @@ export function createCommands(context) {
     walk(path.resolve(config.scratchRoot), 0)
 
     const integrationDir = path.resolve(options.options['integrations'] || path.join(config.scratchRoot, 'integrations'))
-    const inventory = scanArtifactInventory({ dirs, records, integrationDir, checksumOf: record => markdownChecksum(record.markdown || '') })
+    const manifestFile = integrationManifestPath(options)
+    const configuredIntegrations = fs.existsSync(manifestFile)
+      ? readIntegrationManifest(manifestFile).integrations
+      : []
+    const inventory = scanArtifactInventory({
+      dirs,
+      records,
+      integrationDir,
+      configuredIntegrations,
+      checksumOf: record => markdownChecksum(record.markdown || '')
+    })
     const report = formatInventory(inventory)
     stderr(report)
     emit({
@@ -1296,6 +1311,7 @@ export function createCommands(context) {
       total: inventory.total,
       counts: inventory.counts,
       stale: inventory.items.filter(item => item.status === 'stale').map(item => ({ kind: item.kind, courseName: item.courseName, lessonTitle: item.lessonTitle, staleLessons: item.staleLessons || [] })),
+      missing: inventory.items.filter(item => item.status === 'missing').map(item => ({ kind: item.kind, integrationId: item.integrationId, courseName: item.courseName, lessonTitle: item.lessonTitle })),
       orphan: inventory.items.filter(item => item.status === 'orphan').map(item => ({ kind: item.kind, lessonTitle: item.lessonTitle }))
     }, options)
     return 0
