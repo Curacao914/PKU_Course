@@ -7,6 +7,12 @@ import path from 'node:path'
 import { clearPassword, asrCostCny, noteCostCny, readPasswordRecord, resolvePricing, validatePassword, verifyPassword, writePassword } from '@course/core'
 import { WECHAT_SESSION_MAX_AGE_MINUTES, wechatSessionState } from '@course/notify'
 import { addMaterial, listMaterials, materialDir, readDecks, unassignedDir } from '@course/materials'
+import {
+  emptyIntegrationManifest,
+  normalizeIntegrationManifest,
+  removeIntegrationDefinition,
+  upsertIntegrationDefinition
+} from '@course/notes'
 
 import { ADMIN_HTML } from './admin-page.mjs'
 import { readSiteIndex } from '@course/publish'
@@ -36,6 +42,7 @@ const DEFAULT_RUN_TIMEOUT_MS = 15 * 60 * 1000
 export const ALLOWED_ACTIONS = new Set([
   'doctor', 'discover', 'cycle', 'notify', 'notify-retry', 'download', 'transcribe', 'notes', 'publish', 'status',
   'retry', 'revise', 'republish', 'prune', 'backup', 'balance',
+  'rollback-content', 'rebuild-content', 'rebuild-integration', 'rebuild-integrations',
   'ocr-material'
 ])
 
@@ -358,6 +365,14 @@ export function buildActionArgs(action, payload = {}, workerPath = '') {
     }
     case 'notify-retry':
       return [...base, 'notify', '--retry-failed']
+    case 'rollback-content':
+      return [...base, 'publish', '--rollback-site', '--yes']
+    case 'rebuild-content':
+      return [...base, 'publish', '--rebuild']
+    case 'rebuild-integration':
+      return [...base, 'integrate', '--configured', '--id', need('id')]
+    case 'rebuild-integrations':
+      return [...base, 'integrate', '--configured']
     // 图片版课件（整页是图、扫描件）抽不出文字时，用这条把图上的字识别出来补进课件。
     // 走的是与定时任务同一条 CLI：界面上能点，命令行里也一定能跑。
     case 'ocr-material':
@@ -479,6 +494,151 @@ function directorySize(target, depth = 0) {
     total += directorySize(path.join(target, entry.name), depth + 1)
   }
   return total
+}
+
+function integrationManifestPath(scratchRoot) {
+  return path.join(scratchRoot, 'integration-manifest.json')
+}
+
+export function readIntegrationManifestState(scratchRoot) {
+  const file = integrationManifestPath(scratchRoot)
+  if (!fs.existsSync(file)) return emptyIntegrationManifest()
+  try {
+    return normalizeIntegrationManifest(JSON.parse(fs.readFileSync(file, 'utf8')))
+  } catch (error) {
+    throw new Error(`整合清单损坏：${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+function writePrivateJsonAtomic(file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  const temp = `${file}.tmp-${process.pid}-${randomUUID()}`
+  try {
+    fs.writeFileSync(temp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
+    fs.renameSync(temp, file)
+    fs.chmodSync(file, 0o600)
+  } finally {
+    try { fs.rmSync(temp, { force: true }) } catch {}
+  }
+}
+
+export function writeIntegrationManifestState(scratchRoot, manifest) {
+  const normalized = normalizeIntegrationManifest(manifest)
+  const file = integrationManifestPath(scratchRoot)
+  writePrivateJsonAtomic(file, normalized)
+  return { file, manifest: normalized }
+}
+
+function readJsonSafe(file, fallback = null) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')) } catch { return fallback }
+}
+
+/**
+ * 内容 release 只在这里读状态；真正的切换/回滚仍然只能经过 worker CLI。
+ * 管理台因此没有第二套“偷偷改 symlink”的实现。
+ */
+export function contentReleaseReport(root) {
+  const live = path.resolve(root)
+  const releasesRoot = `${live}.releases`
+  let mode = 'missing'
+  let current = ''
+  try {
+    const stat = fs.lstatSync(live)
+    if (stat.isSymbolicLink()) {
+      mode = 'atomic'
+      current = path.basename(fs.realpathSync(live))
+    } else if (stat.isDirectory()) {
+      mode = 'legacy'
+      current = path.basename(live)
+    } else {
+      mode = 'other'
+    }
+  } catch {}
+
+  const releases = []
+  if (fs.existsSync(releasesRoot)) {
+    for (const entry of fs.readdirSync(releasesRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory() || entry.name.startsWith('.staging-')) continue
+      const dir = path.join(releasesRoot, entry.name)
+      let modifiedAt = null
+      try { modifiedAt = fs.statSync(dir).mtime.toISOString() } catch {}
+      const library = readJsonSafe(path.join(dir, 'library.json'), [])
+      releases.push({
+        name: entry.name,
+        current: entry.name === current,
+        legacy: entry.name.startsWith('legacy-'),
+        modifiedAt,
+        notes: Array.isArray(library) ? library.length : null
+      })
+    }
+  }
+  releases.sort((a, b) => String(b.modifiedAt || '').localeCompare(String(a.modifiedAt || '')))
+  return {
+    mode,
+    current,
+    releases,
+    canRollback: mode === 'atomic' && releases.some(item => !item.current)
+  }
+}
+
+function integrationArtifacts(scratchRoot) {
+  const dir = path.join(scratchRoot, 'integrations')
+  const found = new Map()
+  if (!fs.existsSync(dir)) return found
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith('.json')) continue
+    const file = path.join(dir, entry.name)
+    const plan = readJsonSafe(file, null)
+    if (!plan || typeof plan !== 'object') continue
+    const id = String(plan.integrationId || `${plan.course || ''}::${plan.topic || ''}`).trim()
+    if (id) found.set(id, { file, plan })
+  }
+  return found
+}
+
+function integrationReport({ root, scratchRoot, manifest }) {
+  const library = readJsonSafe(path.join(root, 'library.json'), [])
+  const currentBySlug = new Map((Array.isArray(library) ? library : []).map(record => [String(record.slug || ''), record]))
+  const artifacts = integrationArtifacts(scratchRoot)
+  return manifest.integrations.map(definition => {
+    const artifact = artifacts.get(definition.id)
+    if (!artifact) return { ...definition, status: 'missing', generatedAt: null, staleLessons: [] }
+    const staleLessons = (artifact.plan.lessons || []).filter(lesson => {
+      const currentRecord = currentBySlug.get(String(lesson.slug || ''))
+      return !currentRecord || String(currentRecord.checksum || '') !== String(lesson.checksum || '')
+    }).map(lesson => String(lesson.lessonTitle || lesson.slug || ''))
+    return {
+      ...definition,
+      status: staleLessons.length ? 'stale' : 'fresh',
+      generatedAt: artifact.plan.generatedAt || null,
+      staleLessons
+    }
+  })
+}
+
+export function contentAdminReport({ root, scratchRoot }) {
+  const manifest = readIntegrationManifestState(scratchRoot)
+  return {
+    ok: true,
+    release: contentReleaseReport(root),
+    integrations: {
+      path: integrationManifestPath(scratchRoot),
+      items: integrationReport({ root, scratchRoot, manifest })
+    }
+  }
+}
+
+function removeIntegrationArtifacts(scratchRoot, id) {
+  const artifacts = integrationArtifacts(scratchRoot)
+  const hit = artifacts.get(String(id || '').trim())
+  if (!hit) return []
+  const removed = []
+  for (const file of [hit.file, hit.file.replace(/\.json$/i, '.md')]) {
+    if (!fs.existsSync(file)) continue
+    fs.rmSync(file, { force: true })
+    removed.push(path.basename(file))
+  }
+  return removed
 }
 
 export function storageReport(scratchRoot) {
