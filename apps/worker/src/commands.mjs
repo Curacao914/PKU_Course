@@ -29,6 +29,12 @@ import {
   upsertIntegrationDefinition
 } from '@course/notes'
 import { collectExceptions, formatExceptions } from './reconcile.mjs'
+import {
+  formatSourceRevisions,
+  inspectSourceRevision,
+  scanSourceRevisions,
+  sourceRevisionPaths
+} from './source-revisions.mjs'
 import { cacheUrlsFor, extractNoteMetadata, purgeCloudflareCache } from '@course/publish'
 
 import { NOTIFY_POLICY, clearPending, pendingNotifications, planNotification, resolveNotifyPolicy } from './notify-outbox.mjs'
@@ -1150,11 +1156,15 @@ export function createCommands(context) {
       configuredIntegrations,
       checksumOf: record => markdownChecksum(record.markdown || '')
     })
+    const sourceRevisions = scanSourceRevisions({
+      scratchRoot: config.scratchRoot,
+      records
+    })
 
     let missingMaterials = []
     try { missingMaterials = collectMissingMaterials({ courses: [], limit: 20 }) || [] } catch { missingMaterials = [] }
 
-    const report = collectExceptions({ stuckTasks, failedDeliveries, stuckDeliveries, artifacts, missingMaterials })
+    const report = collectExceptions({ stuckTasks, failedDeliveries, stuckDeliveries, artifacts, sourceRevisions, missingMaterials })
     const text = formatExceptions(report)
     // 安静：没有异常就什么都不说（连"一切正常"都不说——那种话只会训练人不看）
     if (text) stderr(text)
@@ -1179,6 +1189,20 @@ export function createCommands(context) {
       quiet: report.quiet,
       counts: report.counts,
       exceptions: report.exceptions,
+      sourceRevisions: {
+        counts: sourceRevisions.counts,
+        problems: sourceRevisions.items
+          .filter(item => !['fresh', 'untracked'].includes(item.status))
+          .map(item => ({
+            status: item.status,
+            replayKey: item.replayKey,
+            courseName: item.courseName,
+            lessonTitle: item.lessonTitle,
+            sourceMatchesState: item.sourceMatchesState,
+            sourceMatchesPublished: item.sourceMatchesPublished,
+            stateMatchesPublished: item.stateMatchesPublished
+          }))
+      },
       notified: delivery ? delivery.inserted : false
     }, options)
     return report.blocking ? 1 : 0
