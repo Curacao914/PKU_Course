@@ -33,6 +33,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+import threading
 from xml.etree import ElementTree as ET
 
 A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
@@ -135,6 +136,64 @@ def slide_media_paths(archive, slide_name):
 
 # ── 识别：只把"要用的那几张"送去 API ──────────────────────────────────────
 
+_PROGRESS_LOCK = threading.Lock()
+
+
+def report_image_progress_step():
+    """把“又完成一张图”写回管理台的进度文件。
+
+    管理台为每个后台 OCR 任务分配独立 progress.json；这里与 Node 端约定只更新当前
+    material 对应 record 的 completed / pending。写入用同目录临时文件 + os.replace，
+    页面轮询时永远只会读到完整 JSON。
+    """
+    progress_file = os.environ.get("COURSE_OCR_PROGRESS_FILE", "").strip()
+    name = os.environ.get("COURSE_OCR_PROGRESS_NAME", "").strip()
+    try:
+        total = max(0, int(os.environ.get("COURSE_OCR_PROGRESS_TOTAL", "0") or 0))
+    except ValueError:
+        total = 0
+    if not progress_file or not name or total <= 0:
+        return
+    with _PROGRESS_LOCK:
+        try:
+            with open(progress_file, encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, ValueError):
+            payload = {"records": []}
+        records = payload.get("records")
+        if not isinstance(records, list):
+            records = []
+            payload["records"] = records
+        record = None
+        for item in reversed(records):
+            if isinstance(item, dict) and item.get("name") == name and item.get("status") == "running":
+                record = item
+                break
+        if record is None:
+            record = {"name": name, "status": "running", "images": total, "completed": 0, "pending": total}
+            records.append(record)
+        completed = min(total, max(0, int(record.get("completed") or 0)) + 1)
+        record.update({
+            "status": "running",
+            "images": total,
+            "completed": completed,
+            "pending": max(0, total - completed),
+        })
+        directory = os.path.dirname(progress_file) or "."
+        os.makedirs(directory, exist_ok=True)
+        temp = "%s.py-%s.tmp" % (progress_file, os.getpid())
+        try:
+            with open(temp, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+            os.replace(temp, progress_file)
+        finally:
+            try:
+                if os.path.exists(temp):
+                    os.remove(temp)
+            except OSError:
+                pass
+
 def needs_token(ocr_paddle):
     if ocr_paddle is None:
         return "没有 ocr_paddle 模块"
@@ -157,8 +216,13 @@ def ocr_zip_images(ocr_paddle, archive, entries, wanted, options, prefix="slide"
             handle.write(archive.read(name))
         files.append(target)
     try:
-        outcome = ocr_paddle.ocr_images(files, os.environ["PADDLEOCR_ACCESS_TOKEN"].strip(),
-                                        concurrency=options.ocr_concurrency, timeout=options.ocr_timeout)
+        outcome = ocr_paddle.ocr_images(
+            files,
+            os.environ["PADDLEOCR_ACCESS_TOKEN"].strip(),
+            concurrency=options.ocr_concurrency,
+            timeout=options.ocr_timeout,
+            on_progress=report_image_progress_step,
+        )
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
     texts = {}
