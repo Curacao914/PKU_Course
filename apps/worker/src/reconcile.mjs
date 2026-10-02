@@ -74,6 +74,17 @@ export function collectExceptions ({
     })
   }
 
+  const missingArtifacts = artifacts?.items?.filter(item => item.status === 'missing') || []
+  if (missingArtifacts.length) {
+    exceptions.push({
+      level: 'warning',
+      code: 'artifact-missing',
+      count: missingArtifacts.length,
+      message: `${missingArtifacts.length} 件长期配置的派生产物缺失`,
+      detail: missingArtifacts.slice(0, 5).map(item => `${item.integrationId || item.kind} ${item.courseName}·${item.lessonTitle}`).join('；')
+    })
+  }
+
   if (missingMaterials.length) {
     exceptions.push({
       level: 'blocking',

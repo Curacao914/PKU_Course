@@ -1839,6 +1839,10 @@ test('备份：快照写完立刻验证、记 sha256 清单；配了异地就必
   const siteDir = path.join(dir, 'site')
   fs.mkdirSync(siteDir, { recursive: true })
   fs.writeFileSync(path.join(siteDir, 'library.json'), JSON.stringify([{ slug: 'notes/刑法分论/第1讲', markdown: '# 第1讲' }]))
+  fs.writeFileSync(path.join(dir, 'integration-manifest.json'), JSON.stringify({
+    version: 1,
+    integrations: [{ id: '刑法::总论', course: '刑法', topic: '总论', lessons: ['第1讲'], enabled: true }]
+  }))
   const offsite = path.join(dir, 'offsite')
   fs.mkdirSync(offsite, { recursive: true })
 
@@ -1860,8 +1864,11 @@ test('备份：快照写完立刻验证、记 sha256 清单；配了异地就必
   assert.match(ledgerEntry.detail, /integrity=ok/, 'detail 里要写明 integrity 结果')
   assert.match(ledgerEntry.sha256, /^[0-9a-f]{64}$/, '清单里要有 sha256')
   assert.equal(payload.written.find(entry => entry.kind === 'library').verified, true)
+  const chapterEntry = payload.written.find(entry => entry.kind === 'integration-manifest')
+  assert.equal(chapterEntry.verified, true, '章级整合范围是长期人工决定，必须随备份保存并验证')
+  assert.match(chapterEntry.detail, /1 个长期整合定义/)
   assert.equal(payload.offsite.failed.length, 0)
-  assert.ok(payload.offsite.copied.length >= 3, '账本、发布库、清单都要送到异地')
+  assert.ok(payload.offsite.copied.length >= 4, '账本、发布库、章级整合清单、备份清单都要送到异地')
 
   // 异地目录里真的有这些文件，而不是只报告成功
   const copiedNames = fs.readdirSync(offsite).sort()
@@ -1869,7 +1876,8 @@ test('备份：快照写完立刻验证、记 sha256 清单；配了异地就必
   assert.ok(copiedNames.some(name => name.startsWith('manifest-')), '清单也要在异地出现')
   const manifestName = copiedNames.find(name => name.startsWith('manifest-'))
   const manifest = JSON.parse(fs.readFileSync(path.join(offsite, manifestName), 'utf8'))
-  assert.equal(manifest.files.length, 2)
+  assert.equal(manifest.files.length, 3)
+  assert.ok(manifest.files.some(entry => entry.kind === 'integration-manifest'))
 
   // 异地命令失败：不吞掉，退出码非 0，并给出失败明细
   lines.length = 0

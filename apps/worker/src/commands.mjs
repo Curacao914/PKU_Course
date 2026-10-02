@@ -22,11 +22,29 @@ import {
 } from '@course/notes'
 
 import { formatInventory, scanArtifactInventory } from './artifact-inventory.mjs'
+import {
+  emptyIntegrationManifest,
+  normalizeIntegrationManifest,
+  selectConfiguredIntegrations,
+  upsertIntegrationDefinition
+} from './integration-manifest.mjs'
 import { collectExceptions, formatExceptions } from './reconcile.mjs'
 import { cacheUrlsFor, extractNoteMetadata, purgeCloudflareCache } from '@course/publish'
 
 import { NOTIFY_POLICY, clearPending, pendingNotifications, planNotification, resolveNotifyPolicy } from './notify-outbox.mjs'
 import { acquirePublishLock, checkRevisionUnchanged, libraryRevision, publishLockPath } from './publish-guard.mjs'
+import {
+  beginSiteRelease,
+  copyReleaseFileIfPresent,
+  discardSiteRelease,
+  inspectSiteRoot,
+  listReleaseFiles,
+  migrateLegacySiteRoot,
+  previousSiteRelease,
+  promoteSiteRelease,
+  sealSiteRelease,
+  validateSiteRelease
+} from './site-releases.mjs'
 
 import { hashPassword, noteCostCny, resolvePricing, validatePassword } from '@course/core'
 
@@ -1121,10 +1139,15 @@ export function createCommands(context) {
     }
     walk(path.resolve(config.scratchRoot), 0)
     // 期望值用**规范化**指纹（与发布时的 checkBriefBinding / verifyDerived 同一套）
+    const manifestFile = path.join(config.scratchRoot, 'integration-manifest.json')
+    const configuredIntegrations = fs.existsSync(manifestFile)
+      ? readIntegrationManifest(manifestFile).integrations
+      : []
     const artifacts = scanArtifactInventory({
       dirs,
       records,
       integrationDir: path.join(config.scratchRoot, 'integrations'),
+      configuredIntegrations,
       checksumOf: record => markdownChecksum(record.markdown || '')
     })
 
@@ -1161,6 +1184,83 @@ export function createCommands(context) {
     return report.blocking ? 1 : 0
   }
 
+  function integrationManifestPath(options = {}) {
+    return path.resolve(options.options?.manifest || path.join(config.scratchRoot, 'integration-manifest.json'))
+  }
+
+  function readIntegrationManifest(file) {
+    if (!fs.existsSync(file)) return emptyIntegrationManifest()
+    let raw
+    try {
+      raw = JSON.parse(fs.readFileSync(file, 'utf8'))
+    } catch (error) {
+      throw new Error(`整合清单不是合法 JSON：${file}（${error instanceof Error ? error.message : String(error)}）`)
+    }
+    return normalizeIntegrationManifest(raw)
+  }
+
+  function writeIntegrationPlan(plan, outputDir) {
+    fs.mkdirSync(outputDir, { recursive: true })
+    const base = `${slugify(plan.course, 'course')}-${slugify(plan.topic, 'topic')}`
+    const markdownFile = path.join(outputDir, `${base}.md`)
+    const planFile = path.join(outputDir, `${base}.json`)
+    writeJsonAtomic(planFile, plan)
+    fs.writeFileSync(markdownFile, renderIntegrationMarkdown(plan))
+    const problems = plan.findings || []
+    const errors = problems.filter(item => item.level === 'error')
+    return { markdownFile, planFile, problems, errors }
+  }
+
+  function buildConfiguredIntegration({ records, definition, outputDir }) {
+    const plan = {
+      ...buildIntegrationPlan({
+        records,
+        course: definition.course,
+        lessons: definition.lessons,
+        topic: definition.topic,
+        generatedAt: clockNow().toISOString()
+      }),
+      integrationId: definition.id
+    }
+    const written = writeIntegrationPlan(plan, outputDir)
+    return {
+      id: definition.id,
+      course: plan.course,
+      topic: plan.topic,
+      lessons: plan.lessons.map(item => item.lessonTitle),
+      sourceProblems: written.problems.length,
+      errors: written.errors.length,
+      markdownFile: written.markdownFile,
+      planFile: written.planFile
+    }
+  }
+
+  /**
+   * 正文变化以后，只重建“明确包含这一课次”的已配置整合。
+   * 这是纯规则抽取，不调模型、不花钱；失败不回滚已经正确发布的单课正文，
+   * 而是把错误返回给发布结果，reconcile / artifacts 仍会把旧整合标 stale。
+   */
+  function refreshConfiguredIntegrations({ records, course, lessonTitle } = {}) {
+    const manifestFile = path.join(config.scratchRoot, 'integration-manifest.json')
+    if (!fs.existsSync(manifestFile)) return { manifestFile, configured: false, matched: 0, refreshed: [], errors: [] }
+    const manifest = readIntegrationManifest(manifestFile)
+    const definitions = selectConfiguredIntegrations(manifest, { course, lesson: lessonTitle })
+    const outputDir = path.join(config.scratchRoot, 'integrations')
+    const refreshed = []
+    const errors = []
+    for (const definition of definitions) {
+      try {
+        refreshed.push(buildConfiguredIntegration({ records, definition, outputDir }))
+      } catch (error) {
+        errors.push({
+          id: definition.id,
+          message: error instanceof Error ? error.message : String(error)
+        })
+      }
+    }
+    return { manifestFile, configured: true, matched: definitions.length, refreshed, errors }
+  }
+
   /**
    * 工件依赖失效记录（Phase 5.2 C1）。
    *
@@ -1192,7 +1292,17 @@ export function createCommands(context) {
     walk(path.resolve(config.scratchRoot), 0)
 
     const integrationDir = path.resolve(options.options['integrations'] || path.join(config.scratchRoot, 'integrations'))
-    const inventory = scanArtifactInventory({ dirs, records, integrationDir, checksumOf: record => markdownChecksum(record.markdown || '') })
+    const manifestFile = integrationManifestPath(options)
+    const configuredIntegrations = fs.existsSync(manifestFile)
+      ? readIntegrationManifest(manifestFile).integrations
+      : []
+    const inventory = scanArtifactInventory({
+      dirs,
+      records,
+      integrationDir,
+      configuredIntegrations,
+      checksumOf: record => markdownChecksum(record.markdown || '')
+    })
     const report = formatInventory(inventory)
     stderr(report)
     emit({
@@ -1201,6 +1311,7 @@ export function createCommands(context) {
       total: inventory.total,
       counts: inventory.counts,
       stale: inventory.items.filter(item => item.status === 'stale').map(item => ({ kind: item.kind, courseName: item.courseName, lessonTitle: item.lessonTitle, staleLessons: item.staleLessons || [] })),
+      missing: inventory.items.filter(item => item.status === 'missing').map(item => ({ kind: item.kind, integrationId: item.integrationId, courseName: item.courseName, lessonTitle: item.lessonTitle })),
       orphan: inventory.items.filter(item => item.status === 'orphan').map(item => ({ kind: item.kind, lessonTitle: item.lessonTitle }))
     }, options)
     return 0
@@ -1218,10 +1329,57 @@ export function createCommands(context) {
     const libraryFile = path.resolve(options.options.library || path.join(siteRoot, 'library.json'))
     if (!fs.existsSync(libraryFile)) throw new Error(`找不到发布库 ${libraryFile}（先 course publish，或用 --library 指一份）`)
     const records = JSON.parse(fs.readFileSync(libraryFile, 'utf8'))
-    const course = requireOption(options.options, 'course', 'integrate')
-    const lessons = String(options.options.lessons || '').split(',').map(item => item.trim()).filter(Boolean)
+    const outputDir = path.resolve(options.options['out-dir'] || path.join(config.scratchRoot, 'integrations'))
+    const manifestFile = integrationManifestPath(options)
+
     if (options.flags?.has('live')) {
       throw new Error('--live 还没接：章级整合目前只做确定性抽取（结构 + 出处）；让模型补写正文需要单独评审与预算，见 docs/14')
+    }
+
+    /**
+     * --configured：按持久化清单重建。
+     * 可以 --id 精确跑一个，也可以不给 id 全部重建；范围来自 manifest，不重新猜课次。
+     */
+    if (options.flags?.has('configured')) {
+      const manifest = readIntegrationManifest(manifestFile)
+      const definitions = selectConfiguredIntegrations(manifest, {
+        id: options.options.id || '',
+        course: options.options.course || ''
+      })
+      if (!definitions.length) {
+        throw new Error(
+          options.options.id
+            ? `整合清单里找不到启用的 id=${options.options.id}`
+            : `整合清单没有匹配项：${manifestFile}`
+        )
+      }
+      const results = []
+      let errors = 0
+      for (const definition of definitions) {
+        try {
+          const result = buildConfiguredIntegration({ records, definition, outputDir })
+          results.push(result)
+          errors += result.errors
+        } catch (error) {
+          errors += 1
+          results.push({ id: definition.id, course: definition.course, topic: definition.topic, error: error instanceof Error ? error.message : String(error) })
+        }
+      }
+      emit({
+        configured: true,
+        manifestFile,
+        outputDir,
+        count: results.length,
+        errors,
+        results
+      }, options)
+      return errors ? 1 : 0
+    }
+
+    const course = requireOption(options.options, 'course', 'integrate')
+    const lessons = String(options.options.lessons || '').split(',').map(item => item.trim()).filter(Boolean)
+    if (options.flags?.has('save') && !String(options.options.topic || '').trim()) {
+      throw new Error('把整合写入长期清单时必须显式给 --topic：主题名是这组课次的稳定身份，不能用默认占位文字')
     }
     const plan = buildIntegrationPlan({
       records,
@@ -1230,17 +1388,27 @@ export function createCommands(context) {
       topic: options.options.topic || '',
       generatedAt: clockNow().toISOString()
     })
-    const outputDir = path.resolve(options.options['out-dir'] || path.join(config.scratchRoot, 'integrations'))
-    fs.mkdirSync(outputDir, { recursive: true })
-    const base = `${slugify(plan.course, 'course')}-${slugify(plan.topic, 'topic')}`
-    const markdownFile = path.join(outputDir, `${base}.md`)
-    const planFile = path.join(outputDir, `${base}.json`)
-    writeJsonAtomic(planFile, plan)
-    fs.writeFileSync(markdownFile, renderIntegrationMarkdown(plan))
+    if (options.flags?.has('save')) {
+      plan.integrationId = String(options.options.id || `${plan.course}::${plan.topic}`).trim()
+    }
+    const written = writeIntegrationPlan(plan, outputDir)
 
-    const problems = plan.findings || []
-    const errors = problems.filter(item => item.level === 'error')
-    if (errors.length) stderr(`出处检查：${errors.length} 行没有出处（应当为 0）——${errors[0].message}`)
+    let saved = null
+    if (options.flags?.has('save')) {
+      const manifest = readIntegrationManifest(manifestFile)
+      const next = upsertIntegrationDefinition(manifest, {
+        id: options.options.id || '',
+        course: plan.course,
+        topic: plan.topic,
+        // 永远保存本次实际解析到的明确课次，不保存“整门课”这种会随时间变宽的范围。
+        lessons: plan.lessons.map(item => item.lessonTitle),
+        enabled: true
+      })
+      writeJsonAtomic(manifestFile, next)
+      saved = next.integrations.find(item => item.id === (options.options.id || `${plan.course}::${plan.topic}`)) || null
+    }
+
+    if (written.errors.length) stderr(`出处检查：${written.errors.length} 行没有出处（应当为 0）——${written.errors[0].message}`)
     emit({
       course: plan.course,
       topic: plan.topic,
@@ -1248,11 +1416,12 @@ export function createCommands(context) {
       concepts: { total: plan.concepts.length, crossLesson: plan.concepts.filter(item => item.rows.length >= 2).length },
       issues: plan.issues.length,
       openMarkers: plan.openMarkers.length,
-      sourceProblems: problems.length,
-      markdownFile,
-      planFile
+      sourceProblems: written.problems.length,
+      markdownFile: written.markdownFile,
+      planFile: written.planFile,
+      manifest: saved ? { file: manifestFile, id: saved.id, lessons: saved.lessons } : null
     }, options)
-    return errors.length ? 1 : 0
+    return written.errors.length ? 1 : 0
   }
 
   /**
@@ -1694,9 +1863,128 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
   }
 }
 
-async function publish(options) {
+
+  /**
+   * 构建一份完整站点快照并原子切到它。
+   *
+   * 只在 siteRoot 已经是本项目管理的 symlink（或全新不存在）时使用；旧式实体目录继续走
+   * 兼容路径，必须显式 --migrate-site-root 才切换，避免一次普通发布偷偷改部署拓扑。
+   */
+  function publishViaRelease({ siteRoot, records, expectedRevision = '', origin = '', carryEmbeddings = false } = {}) {
+    const transaction = beginSiteRelease({ siteRoot, now: clockNow() })
+    let sealed = ''
+    try {
+      const site = writeSite({
+        records,
+        outputDir: transaction.stagingDir,
+        siteOrigin: origin || 'https://course.law-tech.dev',
+        docs: readPublicDocs()
+      })
+      writeJsonAtomic(path.join(transaction.stagingDir, 'library.json'), records)
+      if (carryEmbeddings && fs.existsSync(siteRoot)) {
+        copyReleaseFileIfPresent({ fromRoot: siteRoot, toRoot: transaction.stagingDir, name: 'embeddings.json' })
+      }
+      const validation = validateSiteRelease(transaction.stagingDir)
+
+      // 最后一次检查必须发生在切换指针之前：读库后有人发布过，就丢掉这份快照重跑，
+      // 不能把别人的新版本整个切回去。
+      const revisionCheck = checkRevisionUnchanged({
+        file: path.join(siteRoot, 'library.json'),
+        expected: expectedRevision
+      })
+      if (!revisionCheck.ok) throw new Error(revisionCheck.message)
+
+      sealed = sealSiteRelease({ siteRoot, stagingDir: transaction.stagingDir, now: clockNow() })
+      const promoted = promoteSiteRelease({ siteRoot, releaseDir: sealed })
+      return {
+        site: { ...site, outputDir: siteRoot, releaseDir: sealed },
+        release: { current: sealed, previous: promoted.previous, validation }
+      }
+    } catch (error) {
+      // seal 之前删 staging；seal 之后但切换失败时删未上线 release。已经成功切换后不会进这里。
+      if (sealed) fs.rmSync(sealed, { recursive: true, force: true })
+      else discardSiteRelease(transaction.stagingDir)
+      throw error
+    }
+  }
+
+  function usesAtomicSiteReleases(siteRoot) {
+    const state = inspectSiteRoot(siteRoot)
+    return state.kind === 'missing' || (state.kind === 'symlink' && state.managed)
+  }
+  async function publish(options) {
     const siteRoot = path.resolve(options.options.out || path.join(config.scratchRoot, 'site'))
     const libraryForRebuild = path.join(siteRoot, 'library.json')
+
+    /**
+     * 一次性迁移旧部署：实体 site/ → site.releases/legacy-*，site 本身改成 symlink。
+     * 这一步有一个无法规避的“目录改成链接”瞬间，所以不允许普通 publish 偷偷做；
+     * 生产上先停 public/admin 两个站点进程，再显式 --yes。
+     */
+    if (options.flags?.has('rollback-site')) {
+      if (!options.flags?.has('yes')) {
+        throw new Error('--rollback-site 会切换正式内容版本；确认后加 --yes')
+      }
+      const lock = acquirePublishLock({
+        lockPath: publishLockPath(siteRoot),
+        info: { kind: 'rollback-site' },
+        warnings: line => stderr(line)
+      })
+      if (!lock.ok) throw new Error(lock.message)
+      try {
+        const current = inspectSiteRoot(siteRoot)
+        const previous = previousSiteRelease(siteRoot)
+        if (!previous) throw new Error('没有可回滚的上一份内容 release')
+        const validation = validateSiteRelease(previous.dir)
+        const files = [...new Set([
+          ...(current.target ? listReleaseFiles(current.target) : []),
+          ...listReleaseFiles(previous.dir)
+        ])]
+        const switched = promoteSiteRelease({ siteRoot, releaseDir: previous.dir })
+        const purge = await purgeCache(options, { reason: `内容回滚到 ${previous.name}`, files })
+        emit({
+          rolledBack: true,
+          siteRoot,
+          from: switched.previous,
+          to: switched.releaseDir,
+          validatedNotes: validation.notes,
+          cachePurged: purge.ok === true,
+          cache: purge
+        }, options)
+        return 0
+      } finally {
+        lock.release()
+      }
+    }
+
+    if (options.flags?.has('migrate-site-root')) {
+      if (!options.flags?.has('yes')) {
+        throw new Error(
+          '--migrate-site-root 会改变站点目录拓扑；请先停 course-site/course-admin 两个服务，确认后加 --yes'
+        )
+      }
+      const lock = acquirePublishLock({
+        lockPath: publishLockPath(siteRoot),
+        info: { kind: 'migrate-site-root' },
+        warnings: line => stderr(line)
+      })
+      if (!lock.ok) throw new Error(lock.message)
+      try {
+        const result = migrateLegacySiteRoot({ siteRoot, now: clockNow() })
+        emit({
+          migrated: result.migrated,
+          alreadyManaged: result.alreadyManaged,
+          siteRoot: result.live,
+          releaseDir: result.releaseDir,
+          next: result.migrated
+            ? '迁移完成；现在可重新启动 course-site/course-admin。此后的 publish 会先构建完整快照、校验，再原子切换。'
+            : '已经是 release 模式，无需重复迁移。'
+        }, options)
+        return 0
+      } finally {
+        lock.release()
+      }
+    }
 
     /**
      * 发布互斥（见 publish-guard.mjs 的说明）：两个发布同时跑会互相覆盖——
@@ -1743,30 +2031,49 @@ async function publish(options) {
       if (!fs.existsSync(libraryForRebuild)) throw new Error(`找不到发布库 ${libraryForRebuild}；先发布过至少一篇笔记再 --rebuild`)
       const revisionBefore = libraryRevision(libraryForRebuild)
       const library = JSON.parse(fs.readFileSync(libraryForRebuild, 'utf8'))
-      const site = writeSite({
-        records: library,
-        outputDir: siteRoot,
-        siteOrigin: options.options.origin || 'https://course.law-tech.dev',
-        docs: readPublicDocs()
-      })
-      /**
-       * --write-back：把 refreshRecord 算出来的派生字段写回发布库。
-       *
-       * 为什么需要：站点页面每次重建都会重算这些字段（A3 之后包括**全量小节索引**——
-       * 每节的 id/标题/字数/内容指纹），但发布库本身还是旧的，而检索、MCP、公开索引读的
-       * 都是发布库。不写回的话，"老笔记也有小节索引"永远不会发生。
-       * 两道保险照旧：写前版本检查（读入后被改过就中止）+ 留一份 .bak。
-       */
-      if (options.flags?.has('write-back')) {
-        const refreshed = library.map(refreshRecord)
-        const check = checkRevisionUnchanged({ file: libraryForRebuild, expected: revisionBefore.revision })
-        if (!check.ok) throw new Error(check.message)
-        const backup = `${libraryForRebuild}.bak-${new Date().toISOString().replace(/[:.]/g, '-')}`
-        fs.copyFileSync(libraryForRebuild, backup)
-        writeJsonAtomic(libraryForRebuild, refreshed)
-        const withSections = refreshed.filter(item => (item.sections || []).length).length
-        stderr(`发布库已写回派生字段：${refreshed.length} 条（其中 ${withSections} 条带小节索引）；写前备份 ${path.basename(backup)}`)
+      const writeBack = options.flags?.has('write-back')
+      const recordsForLibrary = writeBack ? library.map(refreshRecord) : library
+      const atomic = usesAtomicSiteReleases(siteRoot)
+      let site
+      let release = null
+
+      if (atomic) {
+        const outcome = publishViaRelease({
+          siteRoot,
+          records: recordsForLibrary,
+          expectedRevision: revisionBefore.revision,
+          origin: options.options.origin || 'https://course.law-tech.dev',
+          // rebuild 不改正文；已有向量仍然与原正文指纹绑定，可以安全带入新 release。
+          carryEmbeddings: true
+        })
+        site = outcome.site
+        release = outcome.release
+        if (writeBack) {
+          const withSections = recordsForLibrary.filter(item => (item.sections || []).length).length
+          stderr(
+            `发布库已随新 release 写回派生字段：${recordsForLibrary.length} 条（其中 ${withSections} 条带小节索引）；` +
+            `旧 release 保留作回滚：${release.previous || '（首次发布，无旧版）'}`
+          )
+        }
+      } else {
+        // 兼容旧部署：在显式迁移之前维持原来的“直接写实体 site 目录”行为。
+        site = writeSite({
+          records: library,
+          outputDir: siteRoot,
+          siteOrigin: options.options.origin || 'https://course.law-tech.dev',
+          docs: readPublicDocs()
+        })
+        if (writeBack) {
+          const check = checkRevisionUnchanged({ file: libraryForRebuild, expected: revisionBefore.revision })
+          if (!check.ok) throw new Error(check.message)
+          const backup = `${libraryForRebuild}.bak-${new Date().toISOString().replace(/[:.]/g, '-')}`
+          fs.copyFileSync(libraryForRebuild, backup)
+          writeJsonAtomic(libraryForRebuild, recordsForLibrary)
+          const withSections = recordsForLibrary.filter(item => (item.sections || []).length).length
+          stderr(`发布库已写回派生字段：${recordsForLibrary.length} 条（其中 ${withSections} 条带小节索引）；写前备份 ${path.basename(backup)}`)
+        }
       }
+
       const index = readSiteIndex(siteRoot)
       const purge = await purgeCache(options, { reason: '重建站点', files: site.written || [] })
       emit({
@@ -1774,6 +2081,8 @@ async function publish(options) {
         notes: index.count ?? library.length,
         siteRoot,
         pages: (site.written || []).length,
+        atomicRelease: Boolean(release),
+        release: release ? { current: release.current, previous: release.previous, validatedNotes: release.validation.notes } : null,
         cachePurged: purge.ok === true,
         cache: purge
       }, options)
@@ -2025,30 +2334,57 @@ async function publish(options) {
         ...(planned ? { notifyPending: planned } : (carriedPending ? { notifyPending: carriedPending } : {}))
       }
     ]
-    fs.mkdirSync(siteRoot, { recursive: true })
+    let site
+    let release = null
+    const atomic = usesAtomicSiteReleases(siteRoot)
 
-    /**
-     * 先把页面写出去，**最后**才写发布库。
-     *
-     * 顺序是有讲究的：发布库是"提交点"——/api/notes、MCP、站内搜索都读它。
-     * 如果先写库再写页面，中间那几百毫秒里读者会拿到一条指向尚未生成的页面的记录
-     * （点进去 404、搜索命中却打不开）。反过来先写页面，万一写到一半崩了，
-     * 库还是旧的：站点内容与库始终自洽，重跑一次 publish 即可补齐。
-     */
-    const site = writeSite({
-      records: nextLibrary,
-      outputDir: siteRoot,
-      siteOrigin: options.options.origin || 'https://course.law-tech.dev',
-      docs: readPublicDocs()
-    })
-    // 页面写完才动发布库（提交点，见上面的说明）：tmp + fsync + rename 原子替换。
-    // 提交前做一次乐观版本检查：读库到现在被改过就中止——重跑一次是幂等的，
-    // 覆盖别人的改动却是不可恢复的（整条记录消失）。
-    const revisionCheck = checkRevisionUnchanged({ file: libraryForRebuild, expected: revisionBefore.revision })
-    if (!revisionCheck.ok) throw new Error(revisionCheck.message)
-    writeJsonAtomic(libraryForRebuild, nextLibrary)
+    if (atomic) {
+      /**
+       * release 模式：页面、Markdown、公开索引与 library.json 全部先写到新目录，
+       * 校验通过以后一次切换 site symlink。旧版目录完整保留，可一键切回。
+       *
+       * embedding 按“小节 fingerprint”逐条绑定：旧索引可以整体带到新 release，
+       * 检索层会自动跳过正文已经变化的那几条，未变化小节继续可用；
+       * 下一次 course embed 也能复用旧向量，只为变化部分付费。
+       */
+      const outcome = publishViaRelease({
+        siteRoot,
+        records: nextLibrary,
+        expectedRevision: revisionBefore.revision,
+        origin: options.options.origin || 'https://course.law-tech.dev',
+        carryEmbeddings: true
+      })
+      site = outcome.site
+      release = outcome.release
+    } else {
+      /**
+       * 旧部署兼容路径：在用户显式执行 --migrate-site-root 之前完全维持原行为。
+       * 这里仍是“页面先写、library 最后提交”，至少保证公开索引不会先于页面出现。
+       */
+      fs.mkdirSync(siteRoot, { recursive: true })
+      site = writeSite({
+        records: nextLibrary,
+        outputDir: siteRoot,
+        siteOrigin: options.options.origin || 'https://course.law-tech.dev',
+        docs: readPublicDocs()
+      })
+      const revisionCheck = checkRevisionUnchanged({ file: libraryForRebuild, expected: revisionBefore.revision })
+      if (!revisionCheck.ok) throw new Error(revisionCheck.message)
+      writeJsonAtomic(libraryForRebuild, nextLibrary)
+    }
+
     const index = readSiteIndex(siteRoot)
     const purge = purgeCache(options, { reason: `发布 ${record.slug}`, files: site.written || [] })
+    const integrationRefresh = changed
+      ? refreshConfiguredIntegrations({ records: nextLibrary, course: record.courseName, lessonTitle: record.lessonTitle })
+      : { configured: fs.existsSync(path.join(config.scratchRoot, 'integration-manifest.json')), matched: 0, refreshed: [], errors: [] }
+    if (integrationRefresh.errors?.length) {
+      stderr(
+        `单课正文已发布，但有 ${integrationRefresh.errors.length} 份章级整合自动重建失败：` +
+        integrationRefresh.errors.map(item => `${item.id}（${item.message}）`).join('；') +
+        '。旧整合仍会被 artifacts/reconcile 标为 stale，不会伪装成新版本。'
+      )
+    }
 
     // 同一条内容只通知一次（去重键带内容指纹：改好之后重发要能再推一次）
     let delivery = null
@@ -2101,6 +2437,23 @@ async function publish(options) {
         notes: index.count,
         siteDir: site.outputDir,
         written: site.written,
+        atomicRelease: Boolean(release),
+        release: release ? {
+          current: release.current,
+          previous: release.previous,
+          validatedNotes: release.validation.notes
+        } : null,
+        semanticIndex: release
+          ? (fs.existsSync(path.join(siteRoot, 'embeddings.json'))
+              ? (changed ? 'carried_with_fingerprint_guard' : 'carried')
+              : 'absent')
+          : 'legacy_site',
+        integrationRefresh: {
+          configured: Boolean(integrationRefresh.configured),
+          matched: integrationRefresh.matched || 0,
+          refreshed: (integrationRefresh.refreshed || []).map(item => item.id),
+          errors: integrationRefresh.errors || []
+        },
         // 时间语义：lessonDate 是这节课的日期（排序与展示），firstPublishedAt 进 RSS，
         // updatedAt 供日报判断"昨天更新了什么"；lessonDateSource 说明日期是哪来的。
         lessonDate: record.lessonDate,
@@ -3100,6 +3453,15 @@ async function publish(options) {
           results.push({ file: entry.file, ok: check.ok, detail: check.ok ? `能解析：${check.detail}` : check.detail })
           continue
         }
+        if (entry.kind === 'integration-manifest') {
+          try {
+            const parsed = normalizeIntegrationManifest(JSON.parse(fs.readFileSync(file, 'utf8')))
+            results.push({ file: entry.file, ok: true, detail: `能解析：${parsed.integrations.length} 个长期整合定义` })
+          } catch (error) {
+            results.push({ file: entry.file, ok: false, detail: error instanceof Error ? error.message : String(error) })
+          }
+          continue
+        }
         results.push({ file: entry.file, ok: true, detail: 'sha256 一致' })
       }
       const failed = results.filter(item => !item.ok)
@@ -3148,12 +3510,30 @@ async function publish(options) {
       written.push(describe(target, { kind: 'library', verified: check.ok, detail: check.detail }))
     }
 
-    // 3) 清单：有了它，日后任意时刻都能回答这份备份还是不是好的
+    // 3) 章级整合清单：它是“哪些课属于哪一章”的长期人工决定，不能靠正文重新猜。
+    // 整合正文可以由 library 确定性重建；manifest 丢了则范围定义本身丢失，所以必须随账本一起备份。
+    const integrationManifestSource = path.join(config.scratchRoot, 'integration-manifest.json')
+    if (fs.existsSync(integrationManifestSource)) {
+      const target = path.join(dir, `integration-manifest-${stamp}.json`)
+      fs.copyFileSync(integrationManifestSource, target)
+      let verified = false
+      let detail = ''
+      try {
+        const parsed = normalizeIntegrationManifest(JSON.parse(fs.readFileSync(target, 'utf8')))
+        verified = true
+        detail = `${parsed.integrations.length} 个长期整合定义`
+      } catch (error) {
+        detail = error instanceof Error ? error.message : String(error)
+      }
+      written.push(describe(target, { kind: 'integration-manifest', verified, detail }))
+    }
+
+    // 4) 清单：有了它，日后任意时刻都能回答这份备份还是不是好的
     const manifestPath = path.join(dir, `manifest-${stamp}.json`)
     const manifest = { generatedAt: new Date().toISOString(), host: os.hostname(), files: written }
     fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
 
-    // 4) 异地：没配就明说（本地备份不叫备份），配了就必须成功
+    // 5) 异地：没配就明说（本地备份不叫备份），配了就必须成功
     const offsiteTemplate = String(env.COURSE_BACKUP_OFFSITE || '').trim()
     const offsite = { configured: Boolean(offsiteTemplate), command: offsiteTemplate, copied: [], failed: [] }
     if (offsiteTemplate) {
@@ -3164,12 +3544,12 @@ async function publish(options) {
       }
     }
 
-    // 5) 本地轮转：只留最近 keep 份（按文件名里的时间戳排序即按时间排序）
+    // 6) 本地轮转：只留最近 keep 份（按文件名里的时间戳排序即按时间排序）
     const all = fs.readdirSync(dir)
-      .filter(name => /^(ledger|library|manifest)-/.test(name))
+      .filter(name => /^(ledger|library|integration-manifest|manifest)-/.test(name))
       .sort()
     const removed = []
-    const stamps = [...new Set(all.map(name => name.replace(/^(ledger|library|manifest)-/, '').replace(/\.(sqlite|json)$/, '')))].sort()
+    const stamps = [...new Set(all.map(name => name.replace(/^(integration-manifest|ledger|library|manifest)-/, '').replace(/\.(sqlite|json)$/, '')))].sort()
     for (const old of stamps.slice(0, Math.max(0, stamps.length - keep))) {
       for (const name of all.filter(item => item.includes(old))) {
         fs.rmSync(path.join(dir, name), { force: true })
@@ -3735,11 +4115,14 @@ export const USAGE = `用法：course <命令> [选项]
                                            新鲜 / 失效 / 未绑定 / 孤立。只报告，不自动重做
   integrate  --course <名称> [--lessons <课次,课次>] [--topic <主题>]
              [--library <library.json>] [--out-dir <目录>]
-                                           章级整合（跨课次的概念对照 / 反复出现的问题 / 论证推进 /
-                                           待核继承），只做确定性抽取，每一行都带出处；不花钱、不发通知
-             [--replay-key <键>]
-                                           只重跑一页纸摘要：把一节笔记压进一张 A4（复习只看这一页）
-                                           产物带 sourceChecksum（所依据正文的 SHA-256），发布时校验
+             [--save [--id <稳定ID>] [--manifest <清单.json>]]
+                                           章级整合：确定性抽取跨课次概念 / 问题线 / 论证推进 / 待核继承；
+                                           每一行都带出处，不花钱、不发通知。
+                                           --save 把“本次实际解析到的明确课次”写入长期清单；
+                                           必须显式给 --topic，后续不会因同课程新增课次而自动扩张范围
+             --configured [--id <稳定ID>] [--course <名称>] [--manifest <清单.json>]
+                                           按长期清单重建整合；不给 --id 时重建所有启用项。
+                                           普通 publish 修改正文后，也会免费重建包含该课次的配置项
   sourcemap  [--course <名称>] [--lesson <课次>] [--site-root <站点目录>] [--library <library.json>]
              [--write] [--show] [--model --max-cost-cny <元>]
                                            给已发布的一页纸补来源映射（只补映射，正文一个字不动）。
@@ -3753,8 +4136,13 @@ export const USAGE = `用法：course <命令> [选项]
                                            产物带 sourceChecksum（所依据正文的 SHA-256），发布时校验
   publish    --from <笔记目录> [--course <名称>] [--lesson <课次>] [--out <站点目录>] [--origin <域名>] [--no-purge]
              [--replay-key <键>] [--lesson-date <YYYY-MM-DD>]
-             --rebuild                     只按发布库重写站点（换模板/改样式后重建，
-                                           不跑模型、不发通知）
+             --rebuild [--write-back]      只按发布库重写站点（换模板/改样式后重建，
+                                           不跑模型、不发通知；--write-back 同时把派生字段写回库）
+             --migrate-site-root --yes      一次性把旧实体 site/ 迁成 versioned release + symlink。
+                                           生产上先停 public/admin 两个站点进程再执行；
+                                           完成后每次发布均“完整快照校验 → 原子切换”
+             --rollback-site --yes          回到当前 release 之外最新的一份完整内容快照；
+                                           切换前重新校验，切换后定向清理新旧两版涉及的 CDN URL
              --no-notify                   更新站点但这一次不排推送
              --regenerate-derived          简报/一页纸与当前正文对不上时用模型重新生成
                                            （默认：直接中止发布——串课的简报比发布失败更糟；
