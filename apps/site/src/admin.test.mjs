@@ -603,7 +603,7 @@ async function waitJob (handler, jobId, tries = 50) {
   throw new Error('job 一直没有结束：' + jobId)
 }
 
-test('最近任务：四态如实给出，并写明这是进程内快照（重启就没了）', async () => {
+test('最近任务：状态保留，但实现边界不塞进前端', async () => {
   const { handler } = fixture()
   const before = await call(handler, { url: '/api/admin/status' })
   assert.deepEqual(before.body.recentJobs, [], '这一版服务还没跑过命令时，最近任务是空的')
@@ -620,25 +620,41 @@ test('最近任务：四态如实给出，并写明这是进程内快照（重�
   assert.equal(job.status, 'done')
   assert.equal(job.exitCode, 0)
   assert.equal(job.action, 'doctor')
-  assert.ok(job.finishedAt, '完成时间要给出，页面上要显示"什么时候跑的"')
+  assert.ok(job.finishedAt, '完成时间要给出，页面上要显示什么时候跑的')
 
-  // 界面侧：状态用词与账本一致，且旁边就写着"重启会丢"的边界
-  assert.match(ADMIN_HTML, /var JOB_STATUS_TEXT = \{ queued: '排队', running: '运行中', done: '完成', failed: '失败' \}/)
-  assert.match(ADMIN_HTML, /进程内快照，服务重启后这里就空了/)
-  assert.match(ADMIN_HTML, /已确认的课程阶段在账本里/)
+  assert.match(ADMIN_HTML, /<span class="ttl">运行状态<\/span>/)
+  assert.match(ADMIN_HTML, /\.run-console\{max-height:320px;overflow:auto/)
+  assert.match(ADMIN_HTML, /id="recentJobs"/)
+  assert.doesNotMatch(ADMIN_HTML, /进程内快照，服务重启后这里就空了/)
+  assert.doesNotMatch(ADMIN_HTML, /已确认的课程阶段在账本里/)
 })
 
-test('管理台不假装能生成整合材料：标"规划中"，并写清已有原型的真实范围', () => {
-  assert.doesNotMatch(ADMIN_HTML, /整合材料生成还没做/, '不能留着"点了才报错"的按钮')
-  assert.match(ADMIN_HTML, /<span class="meta">规划中<\/span>/)
-  assert.match(ADMIN_HTML, /以上几类尚未实现，先如实标出来，不提供会报错的按钮。/)
-  assert.match(ADMIN_HTML, /已有原型（控制台未接线）/)
-  assert.match(ADMIN_HTML, /只做确定性抽取，不调用模型、不推送。这一页还没接上它。/)
-  // 动作名字写清代价：会不会调用模型、会不会推微信、可不可逆
-  assert.match(ADMIN_HTML, /republish: '重新发布页面（用现有笔记，不调用模型）'/)
-  assert.match(ADMIN_HTML, /revise: '用模型重写这个模块（调用模型，产生费用）'/)
-  assert.match(ADMIN_HTML, /notify: '投递通知（会发微信）'/)
-  assert.match(ADMIN_HTML, /'prune-apply': '清理并删除原件（不可逆）'/)
+test('管理台只呈现产品概念，不把原型和实现说明端给用户', () => {
+  assert.match(ADMIN_HTML, /站点版本/)
+  assert.match(ADMIN_HTML, /长期章节/)
+  assert.match(ADMIN_HTML, />处理队列</)
+  assert.match(ADMIN_HTML, />刷新课程</)
+  assert.match(ADMIN_HTML, />发送通知</)
+  assert.match(ADMIN_HTML, />系统检查</)
+  assert.match(ADMIN_HTML, />查看可清理项</)
+  assert.match(ADMIN_HTML, />清理原件</)
+  assert.match(ADMIN_HTML, /'course-note': '课程笔记'/)
+  assert.match(ADMIN_HTML, /sent: '已发送'/)
+
+  assert.doesNotMatch(ADMIN_HTML, /<span class="meta">规划中<\/span>/)
+  assert.doesNotMatch(ADMIN_HTML, /已有原型（控制台未接线）/)
+  assert.doesNotMatch(ADMIN_HTML, /命令行可用/)
+  assert.doesNotMatch(ADMIN_HTML, /章节范围由你确认一次/)
+  assert.doesNotMatch(ADMIN_HTML, /还没有长期章节定义/)
+  assert.doesNotMatch(ADMIN_HTML, /从当前阶段继续跑到发布/)
+  assert.doesNotMatch(ADMIN_HTML, /清掉失败状态与退避时间/)
+  assert.doesNotMatch(ADMIN_HTML, /原子重建站点/)
+  assert.doesNotMatch(ADMIN_HTML, />跑一轮完整链路</)
+  assert.doesNotMatch(ADMIN_HTML, />投递通知</)
+  assert.doesNotMatch(ADMIN_HTML, />备份账本</)
+  assert.doesNotMatch(ADMIN_HTML, />清理预演</)
+  assert.doesNotMatch(ADMIN_HTML, /跟随环境变量/)
+  assert.doesNotMatch(ADMIN_HTML, /esc\(c\.path \|\| ''\)/, '配置文件路径不应直接出现在设置正文里')
 })
 
 test('run 立刻返回 jobId，结果由 job 接口查（不再挂着一个请求等几分钟）', async () => {
@@ -985,8 +1001,7 @@ test('each console action produces a CLI command that really exists', async () =
     ['cycle', { replayKey: 'replay-1', maxTasks: 1 },
       ['cycle', '--max-tasks', '1', '--replay-key', 'replay-1', '--require-materials', '0']],
     ['cycle', { maxTasks: 5 }, ['cycle', '--max-tasks', '5']],
-    ['republish', { transcriptPath: '/tmp/replay-1/output/transcript.txt', course: '刑法分论', lesson: '第10-12节', replayKey: 'replay-1' },
-      ['publish', '--from', '/tmp/replay-1/output', '--course', '刑法分论', '--lesson', '第10-12节', '--replay-key', 'replay-1']]
+    ['refresh-note', { replayKey: 'replay-1' }, ['refresh-note', '--replay-key', 'replay-1']]
   ]
   const flags = new Set()
   for (const [action, payload, expected] of cases) {
@@ -1136,7 +1151,7 @@ test('the console shows how far background OCR has got', async () => {
   const progressPath = path.join(scratchRoot, 'ocr', 'job.progress.json')
   fs.mkdirSync(path.dirname(progressPath), { recursive: true })
   fs.writeFileSync(progressPath, JSON.stringify({
-    records: [{ name: '图片版课件.pptx', status: 'running', images: 4, pending: 2 }]
+    records: [{ name: '图片版课件.pptx', status: 'running', images: 4, completed: 1, pending: 3 }]
   }))
   const job = {
     course: '刑法分论', lesson: '第10-12节', pid: process.pid,
@@ -1152,9 +1167,14 @@ test('the console shows how far background OCR has got', async () => {
   const task = running.body.ledger.tasks[0]
   assert.equal(task.ocrRunning, true)
   assert.deepEqual(task.ocr, {
-    running: true, total: 4, done: 2, percent: 50,
-    current: '图片版课件.pptx', currentImages: 4, materials: 1, startedAt: job.startedAt
+    running: true, total: 4, done: 1, percent: 25,
+    current: '图片版课件.pptx', currentImages: 4, currentDone: 1, materials: 1, startedAt: job.startedAt
   })
+  assert.deepEqual(running.body.ocrJobs, [{
+    courseName: '刑法分论', lesson: '第10-12节',
+    running: true, total: 4, done: 1, percent: 25,
+    current: '图片版课件.pptx', currentImages: 4, currentDone: 1, materials: 1, startedAt: job.startedAt
+  }], '切到别的课程以后，底部运行面板仍要能看到这份 OCR 的进度')
 
   // 进程没了就不该再报"正在识别"：死条目顺手清掉，免得进度条永远停在那
   fs.writeFileSync(ocrStatePath, JSON.stringify([{ ...job, pid: 1_073_741_824 }]))
@@ -1180,31 +1200,40 @@ test('a long deck can be read past the first screen', async () => {
   assert.equal(more.body.hasMore, false)
 })
 
-test('the courseware panel takes files by drag, paste, cancel and delete', async () => {
+test('课件区与课次操作保持简洁，技术说明不回到前端', async () => {
   assert.match(ADMIN_HTML, /class="dropzone"/, '课件区要有虚线拖放区')
+  assert.match(ADMIN_HTML, /拖到这里、点按选择，或粘贴文件/, '虚线框本身就是上传入口')
   assert.match(ADMIN_HTML, /data-drop="/, '拖放区要知道自己属于哪节课')
   assert.match(ADMIN_HTML, /addEventListener\('paste'/, '页面级粘贴要认剪贴板里的文件')
   assert.match(ADMIN_HTML, /act === 'cancel-upload'/, '上传要能取消')
   assert.match(ADMIN_HTML, /act === 'delete-material'/, '已上传的课件要能删')
-  assert.match(ADMIN_HTML, /method: 'DELETE'/, '删除走 DELETE（同样过 admin 令牌鉴权）')
+  assert.match(ADMIN_HTML, /method: 'DELETE'/, '删除走 DELETE')
   assert.match(ADMIN_HTML, /data-act="load-more"/, '预览要能继续加载')
   assert.match(ADMIN_HTML, /当前显示到第/, '要说清当前显示到第几页')
-  assert.match(ADMIN_HTML, /已识别 ' \+ Number\(ocr\.done/, '识别进度要有 done/total')
-  assert.ok(!/正在后台识别图片文字/.test(ADMIN_HTML), '识别状态换成进度条，不再只是一句话')
+  assert.match(ADMIN_HTML, /图片识别 ' \+ Number\(info\.done/, '课次详情只低调显示 OCR done/total')
+  assert.match(ADMIN_HTML, /id="ocrJobs"/, '跨课程 OCR 进度集中在运行状态里')
+  assert.ok(!/>上传课件</.test(ADMIN_HTML), '不再重复放一个上传课件按钮')
+  assert.ok(!/重新识别图片文字/.test(ADMIN_HTML), 'OCR 恢复动作缩成次级“补识别”')
+  assert.match(ADMIN_HTML, /补识别/)
 
-  // 卡在哪、为什么：阶段说人话、错误给原文、退避时间写出来
-  assert.match(ADMIN_HTML, /discovered: '刚发现未下载'/)
-  assert.match(ADMIN_HTML, /downloaded: '已下载待转写'/)
-  assert.match(ADMIN_HTML, /transcript_ready: '已转写待写笔记'/)
-  assert.match(ADMIN_HTML, /needs_attention: '连续失败已停'/)
+  assert.match(ADMIN_HTML, /discovered: '排队中'/)
+  assert.match(ADMIN_HTML, /downloaded: '待转写'/)
+  assert.match(ADMIN_HTML, /transcript_ready: '待写笔记'/)
+  assert.match(ADMIN_HTML, /needs_attention: '需处理'/)
   assert.match(ADMIN_HTML, /class="errbox"><pre>' \+ esc\(String\(task\.lastError\)\)/, 'last_error 要给原文，不截断')
-  assert.match(ADMIN_HTML, /下次重试 /)
-  assert.match(ADMIN_HTML, /立即跑这一节/); assert.match(ADMIN_HTML, /从当前阶段继续跑到发布/)
-  assert.match(ADMIN_HTML, /清除失败、重新排队/); assert.match(ADMIN_HTML, /清掉失败状态与退避时间/)
+  assert.match(ADMIN_HTML, />重试</)
+  assert.match(ADMIN_HTML, />继续处理</)
+  assert.match(ADMIN_HTML, />更新笔记</)
+  assert.match(ADMIN_HTML, />查看笔记</)
+  assert.doesNotMatch(ADMIN_HTML, /立即跑这一节|清除失败、重新排队|从当前阶段继续跑到发布|清掉失败状态与退避时间/)
 
-  // 设置改成与课程区一致的分栏：没有折叠块，分类是 button 且带 aria-current
+  // 已发布笔记只留“更新笔记 + 查看笔记”；重新发布不再作为独立用户动作。
+  assert.doesNotMatch(ADMIN_HTML, /data-act="republish"/)
+  assert.match(ADMIN_HTML, /<a class="act"[^>]+>查看笔记<\/a>/)
+
+  // 设置改成与课程区一致的分栏：没有折叠块，分类是 button 且带 aria-current。
   assert.match(ADMIN_HTML, /data-act="pick-pane"/)
   assert.match(ADMIN_HTML, /aria-current/)
-  assert.ok(!/settings:/.test(ADMIN_HTML), '设置区的折叠键（settings:*）已经删干净，不再有向下展开')
+  assert.ok(!/settings:/.test(ADMIN_HTML), '设置区的折叠键已经删干净')
 })
 

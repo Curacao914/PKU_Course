@@ -79,16 +79,31 @@ h2{font-size:19px;letter-spacing:-.015em;margin:0 0 10px}
 .todo .t span{color:var(--ink-3);font-size:13.5px}
 .empty-ok{display:flex;align-items:center;gap:10px;color:var(--ok);font-size:15px}
 
-button.act{font:inherit;font-size:14px;padding:7px 14px;border-radius:980px;border:1px solid var(--line-2);
-  background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;gap:6px}
-button.act:hover{border-color:var(--ink-3)}
-button.act[disabled]{opacity:.5;cursor:progress}
-button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
-button.primary:hover{background:var(--accent-ink);border-color:var(--accent-ink);color:#fff}
-button.quiet{border-color:transparent;background:var(--sunken);color:var(--ink-2)}
-button.icon{padding:6px;border-radius:8px;border-color:transparent;background:transparent;color:var(--ink-2)}
-button.icon:hover{background:var(--sunken);color:var(--ink)}
-button.danger{border-color:#eccac7;color:var(--danger)}
+.act{font:inherit;font-size:14px;padding:7px 14px;border-radius:980px;border:1px solid var(--line-2);
+  background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;gap:6px;
+  text-decoration:none;line-height:1.45}
+.act:hover{border-color:var(--ink-3);color:var(--ink)}
+.act[disabled],.act[aria-disabled=true]{opacity:.5;cursor:default}
+.act.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.act.primary:hover{background:var(--accent-ink);border-color:var(--accent-ink);color:#fff}
+.act.quiet{border-color:transparent;background:var(--sunken);color:var(--ink-2)}
+.act.icon{padding:6px;border-radius:8px;border-color:transparent;background:transparent;color:var(--ink-2)}
+.act.icon:hover{background:var(--sunken);color:var(--ink)}
+.act.danger{border-color:#eccac7;color:var(--danger)}
+.metric-button{border:0;background:transparent;color:inherit;text-align:left;padding:4px 6px;border-radius:10px;cursor:pointer;min-width:0}
+.metric-button:hover{background:var(--sunken)}
+.metric-button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.view-filter{display:flex;align-items:center;gap:6px;padding:4px 12px 8px}
+.run-console{max-height:320px;overflow:auto;overscroll-behavior:contain;padding:4px 2px 2px}
+.run-section{padding:8px 0;border-bottom:1px solid var(--line)}
+.run-section:last-child{border-bottom:0}
+.run-line{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:8px;align-items:center;padding:5px 4px;font-size:13px}
+.run-line .name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.run-line .meta{font-size:12px;color:var(--ink-3);white-space:nowrap}
+.run-line .bar{grid-column:2 / -1;height:5px}
+.run-empty{padding:10px 4px;color:var(--ink-3);font-size:13px}
+.raw-output{margin-top:8px}
+.raw-output>summary{font-size:12.5px;color:var(--ink-3);cursor:pointer;padding:6px 4px}
 .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
 .muted{color:var(--ink-3)}.small{font-size:13.5px}.tiny{font-size:12.5px}
 
@@ -182,7 +197,7 @@ pre{background:var(--sunken);border-radius:var(--r-md);padding:14px;overflow:aut
   border-radius:var(--r-md);border:1px solid var(--line);background:rgba(255,255,255,.98);box-shadow:var(--shadow);
   font-size:14px;color:var(--ink-2);opacity:0;transform:translateY(10px);transition:opacity .18s ease,transform .18s ease;pointer-events:none}
 .toast.show{opacity:1;transform:none}
-.toast.ok{border-color:#cfe4d8;background:var(--accent-soft);color:var(--accent-ink)}
+.toast.ok{border-color:#cfe4d8;background:var(--ok-soft);color:var(--ok)}
 .toast.error{border-color:#eccac7;background:var(--danger-soft);color:var(--danger)}
 /* ── 课件：拖放区、展开指示、识别进度 ── */
 .dropzone{border:2px dashed var(--line-2);border-radius:var(--r-md);padding:16px;text-align:center;color:var(--ink-2);
@@ -279,8 +294,8 @@ button.item:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
           <button class="act" data-act="refresh">刷新</button>
           <a class="act" href="/" target="_blank" rel="noopener" style="padding:7px 14px;border:1px solid var(--line-2);border-radius:980px">看站点</a>
         </div>
-        <label>管理密码或主令牌</label>
-        <input id="token" type="password" placeholder="粘贴后回车" autocomplete="current-password">
+        <label>管理密码或备用令牌</label>
+        <input id="token" type="password" placeholder="输入后回车" autocomplete="current-password">
         <div class="row" style="margin-top:8px"><button class="act primary" data-act="save">保存</button></div>
       </div>
     </details>
@@ -300,13 +315,16 @@ button.item:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
   <section id="tab-settings" hidden></section>
   <div class="card" style="padding:6px 22px">
     <details class="d" id="outCard" style="border-top:0" data-fold="out">
-      <summary><span class="ttl">运行输出</span><span class="muted small" id="outHint">最近一次命令的完整结果</span></summary>
+      <summary><span class="ttl">运行状态</span><span class="muted small" id="outHint">后台任务与最近操作</span></summary>
       <div class="body">
-        <div class="block" style="border:0;padding:0 0 10px">
-          <h3>最近任务<span class="muted small" id="jobsBoundary" style="font-weight:400">（进程内快照，服务重启后这里就空了；已确认的课程阶段在账本里，见「课程」页每条课次）</span></h3>
-          <div id="recentJobs"><span class="small muted">暂无</span></div>
+        <div class="run-console">
+          <div id="ocrJobs"></div>
+          <div id="recentJobs"></div>
+          <details class="raw-output">
+            <summary>详细输出</summary>
+            <pre id="out">（暂无）</pre>
+          </details>
         </div>
-        <pre id="out">（尚未运行）</pre>
       </div>
     </details>
   </div>
@@ -321,7 +339,7 @@ var state = {
   status: null, balance: null, config: null, storage: null, content: null,
   tab: 'overview', busy: false, requests: {}, uploads: {}, open: {},
   contentDraft: { id: '', course: '', topic: '', lessons: [], enabled: true },
-  sel: { tag: '', year: 'all', course: '', lesson: '', sort: 'desc', rail: false, pane: 'maintenance' },
+  sel: { tag: '', year: 'all', stage: '', course: '', lesson: '', sort: 'desc', rail: false, pane: 'maintenance' },
   preview: null,
   // 没保存的运行参数改动：20 秒轮询重绘与分栏切换都不该把它抹掉
   configDraft: {}
@@ -336,26 +354,22 @@ try {
 // 动作名字要写清"会不会花钱、会不会推送到微信、可不可逆"：
 // 这些都靠名字与副标题说，而不是等用户点下去再看结果。
 var LABELS = {
-  discover: '扫描教学网（不调用模型）', cycle: '跑一轮完整链路（调用模型、可能推送）',
-  'cycle-all': '跑一轮完整链路（调用模型、可能推送）',
-  notify: '投递通知（会发微信）', doctor: '体检（不调用模型）', backup: '备份账本（不调用模型）',
-  prune: '清理预演（只看，不删）', 'prune-apply': '清理并删除原件（不可逆）',
-  retry: '放回队列（重跑这条课次，会调用模型）',
-  republish: '重新发布页面（用现有笔记，不调用模型）',
-  revise: '用模型重写这个模块（调用模型，产生费用）',
-  'notify-retry': '重发失败通知（会发微信）',
-  'rebuild-content': '原子重建站点（不调用模型）',
-  'rollback-content': '回滚上一版内容（不调用模型）',
-  'rebuild-integration': '重建这一章（确定性抽取，不调用模型）',
-  'rebuild-integrations': '重建全部章节（确定性抽取，不调用模型）'
+  discover: '扫描课程', cycle: '继续处理', 'cycle-all': '处理队列',
+  notify: '发送通知', doctor: '系统检查', backup: '备份',
+  prune: '清理预览', 'prune-apply': '清理原件',
+  retry: '重试', 'refresh-note': '更新笔记',
+  revise: '重写笔记', 'notify-retry': '重发通知',
+  'rebuild-content': '重建站点', 'rollback-content': '回滚版本',
+  'rebuild-integration': '更新章节', 'rebuild-integrations': '更新全部章节',
+  'ocr-material': '补识别'
 }
 var MODULE_TEXT = { approved: '已通过', draft: '草稿', reviewing: '审查中', revising: '重写中', pending: '待写', failed: '失败' }
 // 阶段名要说人话：光看"待处理 · 尝试 0 次"没人知道它卡在哪一步
 var STAGE_TEXT = {
-  discovered: '刚发现未下载', queued: '排队等下载', downloading: '正在下载',
-  downloaded: '已下载待转写', transcribing: '正在转写', transcript_ready: '已转写待写笔记',
-  writing: '正在写笔记', notes_ready: '笔记好了待发布', publishing: '正在发布',
-  published: '已发布', needs_attention: '连续失败已停', failed: '失败', completed: '已完成'
+  discovered: '排队中', queued: '排队中', downloading: '下载中',
+  downloaded: '待转写', transcribing: '转写中', transcript_ready: '待写笔记',
+  building_textpack: '准备笔记', writing: '写笔记中', notes_ready: '待发布', publishing: '发布中',
+  published: '已发布', needs_attention: '需处理', failed: '失败', completed: '已发布'
 }
 var STAGE_CLASS = { published: 'ok', completed: 'ok', needs_attention: 'bad', failed: 'bad', discovered: '', transcript_ready: 'warn', notes_ready: 'warn' }
 var INTEGRATION_KINDS = [
@@ -440,7 +454,7 @@ function busyButton (btn, text) {
 function fail (error) {
   var text = (error && error.message) || String(error)
   out('操作失败：' + text)
-  toast('操作失败：' + text, 'error')
+  toast(/Failed to fetch|NetworkError|Load failed/i.test(text) ? '连接中断，请稍后重试' : ('操作未完成：' + text), 'error')
 }
 function run (fn) {
   try {
@@ -461,9 +475,9 @@ async function load (options) {
   var res = await fetch('/api/admin/status', { headers: headers(false) })
   var data = await res.json().catch(function () { return {} })
   if (!res.ok) {
-    var reason = data.error === 'admin_token_unconfigured' ? '服务端没有配置 COURSE_ADMIN_TOKEN'
-      : data.error === 'too_many_attempts' ? '凭据错误次数过多，请等 5 分钟'
-      : $('token').value.trim() ? '凭据不对' : '未登录：点右上角 ··· 填入密码或主令牌'
+    var reason = data.error === 'admin_token_unconfigured' ? '管理端尚未配置登录凭据'
+      : data.error === 'too_many_attempts' ? '尝试次数过多，请 5 分钟后再试'
+      : $('token').value.trim() ? '密码或令牌不正确' : '未登录：点右上角 ··· 输入管理密码'
     $('tab-overview').innerHTML = card('<h2>需要登录</h2><p class="muted">' + esc(reason) + '</p>')
     setRunState('未登录', 'bad')
     return false
@@ -501,29 +515,45 @@ function refreshBalance () {
 }
 function renderRunState () {
   var running = state.status && state.status.running
-  setRunState(running ? '正在运行 ' + running.action : '空闲', running ? 'warn' : 'ok')
+  var label = running ? (LABELS[running.action] || '后台任务') : ''
+  setRunState(running ? ('处理中 · ' + label) : '空闲', running ? 'warn' : 'ok')
   var hint = $('outHint')
-  if (hint) hint.textContent = running ? ('正在运行：' + (LABELS[running.action] || running.action)) : '最近一次命令的完整结果'
+  if (hint) hint.textContent = running ? label : '后台任务与最近操作'
   renderRecentJobs()
 }
-/** 最近任务：**进程内**的四态（排队/运行中/完成/失败）。重启会丢，所以旁边就写着这句话。 */
-var JOB_STATUS_TEXT = { queued: '排队', running: '运行中', done: '完成', failed: '失败' }
 function renderRecentJobs () {
-  var box = $('recentJobs')
-  if (!box) return
+  var jobsBox = $('recentJobs')
+  var ocrBox = $('ocrJobs')
+  if (!jobsBox || !ocrBox) return
+
+  var ocrJobs = (state.status && state.status.ocrJobs) || []
+  ocrBox.innerHTML = ocrJobs.length
+    ? '<div class="run-section"><div class="tiny muted" style="padding:0 4px 4px">图片识别</div>' +
+      ocrJobs.map(function (job) {
+        var percent = Math.max(0, Math.min(100, Number(job.percent || 0)))
+        var label = [job.courseName, job.lesson].filter(Boolean).join(' · ')
+        var current = job.current ? ' · ' + job.current : ''
+        return '<div class="run-line"><span class="status warn">识别中</span>' +
+          '<span class="name">' + esc(label + current) + '</span>' +
+          '<span class="meta">' + Number(job.done || 0) + '/' + Number(job.total || 0) + '</span>' +
+          '<div class="bar"><i style="width:' + percent + '%"></i></div></div>'
+      }).join('') + '</div>'
+    : ''
+
   var jobs = (state.status && state.status.recentJobs) || []
-  if (!jobs.length) { box.innerHTML = '<span class="small muted">暂无（这一版服务启动后还没跑过命令）</span>'; return }
-  box.innerHTML = jobs.map(function (job) {
-    var cls = job.status === 'done' ? 'status ok' : (job.status === 'failed' ? 'status bad' : 'status warn')
-    var when = job.finishedAt || job.startedAt
-    var clock = ''
-    try { clock = new Date(when).toLocaleString() } catch (error) { clock = String(when || '') }
-    return '<div class="row small" style="gap:8px;align-items:center;margin:2px 0">' +
-      '<span class="' + cls + '">' + (JOB_STATUS_TEXT[job.status] || job.status) + '</span>' +
-      '<span>' + esc(LABELS[job.action] || job.action) + '</span>' +
-      '<span class="muted">' + esc(clock) + (job.status === 'failed' && job.error ? ' · ' + esc(String(job.error).slice(0, 60)) : '') + '</span>' +
-      '</div>'
-  }).join('')
+  jobsBox.innerHTML = jobs.length
+    ? '<div class="run-section"><div class="tiny muted" style="padding:0 4px 4px">最近操作</div>' +
+      jobs.map(function (job) {
+        var cls = job.status === 'done' ? 'status ok' : (job.status === 'failed' ? 'status bad' : 'status warn')
+        var statusText = job.status === 'done' ? '完成' : job.status === 'failed' ? '失败' : job.status === 'running' ? '进行中' : '排队中'
+        var when = job.finishedAt || job.startedAt
+        var clock = ''
+        try { clock = new Date(when).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) } catch (error) {}
+        return '<div class="run-line"><span class="' + cls + '">' + statusText + '</span>' +
+          '<span class="name">' + esc(LABELS[job.action] || job.action) + '</span>' +
+          '<span class="meta">' + esc(clock) + '</span></div>'
+      }).join('') + '</div>'
+    : (ocrJobs.length ? '' : '<div class="run-empty">暂无后台任务</div>')
 }
 /** 重绘前把 DOM 里的折叠状态抄回来：程序性改 open 不一定及时触发 toggle 事件。 */
 function captureFolds () {
@@ -544,31 +574,46 @@ function render () {
 function card (inner, style) { return '<div class="card"' + (style ? ' style="' + style + '"' : '') + '>' + inner + '</div>' }
 
 /* ── 概览 ── */
+function stageGroup (task) {
+  var stage = String(task && task.stage || '')
+  if (stage === 'published' || stage === 'completed') return 'published'
+  if (['downloading','transcribing','building_textpack','writing','publishing'].includes(stage)) return 'active'
+  if (['discovered','queued','downloaded','transcript_ready','notes_ready'].includes(stage)) return 'queued'
+  return 'attention'
+}
+function stageLabel (value) {
+  return value === 'published' ? '已发布' : value === 'active' ? '进行中' : value === 'queued' ? '排队中' : ''
+}
+function matchesStageFilter (task) {
+  return !state.sel.stage || stageGroup(task) === state.sel.stage
+}
 function renderOverview () {
   if (!state.status) return
   var s = state.status
   var t = s.todos || {}
   var all = tasks()
-  var counts = { published: 0, running: 0, waiting: 0 }
+  var counts = { published: 0, active: 0, queued: 0 }
   all.forEach(function (task) {
-    if (task.stage === 'published') counts.published += 1
-    else if (task.stage === 'discovered') counts.waiting += 1
-    else counts.running += 1
+    var group = stageGroup(task)
+    if (counts[group] != null) counts[group] += 1
   })
   var todos = []
   ;(t.stuck || []).forEach(function (item) {
-    todos.push({ title: item.courseName + ' · ' + item.title, note: '已停止重试', label: '去处理', tab: 'courses' })
+    todos.push({ title: item.courseName + ' · ' + item.title, note: '需要处理', label: '查看', tab: 'courses', course: item.courseName, lesson: item.replayKey })
   })
   ;(t.missingMaterials || []).forEach(function (item) {
-    todos.push({ title: item.courseName + ' · ' + item.title, note: '缺课件', label: '传课件', tab: 'courses' })
+    todos.push({ title: item.courseName + ' · ' + item.title, note: '缺少课件', label: '上传', tab: 'courses', course: item.courseName, lesson: item.replayKey })
   })
-  if (s.channel && s.channel.ok === false) todos.push({ title: '推送发不出去', note: '通道未就绪', label: '查看', tab: 'overview' })
-  if (t.failedDeliveries) todos.push({ title: t.failedDeliveries + ' 条通知发送失败', note: '未送达', label: '重发', tab: 'settings' })
+  if (s.channel && s.channel.ok === false) todos.push({ title: '通知通道不可用', note: '', label: '查看', tab: 'overview' })
+  if (t.failedDeliveries) todos.push({ title: t.failedDeliveries + ' 条通知发送失败', note: '', label: '查看', tab: 'settings' })
 
   var hero = todos.length
-    ? '<h1>' + todos.length + ' 件事待处理</h1>' + todos.map(function (item) {
-      return '<div class="todo"><div class="t"><b>' + esc(item.title) + '</b><span>' + esc(item.note) + '</span></div>' +
-        '<button class="act" data-go="' + item.tab + '">' + esc(item.label) + '</button></div>'
+    ? '<h1>' + todos.length + ' 件待处理</h1>' + todos.map(function (item) {
+      return '<div class="todo"><div class="t"><b>' + esc(item.title) + '</b>' +
+        (item.note ? '<span>' + esc(item.note) + '</span>' : '') + '</div>' +
+        '<button class="act" data-go="' + item.tab + '"' +
+        (item.course ? ' data-course="' + esc(item.course) + '"' : '') +
+        (item.lesson ? ' data-lesson="' + esc(item.lesson) + '"' : '') + '>' + esc(item.label) + '</button></div>'
     }).join('')
     : '<h1>无待办</h1><div class="empty-ok"><span class="pill ok"><span class="dot"></span>一切正常</span></div>'
 
@@ -577,15 +622,15 @@ function renderOverview () {
   $('tab-overview').innerHTML =
     card(hero) +
     card('<div class="grid three">' +
-        '<div class="stat">' + counts.published + '<small>已发布</small></div>' +
-        '<div class="stat">' + counts.running + '<small>进行中</small></div>' +
-        '<div class="stat">' + counts.waiting + '<small>还没轮到</small></div>' +
+      '<button class="metric-button stat" data-act="view-stage" data-value="published">' + counts.published + '<small>已发布</small></button>' +
+      '<button class="metric-button stat" data-act="view-stage" data-value="active">' + counts.active + '<small>进行中</small></button>' +
+      '<button class="metric-button stat" data-act="view-stage" data-value="queued">' + counts.queued + '<small>排队中</small></button>' +
       '</div>') +
     '<div class="grid two">' +
       card('<h2>花费</h2><div class="stat">' + money(spend.totalCny) + '<small>转写 ' + money(spend.asrCny) + ' + 笔记 ' + money(spend.notesCny) + '</small></div>' +
         '<div class="row" style="margin-top:14px;align-items:flex-start">' + balancesHtml() + '</div>' +
         '<div class="row" style="margin-top:8px"><button class="act quiet" data-act="refresh-balance">刷新余额</button></div>' +
-        '<div class="tiny muted" style="margin-top:10px">转写 ¥' + (pricing.asrPerHourCny || 0.288) + '/小时（按语音时长）· 笔记 ¥' + (pricing.noteInputPerMillionCny || 1) + ' / ¥' + (pricing.noteOutputPerMillionCny || 4) + ' 每百万 token</div>') +
+        '<div class="tiny muted" style="margin-top:10px">转写 ¥' + (pricing.asrPerHourCny || 0.288) + '/小时 · 笔记 ¥' + (pricing.noteInputPerMillionCny || 1) + ' / ¥' + (pricing.noteOutputPerMillionCny || 4) + ' 每百万 token</div>') +
       card('<h2>推送通道</h2>' + channelHtml()) +
     '</div>'
 }
@@ -655,14 +700,18 @@ function visibleCourses () {
   return courseList().filter(function (item) {
     if (state.sel.year !== 'all' && item.year !== state.sel.year) return false
     if (state.sel.tag && !(item.tags || []).includes(state.sel.tag)) return false
+    if (state.sel.stage && !(item.lessons || []).some(matchesStageFilter)) return false
     return true
   })
 }
 function lessonsOf (course) {
-  var list = tasks().filter(function (task) { return (task.courseName || '未分类') === course })
+  var list = tasks().filter(function (task) {
+    return (task.courseName || '未分类') === course && matchesStageFilter(task)
+  })
   list.sort(function (a, b) { return String(a.title).localeCompare(String(b.title)) })
   return state.sel.sort === 'asc' ? list : list.reverse()
 }
+
 
 function renderCourses () {
   var all = courseList()
@@ -695,11 +744,14 @@ function renderCourses () {
     return '<div class="item" data-act="pick-course" data-value="' + esc(item.course) + '"' +
       (state.sel.course === item.course ? ' aria-selected="true"' : '') + '>' +
       '<span class="dot ' + dot + '"></span><span class="name">' + esc(item.course) + '</span>' +
-      '<span class="meta">' + item.published + '/' + item.lessons.length + '</span></div>'
+      '<span class="meta">' + (state.sel.stage ? item.lessons.filter(matchesStageFilter).length : (item.published + '/' + item.lessons.length)) + '</span></div>'
   }).join('')
   var courses = '<div class="col" id="courses">' +
     '<div class="colhead"><button class="icon" data-act="rail-toggle" title="筛选">' + icon('rail') + '</button>' +
-    '<span>课程 · ' + shown.length + '</span></div>' + (courseItems || '<div class="item muted">没有匹配的课程</div>') + '</div>'
+    '<span>课程 · ' + shown.length + '</span></div>' +
+    (state.sel.stage ? '<div class="view-filter"><span class="pill">' + esc(stageLabel(state.sel.stage)) + '</span>' +
+      '<button class="icon act" data-act="clear-stage" title="清除状态筛选" aria-label="清除状态筛选">' + icon('close') + '</button></div>' : '') +
+    (courseItems || '<div class="item muted">没有匹配的课程</div>') + '</div>'
 
   // 中二：课次
   var lessonItems = ''
@@ -734,25 +786,26 @@ function detailHtml () {
   var head = '<h2>' + esc(task.title) + '</h2>' +
     '<p class="sub">' + esc(task.courseName) + ' · 转写 ' + money(cost.asrCny) + ' · 笔记 ' + money(cost.notesCny) + '</p>'
 
-  // 卡在哪、为什么：阶段说人话，错误给原文，退避时间写出来——
-  // "尝试 0 次"这种数字本身不解释任何事
-  var progress = '<div class="block"><h3>进度</h3><div class="row">' +
+  var progress = '<div class="block"><h3>状态</h3><div class="row">' +
     '<span class="pill ' + (STAGE_CLASS[task.stage] || '') + '"><span class="dot"></span>' + esc(STAGE_TEXT[task.stage] || task.stage) + '</span>' +
-    '<span class="tiny muted">' + esc(task.stage) + '</span>' +
-    '<span class="tiny muted">尝试 ' + Number(task.attempts || 0) + ' 次</span>' +
-    '<span class="tiny muted">下次重试 ' + (formatTime(task.nextAttemptAt) || '—') + '</span>' +
     '</div>' +
     (task.lastError ? '<div class="errbox"><pre>' + esc(String(task.lastError)) + '</pre></div>' : '') +
     '</div>'
 
-  var actions = '<div class="block"><h3>操作</h3><div class="row" style="align-items:flex-start">' +
-    '<div class="action-item"><button class="act primary" data-act="cycle" data-key="' + esc(task.replayKey) + '">立即跑这一节</button>' +
-    '<p class="hint">从当前阶段继续跑到发布</p></div>' +
-    '<div class="action-item"><button class="act" data-act="retry" data-key="' + esc(task.replayKey) + '">清除失败、重新排队</button>' +
-    '<p class="hint">清掉失败状态与退避时间，交给定时任务重跑</p></div>' +
-    (task.artifacts && task.artifacts.transcriptPath ? '<button class="act" data-act="republish" data-key="' + esc(task.replayKey) + '">重新发布</button>' : '') +
-    (task.artifacts && task.artifacts.slug ? '<a class="act" target="_blank" rel="noopener" href="/' + esc(task.artifacts.slug) + '.html">看笔记</a>' : '') +
-    '</div></div>'
+  var done = task.stage === 'published' || task.stage === 'completed'
+  var failed = task.stage === 'needs_attention' || task.stage === 'failed'
+  var hasTranscript = Boolean(task.artifacts && task.artifacts.transcriptPath)
+  var hasNote = Boolean(task.artifacts && task.artifacts.slug)
+  var actionButtons = ''
+  if (failed) {
+    actionButtons += '<button class="act primary" data-act="retry" data-key="' + esc(task.replayKey) + '">重试</button>'
+  } else if (done && hasTranscript && lesson.modules && lesson.modules.length) {
+    actionButtons += '<button class="act primary" data-act="refresh-note" data-key="' + esc(task.replayKey) + '">更新笔记</button>'
+  } else if (!done) {
+    actionButtons += '<button class="act primary" data-act="cycle" data-key="' + esc(task.replayKey) + '">继续处理</button>'
+  }
+  if (hasNote) actionButtons += '<a class="act" target="_blank" rel="noopener" href="/' + esc(task.artifacts.slug) + '.html">查看笔记</a>'
+  var actions = actionButtons ? '<div class="block"><h3>操作</h3><div class="row">' + actionButtons + '</div></div>' : ''
 
   var deck = deckHtml(task)
 
@@ -763,18 +816,23 @@ function detailHtml () {
     '<div class="row" style="margin-top:8px"><input data-newtag="' + esc(task.replayKey) + '" placeholder="新增标签，回车确认" style="max-width:240px">' +
     '<button class="act" data-act="add-tag" data-key="' + esc(task.replayKey) + '">添加</button></div></div>'
 
-  var modules = (lesson.modules || []).map(function (module) {
-    var id = module.outlineNodeId || module.id
-    return '<tr><td>' + esc(module.title || module.id) + '</td><td class="small muted">' + module.chars + ' 字</td>' +
-      '<td class="small muted">' + esc(MODULE_TEXT[module.status] || module.status) + '</td>' +
-      '<td style="text-align:right"><button class="act quiet" data-act="revise" data-key="' + esc(task.replayKey) + '" data-module="' + esc(id) + '">重写</button></td></tr>'
-  }).join('')
-  var noteBlock = lesson.modules && lesson.modules.length
-    ? '<div class="block"><h3>笔记</h3><p class="small muted">成品 ' + lesson.finalChars + ' 字 · ' + lesson.modules.length + ' 个模块</p>' +
-      '<table><tbody>' + modules + '</tbody></table>' +
-      '<div class="row" style="margin-top:10px"><input data-request="' + esc(task.replayKey) + '" value="' + esc(state.requests[task.replayKey] || '') + '" placeholder="修改要求，回车重写第一个模块">' +
-      '<button class="act" data-act="revise-first" data-key="' + esc(task.replayKey) + '">按这个要求重写</button></div></div>'
-    : ''
+  var modules = lesson.modules || []
+  var noteBlock = ''
+  if (modules.length) {
+    var summary = '<div class="row" style="align-items:baseline"><strong style="font-size:20px">' +
+      Number(lesson.finalChars || 0).toLocaleString() + '</strong><span class="small muted">字</span>' +
+      (lesson.savedAt ? '<span class="tiny muted">更新 ' + esc(formatTime(lesson.savedAt)) + '</span>' : '') + '</div>'
+    if (modules.length > 1) {
+      summary += '<table style="margin-top:8px"><tbody>' + modules.map(function (module) {
+        var id = module.outlineNodeId || module.id
+        return '<tr><td>' + esc(module.title || module.id) + '</td><td class="small muted">' + module.chars + ' 字</td>' +
+          '<td style="text-align:right"><button class="act quiet" data-act="revise" data-key="' + esc(task.replayKey) + '" data-module="' + esc(id) + '">重写</button></td></tr>'
+      }).join('') + '</tbody></table>'
+    }
+    noteBlock = '<div class="block"><h3>笔记</h3>' + summary +
+      '<div class="row" style="margin-top:10px"><input data-request="' + esc(task.replayKey) + '" value="' + esc(state.requests[task.replayKey] || '') + '" placeholder="写下修改要求">' +
+      '<button class="act" data-act="revise-first" data-key="' + esc(task.replayKey) + '">重写笔记</button></div></div>'
+  }
 
   return head + progress + actions + deck + tagBlock + noteBlock
 }
@@ -798,7 +856,6 @@ function deckHtml (task) {
         (material.imageCount ? ' · 图 ' + material.imageCount : '') +
         (material.ocrPending ? ' · 待识别 ' + material.ocrPending : '') + '</span>' +
       '<span class="chev">' + icon('chevron') + '</span>' +
-      // 删除按钮嵌在整行可点的课件行里：点击时 closest('[data-act]') 先命中它，不会误触发预览
       '<button class="act icon danger" data-act="delete-material" data-key="' + esc(task.replayKey) + '"' +
       ' data-name="' + esc(material.name) + '" data-scope="' + esc(material.scope || 'lesson') + '"' +
       ' title="删除这份课件" aria-label="删除 ' + esc(material.name) + '">' + icon('trash') + '</button>' +
@@ -806,26 +863,26 @@ function deckHtml (task) {
   }).join('')
 
   var pending = (task.materials || []).some(function (material) { return material.ocrPending > 0 })
-  var ocr = task.ocrRunning
-    ? ocrProgressHtml(task)
-    // 图片文字是上传后自动识别的（后台跑，不用点）；这里只在"还有没识别完的图"时
-    // 提供一个补识别的入口——识别失败、或一次超过上限时的补救手段
-    : (pending
-      ? '<div class="row" style="margin-top:8px"><button class="act" data-act="ocr-material" data-key="' + esc(task.replayKey) + '">' + icon('image') + '重新识别图片文字</button></div>'
-      : '')
+  var tools = ''
+  if (task.ocrRunning) {
+    var info = task.ocr || {}
+    tools = '<span class="status">图片识别 ' + Number(info.done || 0) + '/' + Number(info.total || 0) + '</span>'
+  } else if (pending) {
+    tools = '<button class="act quiet" data-act="ocr-material" data-key="' + esc(task.replayKey) + '">' + icon('image') + '补识别</button>'
+  }
 
   return '<div class="block"><h3>课件</h3>' +
     '<div class="dropzone" data-act="pick-file" data-key="' + esc(task.replayKey) + '" data-drop="' + esc(task.replayKey) + '"' +
-    ' role="button" tabindex="0">' + icon('up') + '<span>拖到这里上传，或按 ⌘/Ctrl+V 粘贴</span></div>' +
+    ' role="button" tabindex="0">' + icon('up') + '<span>拖到这里、点按选择，或粘贴文件</span></div>' +
     (files ? '<div style="margin-top:10px">' + files + '</div>' : '<p class="small muted" style="margin:10px 0 0">无课件</p>') +
-    '<div class="row" style="margin-top:10px">' +
     '<input class="hidden-file" type="file" multiple data-file="' + esc(task.replayKey) + '" accept=".pptx,.pdf,.docx,.xlsx,.md,.txt,.json">' +
-    '<button class="act" data-act="pick-file" data-key="' + esc(task.replayKey) + '">' + icon('plus') + '上传课件</button>' +
-    (uploading && activeUpload.phase === 'uploading'
-      ? '<button class="act danger" data-act="cancel-upload" data-key="' + esc(task.replayKey) + '">取消上传</button>'
-      : '') +
-    '<span class="status" data-status="' + esc(task.replayKey) + '">' + esc(state.uploads[task.replayKey] || '') + '</span>' +
-    '</div>' + ocr + previewHtml(task) + '</div>'
+    '<div class="row" style="margin-top:8px">' +
+      (uploading && activeUpload.phase === 'uploading'
+        ? '<button class="act danger" data-act="cancel-upload" data-key="' + esc(task.replayKey) + '">取消上传</button>'
+        : '') +
+      tools +
+      '<span class="status" data-status="' + esc(task.replayKey) + '">' + esc(state.uploads[task.replayKey] || '') + '</span>' +
+    '</div>' + previewHtml(task) + '</div>'
 }
 
 /** 后台识别的进度：分母在排队时就定下来了，这里只负责画出来。 */
@@ -867,19 +924,11 @@ function previewHtml (task) {
  */
 function integrationHtml () {
   var course = state.sel.course
-  var items = INTEGRATION_KINDS.map(function (kind) {
-    return '<div class="item" aria-disabled="true" style="opacity:.72">' +
-      '<span class="name">' + esc(kind.label) + '</span><span class="meta">规划中</span></div>'
-  }).join('')
-  return '<h2>' + esc(course) + ' · 多节课程</h2><p class="sub">' + tasks().filter(function (item) { return item.courseName === course }).length + ' 节 · 整合材料</p>' +
-    '<div class="block"><h3>整合材料</h3>' + items +
-    '<p class="tiny muted" style="margin:8px 0 0">以上几类尚未实现，先如实标出来，不提供会报错的按钮。</p></div>' +
-    '<div class="block"><h3>已有原型（控制台未接线）</h3>' +
-    '<div class="item" aria-disabled="true" style="opacity:.72">' +
-    '<span class="name">章级整合 · 确定性抽取</span><span class="meta">命令行可用</span></div>' +
-    '<p class="tiny muted" style="margin:8px 0 0">命令行 <code>course integrate</code> 按章汇总跨课次的论证推进、概念对照与待核继承，' +
-    '每一行带出处；只做确定性抽取，不调用模型、不推送。这一页还没接上它。</p></div>' +
-    '<div class="block"><h3>课程标签</h3>' + courseTagHtml(course) + '</div>'
+  var list = tasks().filter(function (item) { return item.courseName === course })
+  var published = list.filter(function (item) { return stageGroup(item) === 'published' }).length
+  return '<h2>' + esc(course) + '</h2><p class="sub">' + list.length + ' 节 · 已发布 ' + published + '</p>' +
+    '<div class="block"><h3>课程标签</h3>' + courseTagHtml(course) + '</div>' +
+    '<div class="block"><button class="act" data-go="content">管理长期章节</button></div>'
 }
 
 function courseTagHtml (course) {
@@ -891,7 +940,7 @@ function courseTagHtml (course) {
     '<button class="act" data-act="add-course-tag" data-course="' + esc(course) + '">添加</button></div>'
 }
 
-/* ── 内容：正式站版本 + 章级整合 ── */
+/* ── 内容：站点版本 + 长期章节 ── */
 function contentCourseMap () {
   var map = {}
   tasks().forEach(function (task) {
@@ -915,7 +964,7 @@ function resetIntegrationDraft (course) {
 
 function contentStatusPill (status) {
   var cls = status === 'fresh' ? 'ok' : status === 'stale' ? 'warn' : 'bad'
-  var text = status === 'fresh' ? '已同步' : status === 'stale' ? '需重建' : '缺产物'
+  var text = status === 'fresh' ? '已更新' : status === 'stale' ? '待更新' : '未生成'
   return '<span class="pill ' + cls + '"><span class="dot"></span>' + text + '</span>'
 }
 
@@ -942,16 +991,13 @@ function renderContent () {
       '<span class="small muted release-meta">' + (item.notes == null ? '' : item.notes + ' 篇 · ') + esc(releaseTime(item.modifiedAt)) + '</span></div>'
   }).join('')
   var releaseCard = card(
-    '<h2>正式站版本</h2>' +
-    '<p class="sub">' + (atomic
-      ? '原子发布已启用 · 当前 ' + esc(release.current || '—')
-      : '当前仍是旧式目录模式；需要先完成一次性迁移') + '</p>' +
+    '<h2>站点版本</h2>' +
+    '<p class="sub">' + (atomic ? '当前公开内容 · ' + (release.releases && release.releases[0] ? release.releases[0].notes + ' 篇' : '') : '需要完成站点迁移') + '</p>' +
     '<div class="row" style="margin:12px 0">' +
-      '<button class="act primary" data-act="rebuild-content">原子重建站点</button>' +
-      '<button class="act danger" data-act="rollback-content"' + (release.canRollback ? '' : ' disabled') + '>回滚上一版</button>' +
+      '<button class="act primary" data-act="rebuild-content">重建站点</button>' +
+      '<button class="act danger" data-act="rollback-content"' + (release.canRollback ? '' : ' disabled') + '>回滚版本</button>' +
     '</div>' +
-    '<p class="small muted">重建只用现有发布库，不调用模型；回滚会把正式入口切回上一份完整快照。</p>' +
-    (releaseRows || '<p class="small muted">还没有内容 release。</p>')
+    (releaseRows || '<p class="small muted">暂无历史版本</p>')
   )
 
   var items = ((data.integrations || {}).items || [])
@@ -966,13 +1012,13 @@ function renderContent () {
         '<span class="small muted">' + esc(item.course) + ' · ' + item.lessons.length + ' 节</span>' +
         '<span class="spacer"></span>' +
         '<button class="act quiet" data-act="edit-integration" data-id="' + esc(item.id) + '">编辑</button>' +
-        '<button class="act" data-act="rebuild-integration" data-id="' + esc(item.id) + '">重建</button>' +
+        '<button class="act" data-act="rebuild-integration" data-id="' + esc(item.id) + '">更新</button>' +
         '<button class="act danger" data-act="delete-integration" data-id="' + esc(item.id) + '">删除</button>' +
       '</div>' +
       '<div class="small" style="margin-top:7px">' + esc(item.lessons.join(' / ')) + '</div>' +
       stale +
       '<div class="tiny muted" style="margin-top:5px">' +
-        (item.generatedAt ? '最近生成 ' + esc(releaseTime(item.generatedAt)) : '尚未生成整合产物') +
+        (item.generatedAt ? '更新 ' + esc(releaseTime(item.generatedAt)) : '尚未生成') +
       '</div></div>'
   }).join('')
 
@@ -992,21 +1038,19 @@ function renderContent () {
     '<span class="spacer"></span>' + (draft.id ? '<span class="tiny muted">' + esc(draft.id) + '</span>' : '') + '</div>' +
     '<div class="field"><label>课程</label><select data-integration-course>' + courseOptions + '</select></div>' +
     '<div class="field"><label>章节主题</label><input data-integration-text="topic" value="' + esc(draft.topic || '') + '" placeholder="例如：罪刑均衡与以刑制罪"></div>' +
-    '<div class="field"><label>固定课次</label><div class="integration-lessons">' +
+    '<div class="field"><label>包含课次</label><div class="integration-lessons">' +
       (lessonChecks || '<span class="small muted">这门课还没有课次</span>') + '</div></div>' +
     '<label class="integration-enabled"><input type="checkbox" data-integration-enabled' +
-      (draft.enabled !== false ? ' checked' : '') + '><span>自动维护这一章</span></label>' +
+      (draft.enabled !== false ? ' checked' : '') + '><span>自动更新</span></label>' +
     '<div class="row"><button class="act primary" data-act="save-integration">保存章节</button>' +
-      '<button class="act" data-act="new-integration">清空表单</button></div>' +
-    '<p class="tiny muted" style="margin-top:8px">保存的是明确课次范围；以后同课程新增课次不会自动混进来。正文变化后，包含该课次的章节会自动重建。</p>' +
+      '<button class="act" data-act="new-integration">清空</button></div>' +
     '</div>'
 
   var integrationsCard = card(
-    '<div class="row"><h2 style="margin:0">章级整合</h2><span class="spacer"></span>' +
-      '<button class="act" data-act="rebuild-integrations"' + (items.length ? '' : ' disabled') + '>重建全部</button></div>' +
-    '<p class="sub">章节范围由你确认一次，后续由系统按正文版本维护。</p>' +
+    '<div class="row"><h2 style="margin:0">长期章节</h2><span class="spacer"></span>' +
+      '<button class="act" data-act="rebuild-integrations"' + (items.length ? '' : ' disabled') + '>更新全部</button></div>' +
     '<div style="display:grid;gap:10px;margin:12px 0">' +
-      (integrationRows || '<p class="small muted">还没有长期章节定义。可以先在下面建一个。</p>') +
+      (integrationRows || '<p class="small muted">暂无章节</p>') +
     '</div>' + form
   )
 
@@ -1036,7 +1080,7 @@ async function saveIntegration (btn) {
     state.content = data.content
     resetIntegrationDraft(draft.course)
     renderContent()
-    toast('章节已保存；范围以后不会自动扩张', 'ok')
+    toast('章节已保存', 'ok')
   } catch (error) {
     toast('保存失败：' + error, 'error')
   } finally { restore() }
@@ -1098,17 +1142,17 @@ function paneMeta (key) {
 
 function maintenancePane () {
   return '<h2>维护</h2>' +
-    '<div class="row" style="margin-bottom:14px"><button class="act primary" data-act="cycle-all">跑一轮完整链路</button>' +
-    '<button class="act" data-act="discover">扫描教学网</button></div>' +
-    '<div class="row"><button class="act" data-act="notify">投递通知</button>' +
-    '<button class="act" data-act="doctor">体检</button><button class="act" data-act="backup">备份账本</button>' +
-    '<button class="act" data-act="prune">清理预演</button><button class="act danger" data-act="prune-apply">清理并删除</button></div>'
+    '<div class="row" style="margin-bottom:14px"><button class="act primary" data-act="cycle-all">处理队列</button>' +
+    '<button class="act" data-act="discover">刷新课程</button></div>' +
+    '<div class="row"><button class="act" data-act="notify">发送通知</button>' +
+    '<button class="act" data-act="doctor">系统检查</button><button class="act" data-act="backup">备份</button>' +
+    '<button class="act" data-act="prune">查看可清理项</button><button class="act danger" data-act="prune-apply">清理原件</button></div>'
 }
 
 function deliveriesPane (deliveries, rows, failed) {
   return '<h2>通知记录</h2><p class="small muted">最近 ' + Math.min(10, deliveries.length) + ' 条</p>' +
-    (rows ? '<ul class="notify-list">' + rows + '</ul>' : '<p class="muted small">队列为空</p>') +
-    (failed ? '<div class="row" style="margin-top:10px"><button class="act primary" data-act="notify-retry">把 ' + failed + ' 条失败通知放回队列</button></div>' : '')
+    (rows ? '<ul class="notify-list">' + rows + '</ul>' : '<p class="muted small">暂无通知</p>') +
+    (failed ? '<div class="row" style="margin-top:10px"><button class="act primary" data-act="notify-retry">重试 ' + failed + ' 条失败通知</button></div>' : '')
 }
 
 function renderSettings () {
@@ -1126,11 +1170,11 @@ function renderSettings () {
     } else if (spec.type === 'boolean') {
       var on = value === true || String(value) === 'true'
       var off = value === false || String(value) === 'false'
-      input = '<select data-cfg="' + key + '"><option value=""' + (on || off ? '' : ' selected') + '>跟随环境变量</option>' +
+      input = '<select data-cfg="' + key + '"><option value=""' + (on || off ? '' : ' selected') + '>默认</option>' +
         '<option value="true"' + (on ? ' selected' : '') + '>开启</option>' +
         '<option value="false"' + (off ? ' selected' : '') + '>关闭</option></select>'
     } else {
-      input = '<input data-cfg="' + key + '" type="' + (spec.type === 'number' ? 'number' : 'text') + '" value="' + esc(value) + '" placeholder="跟随环境变量">'
+      input = '<input data-cfg="' + key + '" type="' + (spec.type === 'number' ? 'number' : 'text') + '" value="' + esc(value) + '" placeholder="默认">'
     }
     return '<div class="field"><label>' + esc(spec.label || key) + '</label>' + input + '</div>'
   }).join('')
@@ -1140,13 +1184,20 @@ function renderSettings () {
   // 每条通知一项。用列表而不是表格：表格在窄屏要把四列塞进手机宽度，
   // 结果 course-note、failed、日期这些拉丁串被逐字硬换行（一列竖着的字母）。
   // 列表项在宽屏是四列、窄屏是两行卡片（见 .notify-list 的 ≤720px 规则）。
+  var purposeText = {
+    'course-note': '课程笔记', 'new-lesson': '新课提醒', 'digest': '课程日报',
+    'ppt-reminder': '课件提醒'
+  }
+  var deliveryText = {
+    sent: '已发送', failed: '失败', pending: '排队中', claimed: '发送中'
+  }
   var rows = deliveries.slice(0, 10).map(function (x) {
     var cls = x.status === 'sent' ? 'ok' : x.status === 'failed' ? 'bad' : ''
     var when = String(x.sent_at || x.created_at || '').slice(5, 16).replace('T', ' ')
     var error = String(x.last_error || '').slice(0, 60)
     return '<li class="notify-item">' +
-      '<span class="notify-purpose small">' + esc(x.purpose) + '</span>' +
-      '<span class="notify-status"><span class="pill ' + cls + '">' + esc(x.status) + '</span></span>' +
+      '<span class="notify-purpose small">' + esc(purposeText[x.purpose] || '通知') + '</span>' +
+      '<span class="notify-status"><span class="pill ' + cls + '">' + esc(deliveryText[x.status] || '处理中') + '</span></span>' +
       '<span class="notify-when small muted">' + esc(when) + '</span>' +
       '<span class="notify-error tiny muted">' + esc(error) + '</span>' +
       '</li>'
@@ -1163,8 +1214,7 @@ function renderSettings () {
     : pane === 'deliveries' ? deliveriesPane(deliveries, rows, failed)
       : pane === 'storage' ? '<h2>存储占用</h2><div id="storageBody">' + storageHtml() + '</div>'
         : pane === 'params' ? '<h2>运行参数</h2>' + fields +
-          '<div class="row"><button class="act primary" data-act="save-config">保存设置</button></div>' +
-          '<div class="tiny muted" style="margin-top:8px">' + esc(c.path || '') + '</div>'
+          '<div class="row"><button class="act primary" data-act="save-config">保存设置</button></div>'
           : '<h2>登录密码</h2>' + passwordPanel()
 
   $('tab-settings').innerHTML = '<div class="split">' +
@@ -1190,7 +1240,7 @@ function storageHtml () {
 }
 function passwordPanel () {
   var auth = (state.status && state.status.auth) || {}
-  return (auth.masterTokenSet ? '' : '<p class="small" style="color:var(--danger)">主令牌未配置：忘记密码只能去服务器重设。</p>') +
+  return (auth.masterTokenSet ? '' : '<p class="small" style="color:var(--danger)">未配置备用登录方式；忘记密码后需要在服务器端重设。</p>') +
     '<div class="field"><label>新密码（至少 8 位）</label><input data-pw="next" type="password" autocomplete="new-password" placeholder="新密码"></div>' +
     '<div class="row"><button class="act primary" data-act="save-password">保存新密码</button>' +
     '<button class="act" data-act="clear-password">清除密码</button></div>'
@@ -1200,7 +1250,7 @@ function passwordPanel () {
 function go (tab) { state.tab = tab; render(); window.scrollTo({ top: 0, behavior: 'smooth' }) }
 
 async function doAction (action, extra, btn) {
-  if (state.busy || (state.status && state.status.running)) { toast('服务端已经有任务在跑，等它结束再点', 'error'); return }
+  if (state.busy || (state.status && state.status.running)) { toast('已有任务正在处理，请稍后', 'info'); return }
   var label = LABELS[action] || action
   var restore = busyButton(btn, '处理中…')
   state.busy = true
@@ -1210,12 +1260,12 @@ async function doAction (action, extra, btn) {
   try {
     var res = await fetch('/api/admin/run', { method: 'POST', headers: headers(true), body: JSON.stringify(Object.assign({ action: action }, extra || {})) })
     var data = await res.json().catch(function () { return {} })
-    if (res.status === 409) toast('服务端已有任务在跑（' + (data.action || '别的任务') + '），改为等待它结束', 'info')
+    if (res.status === 409) toast('已有其他任务正在处理，请稍后', 'info')
     var jobId = data.jobId
     if (!jobId) {
       // 老服务端（或参数被拒）没有 jobId：照旧把响应打出来
       out(JSON.stringify(data, null, 2))
-      if (res.status !== 409) toast('没成功：' + label + ' —— ' + (data.message || data.error || ('退出码 ' + data.exitCode)), 'error')
+      if (res.status !== 409) toast('操作未完成：' + (data.message || data.error || label), 'error')
       return
     }
     // 长动作动辄几分钟：拿 jobId 轮询，而不是挂着一个请求等（刷新页面也能接着看）
@@ -1229,12 +1279,12 @@ async function doAction (action, extra, btn) {
       if (attempt % 8 === 7) out('仍在运行：' + label + '（已等 ' + Math.round((attempt + 1) * 1.5) + ' 秒）')
     }
     out(JSON.stringify(snapshot, null, 2))
-    if (snapshot.status === 'done') toast('完成：' + label + '（退出码 ' + snapshot.exitCode + '）', 'ok')
-    else if (snapshot.status === 'running') toast('还在跑：' + label + '（可以离开这个页面，服务端会继续）', 'info')
-    else toast('没成功：' + label + ' —— ' + (snapshot.error || snapshot.message || ('退出码 ' + snapshot.exitCode)), 'error')
+    if (snapshot.status === 'done') toast('已完成：' + label, 'ok')
+    else if (snapshot.status === 'running') toast(label + '仍在后台处理', 'info')
+    else toast('操作未完成：' + (snapshot.error || snapshot.message || label), 'error')
   } catch (error) {
-    out('请求失败：' + error)
-    toast('请求失败：' + error, 'error')
+    out('请求失败：' + ((error && error.message) || error))
+    toast('连接中断，请稍后重试', 'error')
   } finally { state.busy = false; restore() }
   load()
 }
@@ -1363,13 +1413,54 @@ async function putChunk (uploadId, index, blob, job) {
   throw lastError
 }
 
-/** 点课件行：展开看这一页页的文字，再点一次收起——不是只能开不能关。 */
+/** 课程详情重绘时保留三列与页面位置：展开课件/加载更多不应该把人踢回顶部。 */
+function courseScrollSnapshot () {
+  var value = { windowY: window.scrollY }
+  ;['courses','lessons','detail'].forEach(function (id) {
+    var node = document.getElementById(id)
+    value[id] = node ? node.scrollTop : 0
+  })
+  return value
+}
+function restoreCourseScroll (value) {
+  if (!value) return
+  requestAnimationFrame(function () {
+    window.scrollTo(0, value.windowY || 0)
+    ;['courses','lessons','detail'].forEach(function (id) {
+      var node = document.getElementById(id)
+      if (node) node.scrollTop = value[id] || 0
+    })
+  })
+}
+function renderCoursesKeepingScroll () {
+  var at = courseScrollSnapshot()
+  renderCourses()
+  restoreCourseScroll(at)
+}
+
+async function fetchMaterialJson (params) {
+  var last = null
+  for (var attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      var res = await fetch('/api/admin/material?' + params.toString(), { headers: headers(false) })
+      var data = await res.json().catch(function () { return {} })
+      if (!res.ok || !data.ok) throw new Error(data.message || data.error || ('HTTP ' + res.status))
+      return data
+    } catch (error) {
+      last = error
+      if (attempt === 0) await new Promise(function (done) { setTimeout(done, 450) })
+    }
+  }
+  throw new Error('暂时无法读取课件，请稍后重试')
+}
+
+/** 点课件行：展开看文字，再点一次收起。 */
 function toggleMaterial (name) {
   var task = taskByKey(state.sel.lesson)
   if (!task) return
   if (state.preview && state.preview.course === task.courseName && state.preview.name === name) {
     state.preview = null
-    renderCourses()
+    renderCoursesKeepingScroll()
     return
   }
   return openMaterial(name)
@@ -1378,22 +1469,23 @@ function toggleMaterial (name) {
 async function openMaterial (name) {
   var task = taskByKey(state.sel.lesson)
   if (!task) return
+  var at = courseScrollSnapshot()
   state.preview = { course: task.courseName, name: name, loading: true, pages: [], slideCount: 0, offset: 0, hasMore: false }
   renderCourses()
+  restoreCourseScroll(at)
   try {
     var params = new URLSearchParams({ course: task.courseName, lesson: task.title, name: name, pages: '8' })
-    var res = await fetch('/api/admin/material?' + params.toString(), { headers: headers(false) })
-    var data = await res.json().catch(function () { return {} })
-    if (!data.ok) throw new Error(data.message || data.error || '读不到课件')
+    var data = await fetchMaterialJson(params)
     state.preview = {
       course: task.courseName, name: data.name, slideCount: data.slideCount,
       pages: data.pages || [], offset: (data.pages || []).length, hasMore: Boolean(data.hasMore)
     }
   } catch (error) {
     state.preview = null
-    toast('预览失败：' + error, 'error')
+    toast(error.message || '预览失败', 'error')
   }
   renderCourses()
+  restoreCourseScroll(at)
 }
 
 /** 继续加载：一次 8 页往下接，直到整份课件都看过。 */
@@ -1401,25 +1493,23 @@ async function loadMorePages (btn) {
   var preview = state.preview
   var task = taskByKey(state.sel.lesson)
   if (!preview || !preview.hasMore || !task) return
+  var at = courseScrollSnapshot()
   var restore = busyButton(btn, '加载中…')
   try {
     var params = new URLSearchParams({
       course: preview.course, lesson: task.title, name: preview.name,
       pages: '8', offset: String(preview.offset || 0)
     })
-    var res = await fetch('/api/admin/material?' + params.toString(), { headers: headers(false) })
-    var data = await res.json().catch(function () { return {} })
-    if (!data.ok) throw new Error(data.message || data.error || '读不到更多页')
+    var data = await fetchMaterialJson(params)
     preview.pages = (preview.pages || []).concat(data.pages || [])
     preview.offset = preview.pages.length
     preview.hasMore = Boolean(data.hasMore)
     preview.slideCount = data.slideCount || preview.slideCount
-    var last = preview.pages.length ? preview.pages[preview.pages.length - 1].slideNumber : 0
-    toast('已加载到第 ' + last + ' 页（共 ' + preview.slideCount + ' 页）', 'ok')
   } catch (error) {
-    toast('加载失败：' + error, 'error')
+    toast(error.message || '加载失败', 'error')
   } finally { restore() }
   renderCourses()
+  restoreCourseScroll(at)
 }
 
 /** 删除一份已归档的课件：确认之后才动手，删完刷新列表。 */
@@ -1579,13 +1669,18 @@ function handleAct (act, btn) {
   if (act === 'sort-toggle') { state.sel.sort = state.sel.sort === 'asc' ? 'desc' : 'asc'; saveSel(); renderCourses(); return }
   if (act === 'filter-all') { state.sel.tag = ''; state.sel.year = 'all'; saveSel(); renderCourses(); return }
   if (act === 'filter-year') { state.sel.year = state.sel.year === value ? 'all' : value; state.sel.tag = ''; saveSel(); renderCourses(); return }
+  if (act === 'view-stage') {
+    state.sel.stage = value; state.sel.tag = ''; state.sel.year = 'all'; state.sel.course = ''; state.sel.lesson = ''
+    saveSel(); go('courses'); return
+  }
+  if (act === 'clear-stage') { state.sel.stage = ''; state.sel.course = ''; state.sel.lesson = ''; saveSel(); renderCourses(); return }
   if (act === 'pick-course') {
     state.sel.course = value; state.sel.lesson = ''; state.preview = null; saveSel(); renderCourses(); return
   }
   if (act === 'pick-lesson') { state.sel.lesson = value; state.preview = null; saveSel(); renderCourses(); return }
   if (act === 'pick-file') { var input = document.querySelector('[data-file="' + key + '"]'); if (input) input.click(); return }
   if (act === 'open-material') return toggleMaterial(value)
-  if (act === 'close-material') { state.preview = null; renderCourses(); return }
+  if (act === 'close-material') { state.preview = null; renderCoursesKeepingScroll(); return }
   if (act === 'load-more') return loadMorePages(btn)
   if (act === 'delete-material') return deleteMaterial(key, btn.dataset.name, btn.dataset.scope, btn)
   if (act === 'cancel-upload') {
@@ -1612,11 +1707,7 @@ function handleAct (act, btn) {
   if (act === 'add-course-tag') { var cbox = document.querySelector('[data-newcoursetag="' + btn.dataset.course + '"]'); return addTag('', cbox && cbox.value, 'course', btn.dataset.course) }
   if (act === 'remove-course-tag') return removeTag('', btn.dataset.tag, 'course', btn.dataset.course)
   if (act === 'retry') return doAction('retry', { replayKey: key }, btn)
-  if (act === 'republish') {
-    var task = taskByKey(key)
-    if (!task || !task.artifacts || !task.artifacts.transcriptPath) { toast('这条课次还没有转录稿', 'error'); return }
-    return doAction('republish', { transcriptPath: task.artifacts.transcriptPath, course: task.courseName, lesson: task.title, replayKey: key }, btn)
-  }
+  if (act === 'refresh-note') return doAction('refresh-note', { replayKey: key }, btn)
   if (act === 'cycle') return doAction('cycle', { replayKey: key, maxTasks: 1 }, btn)
   if (act === 'ocr-material') {
     var ocrTask = taskByKey(key)
@@ -1663,7 +1754,13 @@ document.addEventListener('click', function (event) {
   var menu = $('menu')
   if (menu && menu.open && !event.target.closest('#menu')) menu.open = false
   var goLink = event.target.closest('[data-go]')
-  if (goLink) { event.preventDefault(); go(goLink.dataset.go); return }
+  if (goLink) {
+    event.preventDefault()
+    if (goLink.dataset.course) state.sel.course = goLink.dataset.course
+    if (goLink.dataset.lesson) state.sel.lesson = goLink.dataset.lesson
+    if (goLink.dataset.course || goLink.dataset.lesson) { state.sel.stage = ''; saveSel() }
+    go(goLink.dataset.go); return
+  }
   var tab = event.target.closest('.seg button')
   if (tab) { go(tab.dataset.tab); return }
   var tagRow = event.target.closest('.tag-row[data-tag]')

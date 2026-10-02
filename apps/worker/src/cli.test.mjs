@@ -590,6 +590,105 @@ test('--revise rewrites only the named module and keeps the rest', async () => {
   assert.match(stateAfter.lesson.finalNote.markdown, /补上了法条依据/, '重新拼装后的成品包含修订内容')
 })
 
+test('refresh-note：补传课件后只更新笔记并自动发布，不重新下载或转写', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-refresh-note-'))
+  const scratch = path.join(dir, 'scratch')
+  const outputDir = path.join(scratch, 'replays', 'replay-1', 'output')
+  const siteDir = path.join(scratch, 'site')
+  const materialsRoot = path.join(scratch, 'materials')
+  fs.mkdirSync(outputDir, { recursive: true })
+
+  const transcriptPath = path.join(outputDir, 'raw-transcript.md')
+  fs.writeFileSync(transcriptPath, [
+    '# 刑法分论 · 第10-12节 · 原始课堂转录', '',
+    '[00:00:01 – 00:00:05] 第一句', '',
+    '[00:00:06 – 00:00:10] 第二句'
+  ].join('\n'))
+
+  const firstModel = fakeModel()
+  const h = harness({
+    callModel: firstModel.callModel,
+    configOverrides: { scratchRoot: scratch, materialsRoot, siteRoot: siteDir }
+  })
+  h.ledger.discoverReplays([{
+    replay_key: 'replay-1', course_key: 'course-abc',
+    course_name: '刑法分论', title: '第10-12节'
+  }])
+  h.ledger.reportStage({
+    id: h.ledger.getTask('replay-1').id,
+    stage: 'transcript_ready',
+    data: { artifacts: { transcriptPath } }
+  })
+
+  // 先生成并发布一版没有课件的笔记。
+  assert.equal(await runCli([
+    'notes', '--transcript', transcriptPath, '--course', '刑法分论', '--lesson', '第10-12节',
+    '--replay-key', 'replay-1', '--output-dir', outputDir, '--ignore-cost-window', '1'
+  ], h.deps), 0)
+
+  // 这一节原本已有一页纸：更新正文时它必须随版本一起重建；
+  // 若原本没有一页纸，refresh-note 不应擅自新增一种派生产物。
+  const firstNotePath = path.join(outputDir, '第10-12节.md')
+  const firstNote = fs.readFileSync(firstNotePath, 'utf8')
+  fs.writeFileSync(path.join(outputDir, 'onepage.json'), JSON.stringify({
+    schemaVersion: 1,
+    course: '刑法分论',
+    lesson: '第10-12节',
+    replayKey: 'replay-1',
+    sourceChecksum: markdownChecksum(firstNote),
+    generatedAt: '2026-09-25T00:00:00.000Z',
+    title: '旧版一页纸',
+    markdown: '## 一、旧版\n\n- 这是更新前的一页纸。',
+    chars: 18
+  }, null, 2))
+
+  assert.equal(await runCli([
+    'publish', '--from', outputDir, '--out', siteDir, '--replay-key', 'replay-1', '--no-notify'
+  ], h.deps), 0)
+  assert.equal(h.ledger.getTask('replay-1').stage, 'published')
+
+  // 之后才补上传课件：refresh-note 必须把这份“后来才到”的材料接进已有笔记。
+  writeDeckFixture(scratch, {
+    course: '刑法分论', lesson: '第10-12节', replayKey: 'replay-1',
+    name: '补传课件.pptx'
+  })
+
+  const revisionModel = fakeModel()
+  const derivedModel = fakeDerivedModel()
+  const callModel = async payload => {
+    if (payload.role === 'onepage') return derivedModel.callModel(payload)
+    return revisionModel.callModel(payload)
+  }
+  const acquireBefore = h.calls.acquire.length
+  const pythonBefore = h.calls.python.length
+  const code = await runCli(['refresh-note', '--replay-key', 'replay-1'], {
+    ...h.deps,
+    callModel,
+    configOverrides: { scratchRoot: scratch, materialsRoot, siteRoot: siteDir }
+  })
+  assert.equal(code, 0, 'refresh-note 应完整跑到重新发布')
+  assert.ok(revisionModel.calls.includes('revision'), '应走已有模块的修订通道')
+  assert.ok(!revisionModel.calls.includes('outline'), '不能重新切大纲、从头写整课')
+  const revisionPrompt = revisionModel.payloads
+    .filter(payload => payload.role === 'revision')
+    .map(payload => JSON.stringify(payload.prompt))
+    .join('\n')
+  assert.match(revisionPrompt, /共同故意|共同行为/, '补传的课件文字必须进入修订提示词')
+  assert.equal(h.calls.acquire.length, acquireBefore, '更新笔记不得重新下载教学网视频')
+  assert.equal(h.calls.python.length, pythonBefore, '更新笔记不得重新转写音视频')
+  assert.equal(h.ledger.getTask('replay-1').stage, 'published', '更新成功后应自动重新发布')
+
+  const library = JSON.parse(fs.readFileSync(path.join(siteDir, 'library.json'), 'utf8'))
+  const record = library.find(item => item.replayKey === 'replay-1')
+  assert.ok(record, '更新后的笔记要进入发布库')
+  assert.match(record.markdown, /补上了法条依据/, '公开版本应当是修订后的正文')
+  const refreshedOnepage = JSON.parse(fs.readFileSync(path.join(outputDir, 'onepage.json'), 'utf8'))
+  const refreshedNote = fs.readFileSync(firstNotePath, 'utf8')
+  assert.equal(refreshedOnepage.sourceChecksum, markdownChecksum(refreshedNote), '已有一页纸要重新绑定到新版正文')
+  assert.match(refreshedOnepage.title, /重新生成/, '一页纸内容应来自本轮重建')
+  assert.ok(derivedModel.calls.includes('onepage'), '正文变化后已有一页纸必须真正重建一次')
+})
+
 test('notes 阶段写出的 brief.json 与成品正文绑定，publish 认它（自己产的东西自己敢挂）', async () => {
   // 这条把生成侧与校验侧连起来测：两边的指纹算法必须成对（一个 trimEnd、一个不 trimEnd，
   // 就会变成"自己生成的简报自己不敢挂"）。
