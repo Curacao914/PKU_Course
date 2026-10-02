@@ -1758,6 +1758,40 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
     const libraryForRebuild = path.join(siteRoot, 'library.json')
 
     /**
+     * 一次性迁移旧部署：实体 site/ → site.releases/legacy-*，site 本身改成 symlink。
+     * 这一步有一个无法规避的“目录改成链接”瞬间，所以不允许普通 publish 偷偷做；
+     * 生产上先停 public/admin 两个站点进程，再显式 --yes。
+     */
+    if (options.flags?.has('migrate-site-root')) {
+      if (!options.flags?.has('yes')) {
+        throw new Error(
+          '--migrate-site-root 会改变站点目录拓扑；请先停 course-site/course-admin 两个服务，确认后加 --yes'
+        )
+      }
+      const lock = acquirePublishLock({
+        lockPath: publishLockPath(siteRoot),
+        info: { kind: 'migrate-site-root' },
+        warnings: line => stderr(line)
+      })
+      if (!lock.ok) throw new Error(lock.message)
+      try {
+        const result = migrateLegacySiteRoot({ siteRoot, now: clockNow() })
+        emit({
+          migrated: result.migrated,
+          alreadyManaged: result.alreadyManaged,
+          siteRoot: result.live,
+          releaseDir: result.releaseDir,
+          next: result.migrated
+            ? '迁移完成；现在可重新启动 course-site/course-admin。此后的 publish 会先构建完整快照、校验，再原子切换。'
+            : '已经是 release 模式，无需重复迁移。'
+        }, options)
+        return 0
+      } finally {
+        lock.release()
+      }
+    }
+
+    /**
      * 发布互斥（见 publish-guard.mjs 的说明）：两个发布同时跑会互相覆盖——
      * 后写的那个把先写的整条记录从发布库里抹掉，站点上少一整节课且没有报错。
      * --rebuild 同样持锁：它重写整个 site 目录，与正常发布并行会把产物写花。
@@ -1802,30 +1836,49 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
       if (!fs.existsSync(libraryForRebuild)) throw new Error(`找不到发布库 ${libraryForRebuild}；先发布过至少一篇笔记再 --rebuild`)
       const revisionBefore = libraryRevision(libraryForRebuild)
       const library = JSON.parse(fs.readFileSync(libraryForRebuild, 'utf8'))
-      const site = writeSite({
-        records: library,
-        outputDir: siteRoot,
-        siteOrigin: options.options.origin || 'https://course.law-tech.dev',
-        docs: readPublicDocs()
-      })
-      /**
-       * --write-back：把 refreshRecord 算出来的派生字段写回发布库。
-       *
-       * 为什么需要：站点页面每次重建都会重算这些字段（A3 之后包括**全量小节索引**——
-       * 每节的 id/标题/字数/内容指纹），但发布库本身还是旧的，而检索、MCP、公开索引读的
-       * 都是发布库。不写回的话，"老笔记也有小节索引"永远不会发生。
-       * 两道保险照旧：写前版本检查（读入后被改过就中止）+ 留一份 .bak。
-       */
-      if (options.flags?.has('write-back')) {
-        const refreshed = library.map(refreshRecord)
-        const check = checkRevisionUnchanged({ file: libraryForRebuild, expected: revisionBefore.revision })
-        if (!check.ok) throw new Error(check.message)
-        const backup = `${libraryForRebuild}.bak-${new Date().toISOString().replace(/[:.]/g, '-')}`
-        fs.copyFileSync(libraryForRebuild, backup)
-        writeJsonAtomic(libraryForRebuild, refreshed)
-        const withSections = refreshed.filter(item => (item.sections || []).length).length
-        stderr(`发布库已写回派生字段：${refreshed.length} 条（其中 ${withSections} 条带小节索引）；写前备份 ${path.basename(backup)}`)
+      const writeBack = options.flags?.has('write-back')
+      const recordsForLibrary = writeBack ? library.map(refreshRecord) : library
+      const atomic = usesAtomicSiteReleases(siteRoot)
+      let site
+      let release = null
+
+      if (atomic) {
+        const outcome = publishViaRelease({
+          siteRoot,
+          records: recordsForLibrary,
+          expectedRevision: revisionBefore.revision,
+          origin: options.options.origin || 'https://course.law-tech.dev',
+          // rebuild 不改正文；已有向量仍然与原正文指纹绑定，可以安全带入新 release。
+          carryEmbeddings: true
+        })
+        site = outcome.site
+        release = outcome.release
+        if (writeBack) {
+          const withSections = recordsForLibrary.filter(item => (item.sections || []).length).length
+          stderr(
+            `发布库已随新 release 写回派生字段：${recordsForLibrary.length} 条（其中 ${withSections} 条带小节索引）；` +
+            `旧 release 保留作回滚：${release.previous || '（首次发布，无旧版）'}`
+          )
+        }
+      } else {
+        // 兼容旧部署：在显式迁移之前维持原来的“直接写实体 site 目录”行为。
+        site = writeSite({
+          records: library,
+          outputDir: siteRoot,
+          siteOrigin: options.options.origin || 'https://course.law-tech.dev',
+          docs: readPublicDocs()
+        })
+        if (writeBack) {
+          const check = checkRevisionUnchanged({ file: libraryForRebuild, expected: revisionBefore.revision })
+          if (!check.ok) throw new Error(check.message)
+          const backup = `${libraryForRebuild}.bak-${new Date().toISOString().replace(/[:.]/g, '-')}`
+          fs.copyFileSync(libraryForRebuild, backup)
+          writeJsonAtomic(libraryForRebuild, recordsForLibrary)
+          const withSections = recordsForLibrary.filter(item => (item.sections || []).length).length
+          stderr(`发布库已写回派生字段：${recordsForLibrary.length} 条（其中 ${withSections} 条带小节索引）；写前备份 ${path.basename(backup)}`)
+        }
       }
+
       const index = readSiteIndex(siteRoot)
       const purge = await purgeCache(options, { reason: '重建站点', files: site.written || [] })
       emit({
@@ -1833,6 +1886,8 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
         notes: index.count ?? library.length,
         siteRoot,
         pages: (site.written || []).length,
+        atomicRelease: Boolean(release),
+        release: release ? { current: release.current, previous: release.previous, validatedNotes: release.validation.notes } : null,
         cachePurged: purge.ok === true,
         cache: purge
       }, options)
