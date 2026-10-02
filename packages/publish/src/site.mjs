@@ -588,31 +588,31 @@ details.note-meta pre { background: var(--bg-soft); border-radius: var(--radius)
 @media (max-width: 720px) {
   /* 阅读页工具栏仍保持单行；首页/索引/搜索则改成“品牌+设置 / 横向导航”两层，
      不再为了把 5 个入口硬塞进 390px 而把“课程笔记”压成“课…”。 */
-  .reader-topbar .inner { gap: 8px; padding: 0 10px; }
-  .reader-topbar .brand { display: none; }
-  .reader-topbar .spacer { display: none; }
-  .reader-topbar .tools { margin-left: auto; }
-  .site-topbar { height: auto; }
-  .site-topbar .inner {
+  .topbar[data-layout="reader"] .inner { gap: 8px; padding: 0 10px; }
+  .topbar[data-layout="reader"] .brand { display: none; }
+  .topbar[data-layout="reader"] .spacer { display: none; }
+  .topbar[data-layout="reader"] .tools { margin-left: auto; }
+  .topbar[data-layout="site"] { height: auto; }
+  .topbar[data-layout="site"] .inner {
     min-height: var(--header-h); height: auto; padding: 7px 14px 6px;
     display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 4px 10px;
   }
-  .site-topbar .brand {
+  .topbar[data-layout="site"] .brand {
     grid-column: 1; grid-row: 1; align-self: center;
     font-size: 16px; min-width: 0; overflow: visible; white-space: nowrap;
   }
-  .site-topbar .spacer { display: none; }
-  .site-topbar nav {
+  .topbar[data-layout="site"] .spacer { display: none; }
+  .topbar[data-layout="site"] nav {
     grid-column: 1 / -1; grid-row: 2;
     display: flex; gap: 4px; overflow-x: auto; overscroll-behavior-x: contain;
     scrollbar-width: none; padding: 2px 0 1px; font-size: 13px;
   }
-  .site-topbar nav::-webkit-scrollbar { display: none; }
-  .site-topbar nav a {
+  .topbar[data-layout="site"] nav::-webkit-scrollbar { display: none; }
+  .topbar[data-layout="site"] nav a {
     flex: none; padding: 5px 8px; min-height: 32px; display: inline-flex; align-items: center;
     border-radius: 8px; white-space: nowrap;
   }
-  .site-topbar .prefmenu { grid-column: 2; grid-row: 1; align-self: center; justify-self: end; }
+  .topbar[data-layout="site"] .prefmenu { grid-column: 2; grid-row: 1; align-self: center; justify-self: end; }
   .topbar .navmenu, .topbar .tools { flex: none; }
   .navmenu .nav-pop { max-width: calc(100vw - 24px); }
   .prefmenu .pref-pop { min-width: 0; width: min(170px, calc(100vw - 24px)); }
@@ -1026,7 +1026,7 @@ ${canonical ? `<link rel="canonical" href="${escapeHtml(canonical)}">` : ''}
 ${PREF_SCRIPT}
 </head>
 <body>
-<header class="topbar ${topRight ? 'reader-topbar' : 'site-topbar'}"><div class="inner">
+<header class="topbar" data-layout="${topRight ? 'reader' : 'site'}"><div class="inner">
   <a class="brand" href="/">课程笔记</a>
   <span class="spacer"></span>
   ${topRight}
