@@ -2449,6 +2449,31 @@ async function auditMobileLayout (page, site, noteUrl, failures) {
       '品牌「' + layout.brandText + '」宽 ' + (layout.brand?.width ?? -1) + 'px')
   }
 
+  // 地图不应为了“完全塞进 390px”把节点文字压成蚂蚁字：手机上保留约两屏宽，横向滑动。
+  await page.goto(site.url + '/map/', { waitUntil: 'domcontentloaded' })
+  await page.waitForSelector('.map-holder svg', { timeout: 5000 }).catch(() => {})
+  await page.waitForTimeout(250)
+  const mapScroll = await page.evaluate(() => {
+    const holder = document.querySelector('.map-holder')
+    const svg = holder && holder.querySelector('svg')
+    const hint = document.querySelector('.map-swipe-hint')
+    const hr = holder ? holder.getBoundingClientRect() : null
+    const sr = svg ? svg.getBoundingClientRect() : null
+    return {
+      holderWidth: hr ? Math.round(hr.width) : -1,
+      scrollWidth: holder ? Math.round(holder.scrollWidth) : -1,
+      svgWidth: sr ? Math.round(sr.width) : -1,
+      hintVisible: Boolean(hint && getComputedStyle(hint).display !== 'none' && /左右滑动/.test(hint.textContent || ''))
+    }
+  })
+  await record('知识地图手机端可读并可横向滑动',
+    mapScroll.holderWidth >= 340 &&
+      mapScroll.svgWidth >= 620 &&
+      mapScroll.scrollWidth > mapScroll.holderWidth + 200 &&
+      mapScroll.hintVisible,
+    'holder ' + mapScroll.holderWidth + 'px，svg ' + mapScroll.svgWidth + 'px，scrollWidth ' +
+      mapScroll.scrollWidth + 'px，提示=' + mapScroll.hintVisible)
+
   // 桌面首页：日期式课次标题在 1440px 下应该保持一行，不能明明有空间还把“节”掉到下一行。
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto(site.url + '/index.html', { waitUntil: 'domcontentloaded' })
@@ -2473,6 +2498,36 @@ async function auditMobileLayout (page, site, noteUrl, failures) {
   // 管理台：通知记录在窄屏是卡片，且不用逐字换行
   await page.goto(site.url + '/admin', { waitUntil: 'domcontentloaded' })
   await page.waitForTimeout(400)
+
+  // 概览三个数字在手机上应该一眼横向扫完，不该 14/1/7 各占一整行。
+  const overviewStats = await page.evaluate(() => {
+    const nodes = [...document.querySelectorAll('#tab-overview .grid.three .stat')]
+    const rects = nodes.map(node => {
+      const r = node.getBoundingClientRect()
+      return { top: Math.round(r.top), width: Math.round(r.width) }
+    })
+    const ok = document.querySelector('#tab-overview .pill.ok')
+    const root = getComputedStyle(document.documentElement)
+    return {
+      count: rects.length,
+      tops: rects.map(r => r.top),
+      widths: rects.map(r => r.width),
+      okColor: ok ? getComputedStyle(ok).color : '',
+      okToken: root.getPropertyValue('--ok').trim(),
+      accentToken: root.getPropertyValue('--accent').trim()
+    }
+  })
+  await record('概览三项统计手机端并排',
+    overviewStats.count === 3 &&
+      Math.max(...overviewStats.tops) - Math.min(...overviewStats.tops) <= 3 &&
+      overviewStats.widths.every(width => width >= 80),
+    'tops=' + overviewStats.tops.join('/') + '，widths=' + overviewStats.widths.join('/'))
+  await record('正常状态保持绿色语义、不被品牌红染色',
+    overviewStats.okToken === '#1c7c4a' &&
+      /^#?94070a$/i.test(overviewStats.accentToken) &&
+      /28, 124, 74/.test(overviewStats.okColor),
+    'ok=' + overviewStats.okToken + '，accent=' + overviewStats.accentToken + '，pill=' + overviewStats.okColor)
+
   // 通知记录在「设置」这一栏里：先切到设置栏，再点分类按钮（与主审计同一套路径）
   await page.click('#tabs [data-tab="settings"], [data-act="tab"][data-value="settings"]').catch(async () => {
     await page.evaluate(() => {
