@@ -263,10 +263,12 @@ button.item:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
   <nav class="seg" role="tablist">
     <button role="tab" data-tab="overview" aria-selected="true">概览</button>
     <button role="tab" data-tab="courses" aria-selected="false">课程</button>
+    <button role="tab" data-tab="content" aria-selected="false">内容</button>
     <button role="tab" data-tab="settings" aria-selected="false">设置</button>
   </nav>
   <section id="tab-overview"></section>
   <section id="tab-courses" hidden></section>
+  <section id="tab-content" hidden></section>
   <section id="tab-settings" hidden></section>
   <div class="card" style="padding:6px 22px">
     <details class="d" id="outCard" style="border-top:0" data-fold="out">
@@ -288,8 +290,9 @@ var KEY = 'course.admin.token'
 var OPEN_KEY = 'course.admin.open'
 var SEL_KEY = 'course.admin.sel'
 var state = {
-  status: null, balance: null, config: null, storage: null,
+  status: null, balance: null, config: null, storage: null, content: null,
   tab: 'overview', busy: false, requests: {}, uploads: {}, open: {},
+  contentDraft: { id: '', course: '', topic: '', lessons: [], enabled: true },
   sel: { tag: '', year: 'all', course: '', lesson: '', sort: 'desc', rail: false, pane: 'maintenance' },
   preview: null,
   // 没保存的运行参数改动：20 秒轮询重绘与分栏切换都不该把它抹掉
@@ -312,7 +315,11 @@ var LABELS = {
   retry: '放回队列（重跑这条课次，会调用模型）',
   republish: '重新发布页面（用现有笔记，不调用模型）',
   revise: '用模型重写这个模块（调用模型，产生费用）',
-  'notify-retry': '重发失败通知（会发微信）'
+  'notify-retry': '重发失败通知（会发微信）',
+  'rebuild-content': '原子重建站点（不调用模型）',
+  'rollback-content': '回滚上一版内容（不调用模型）',
+  'rebuild-integration': '重建这一章（确定性抽取，不调用模型）',
+  'rebuild-integrations': '重建全部章节（确定性抽取，不调用模型）'
 }
 var MODULE_TEXT = { approved: '已通过', draft: '草稿', reviewing: '审查中', revising: '重写中', pending: '待写', failed: '失败' }
 // 阶段名要说人话：光看"待处理 · 尝试 0 次"没人知道它卡在哪一步
@@ -434,6 +441,13 @@ async function load (options) {
     return false
   }
   state.status = data
+  try {
+    var contentRes = await fetch('/api/admin/content', { headers: headers(false) })
+    var contentData = await contentRes.json().catch(function () { return {} })
+    state.content = contentRes.ok ? contentData : { ok: false, error: contentData.error || 'content_state_failed' }
+  } catch (e) {
+    state.content = { ok: false, error: String(e) }
+  }
   if (!state.config) {
     try { state.config = await (await fetch('/api/admin/config', { headers: headers(false) })).json() } catch (e) {}
   }
@@ -445,7 +459,7 @@ async function load (options) {
 function isDirty () {
   var active = document.activeElement
   if (active && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName)) return true
-  var boxes = document.querySelectorAll('[data-request],[data-pw="next"],[data-newtag]')
+  var boxes = document.querySelectorAll('[data-request],[data-pw="next"],[data-newtag],[data-integration-text]')
   for (var i = 0; i < boxes.length; i += 1) if (boxes[i].value) return true
   return Object.keys(state.configDraft).length > 0
 }
@@ -497,7 +511,7 @@ function render () {
     $('tab-' + btn.dataset.tab).hidden = !on
   })
   renderRunState()
-  renderOverview(); renderCourses(); renderSettings()
+  renderOverview(); renderCourses(); renderContent(); renderSettings()
 }
 function card (inner, style) { return '<div class="card"' + (style ? ' style="' + style + '"' : '') + '>' + inner + '</div>' }
 
