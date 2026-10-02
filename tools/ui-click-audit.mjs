@@ -787,10 +787,10 @@ async function auditAdmin(page, site, fixture, calls, dialogs, failures) {
   await page.click('.seg button[data-tab="content"]')
   const integrationDelete = await page.$('#tab-content [data-act="delete-integration"]')
   if (integrationDelete) {
-    const beforeItems = await page.$eval('#tab-content [data-act="edit-integration"]', nodes => nodes.length)
+    const beforeItems = await page.$$eval('#tab-content [data-act="edit-integration"]', nodes => nodes.length)
     await integrationDelete.click()
     await page.waitForFunction(() => !document.querySelector('#tab-content [data-act="delete-integration"][data-id="audit-integration"]'), { timeout: 5000 }).catch(() => {})
-    const afterItems = await page.$eval('#tab-content [data-act="edit-integration"]', nodes => nodes.length)
+    const afterItems = await page.$$eval('#tab-content [data-act="edit-integration"]', nodes => nodes.length)
     const deleteToast = (await page.textContent('#toast').catch(() => '')).trim()
     if (!(afterItems === beforeItems - 1 && /章节定义已删除/.test(deleteToast))) {
       failures.push('管理台 内容 · 删除章节定义没有从界面消失（' + beforeItems + ' → ' + afterItems + '，提示「' + deleteToast + '」）')
