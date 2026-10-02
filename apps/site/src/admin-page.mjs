@@ -1604,6 +1604,17 @@ function handleAct (act, btn) {
   if (act === 'revise') return reviseWith(key, btn.dataset.module, btn)
   if (act === 'revise-first') return reviseWith(key, '', btn)
   if (act === 'notify-retry') return doAction('notify-retry', {}, btn)
+  if (act === 'rebuild-content') return doAction('rebuild-content', {}, btn)
+  if (act === 'rollback-content') {
+    if (!window.confirm('回滚到上一份完整内容版本？当前版本不会删除，之后仍然可以再切回来。')) return
+    return doAction('rollback-content', {}, btn)
+  }
+  if (act === 'rebuild-integration') return doAction('rebuild-integration', { id: btn.dataset.id || '' }, btn)
+  if (act === 'rebuild-integrations') return doAction('rebuild-integrations', {}, btn)
+  if (act === 'edit-integration') return editIntegration(btn.dataset.id || '')
+  if (act === 'new-integration') { resetIntegrationDraft(); renderContent(); return }
+  if (act === 'save-integration') return saveIntegration(btn)
+  if (act === 'delete-integration') return deleteIntegration(btn.dataset.id || '', btn)
   if (act === 'discover' || act === 'notify' || act === 'doctor' || act === 'backup') return doAction(act, {}, btn)
   if (act === 'prune') return doAction('prune', {}, btn)
   if (act === 'prune-apply') {
@@ -1710,11 +1721,34 @@ document.addEventListener('input', function (event) {
   if (box) { state.requests[box.dataset.request] = box.value; return }
   // 运行参数的改动先记在本地：切分栏或 20 秒轮询重绘都不该把它抹掉
   var cfg = target.closest('[data-cfg]')
-  if (cfg) state.configDraft[cfg.dataset.cfg] = cfg.value
+  if (cfg) { state.configDraft[cfg.dataset.cfg] = cfg.value; return }
+  var integrationText = target.closest('[data-integration-text]')
+  if (integrationText) {
+    state.contentDraft[integrationText.dataset.integrationText] = integrationText.value
+  }
 })
 document.addEventListener('change', function (event) {
-  var cfg = event.target && event.target.closest ? event.target.closest('[data-cfg]') : null
-  if (cfg) state.configDraft[cfg.dataset.cfg] = cfg.value
+  var target = event.target
+  var cfg = target && target.closest ? target.closest('[data-cfg]') : null
+  if (cfg) { state.configDraft[cfg.dataset.cfg] = cfg.value; return }
+  if (!target || !target.closest) return
+  var course = target.closest('[data-integration-course]')
+  if (course) {
+    state.contentDraft.course = course.value
+    state.contentDraft.lessons = []
+    renderContent()
+    return
+  }
+  var lesson = target.closest('[data-integration-lesson]')
+  if (lesson) {
+    var value = lesson.dataset.integrationLesson
+    var lessons = (state.contentDraft.lessons || []).filter(function (item) { return item !== value })
+    if (lesson.checked) lessons.push(value)
+    state.contentDraft.lessons = lessons
+    return
+  }
+  var enabled = target.closest('[data-integration-enabled]')
+  if (enabled) state.contentDraft.enabled = enabled.checked
 })
 document.addEventListener('toggle', function (event) {
   var node = event.target
