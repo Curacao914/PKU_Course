@@ -38,7 +38,9 @@ import {
   copyReleaseFileIfPresent,
   discardSiteRelease,
   inspectSiteRoot,
+  listReleaseFiles,
   migrateLegacySiteRoot,
+  previousSiteRelease,
   promoteSiteRelease,
   sealSiteRelease,
   validateSiteRelease
@@ -1897,6 +1899,42 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
      * 这一步有一个无法规避的“目录改成链接”瞬间，所以不允许普通 publish 偷偷做；
      * 生产上先停 public/admin 两个站点进程，再显式 --yes。
      */
+    if (options.flags?.has('rollback-site')) {
+      if (!options.flags?.has('yes')) {
+        throw new Error('--rollback-site 会切换正式内容版本；确认后加 --yes')
+      }
+      const lock = acquirePublishLock({
+        lockPath: publishLockPath(siteRoot),
+        info: { kind: 'rollback-site' },
+        warnings: line => stderr(line)
+      })
+      if (!lock.ok) throw new Error(lock.message)
+      try {
+        const current = inspectSiteRoot(siteRoot)
+        const previous = previousSiteRelease(siteRoot)
+        if (!previous) throw new Error('没有可回滚的上一份内容 release')
+        const validation = validateSiteRelease(previous.dir)
+        const files = [...new Set([
+          ...(current.target ? listReleaseFiles(current.target) : []),
+          ...listReleaseFiles(previous.dir)
+        ])]
+        const switched = promoteSiteRelease({ siteRoot, releaseDir: previous.dir })
+        const purge = await purgeCache(options, { reason: `内容回滚到 ${previous.name}`, files })
+        emit({
+          rolledBack: true,
+          siteRoot,
+          from: switched.previous,
+          to: switched.releaseDir,
+          validatedNotes: validation.notes,
+          cachePurged: purge.ok === true,
+          cache: purge
+        }, options)
+        return 0
+      } finally {
+        lock.release()
+      }
+    }
+
     if (options.flags?.has('migrate-site-root')) {
       if (!options.flags?.has('yes')) {
         throw new Error(
