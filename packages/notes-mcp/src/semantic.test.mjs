@@ -52,6 +52,7 @@ test('解析索引：坏条目跳过而不是整份作废；维度不一致也�
   assert.equal(index.items.size, 2)
   assert.equal(index.skipped, 2)
   assert.equal(index.dim, 3)
+  assert.equal(index.libraryRevision, '')
   assert.equal(parseEmbeddingIndex('不是 JSON'), null)
   assert.equal(parseEmbeddingIndex({}), null)
 })
@@ -135,6 +136,70 @@ test('降级不影响上层：索引缺失 / 查询失败时 search() 返回空�
   const hits = await working.search({ query: '乙是什么', records: RECORDS })
   assert.equal(hits.length, 1)
   assert.equal(hits[0].location.id, '二-乙')
+})
+
+test('整库 revision 绑定：查询侧严格拒绝 unbound / mismatch，构建侧仍可读取旧索引做指纹复用', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-semantic-revision-'))
+  const file = path.join(dir, 'embeddings.json')
+
+  fs.writeFileSync(file, JSON.stringify({ ...INDEX, libraryRevision: 'rev-a' }))
+  const matched = loadEmbeddingIndex(file, { expectedLibraryRevision: 'rev-a' })
+  assert.ok(matched.index)
+  assert.equal(matched.revisionMatch, true)
+  assert.equal(matched.index.libraryRevision, 'rev-a')
+
+  const mismatch = loadEmbeddingIndex(file, { expectedLibraryRevision: 'rev-b' })
+  assert.equal(mismatch.index, null)
+  assert.equal(mismatch.reason, 'library_revision_mismatch')
+
+  const reusable = loadEmbeddingIndex(file, {
+    expectedLibraryRevision: 'rev-b',
+    allowRevisionMismatch: true
+  })
+  assert.ok(reusable.index, 'embed 构建侧要能把旧索引当缓存读取')
+  assert.equal(reusable.revisionMatch, false)
+  assert.equal(reusable.bindingReason, 'library_revision_mismatch')
+
+  fs.writeFileSync(file, JSON.stringify(INDEX))
+  const unbound = loadEmbeddingIndex(file, { expectedLibraryRevision: 'rev-a' })
+  assert.equal(unbound.index, null)
+  assert.equal(unbound.reason, 'library_revision_unbound')
+  const reusableUnbound = loadEmbeddingIndex(file, {
+    expectedLibraryRevision: 'rev-a',
+    allowRevisionMismatch: true
+  })
+  assert.ok(reusableUnbound.index)
+  assert.equal(reusableUnbound.bindingReason, 'library_revision_unbound')
+
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('语义回退在 library revision 不匹配时不发查询向量请求，直接安全降级', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-semantic-bound-fallback-'))
+  const file = path.join(dir, 'embeddings.json')
+  fs.writeFileSync(file, JSON.stringify({ ...INDEX, libraryRevision: 'old-revision' }))
+
+  let calls = 0
+  const failures = []
+  const fallback = createSemanticFallback({
+    indexFile: file,
+    apiKey: 'k',
+    getLibraryRevision: () => 'current-revision',
+    fetchImpl: async () => {
+      calls += 1
+      return { ok: true, json: async () => ({ output: { embeddings: [{ embedding: vector(0, 1, 0) }] } }) }
+    },
+    onFailure: reason => failures.push(reason)
+  })
+
+  const status = fallback.status()
+  assert.equal(status.available, false)
+  assert.equal(status.reason, 'library_revision_mismatch')
+  assert.deepEqual(await fallback.search({ query: '乙是什么', records: RECORDS }), [])
+  assert.equal(calls, 0, '整库 revision 已知不匹配时，不该再花钱向量化查询')
+  assert.match(failures[0], /library_revision_mismatch/)
+
+  fs.rmSync(dir, { recursive: true, force: true })
 })
 
 test('查询向量化有进程内缓存：同一句话第二次不再请求', async () => {
