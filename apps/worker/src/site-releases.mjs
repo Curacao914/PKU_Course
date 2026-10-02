@@ -142,6 +142,28 @@ export function migrateLegacySiteRoot({ siteRoot, now = new Date() } = {}) {
   return { migrated: true, alreadyManaged: false, live, releaseDir }
 }
 
+export function listSiteReleases(siteRoot) {
+  const { releases } = siteReleaseLayout(siteRoot)
+  if (!fs.existsSync(releases)) return []
+  return fs.readdirSync(releases, { withFileTypes: true })
+    .filter(entry => entry.isDirectory() && !entry.name.startsWith('.staging-'))
+    .map(entry => {
+      const dir = path.join(releases, entry.name)
+      const stat = fs.statSync(dir)
+      return { name: entry.name, dir, mtimeMs: stat.mtimeMs }
+    })
+    .sort((left, right) => right.mtimeMs - left.mtimeMs || right.name.localeCompare(left.name))
+}
+
+export function previousSiteRelease(siteRoot) {
+  const state = inspectSiteRoot(siteRoot)
+  if (state.kind !== 'symlink' || !state.managed || !state.target) {
+    throw new Error('内容回滚只支持已经完成 --migrate-site-root 的 release 模式')
+  }
+  const candidates = listSiteReleases(siteRoot).filter(item => path.resolve(item.dir) !== path.resolve(state.target))
+  return candidates[0] || null
+}
+
 export function validateSiteRelease(releaseDir) {
   const root = path.resolve(String(releaseDir || ''))
   const required = ['index.html', 'notes.json', 'library.json']
