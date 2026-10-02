@@ -56,6 +56,8 @@ node apps/worker/bin/course.mjs help
 - 章级整合把每个参与课次的 checksum / content fingerprint 写进产物。
 - embedding 逐小节绑定 fingerprint；旧索引可随 release 继承，但正文已变化的小节会被检索层自动跳过，未变化向量继续复用。
 - `course artifacts` / `course reconcile` 会把 stale / orphan 等异常显式报出来。
+- `course reconcile` 还会比较 replay Markdown / lesson-state.finalNote / 正式正文；历史源漂移时普通 republish 会被保护性拦截。
+- `course source-sync --replay-key <键> --yes` 可在完整备份旧源后，以当前正式正文建立新的历史修订基线。
 
 内容站支持 versioned release：`site.releases/.staging-*` 完整生成并校验成功后，再一次切换
 `site` symlink。旧部署不会被普通 publish 自动迁移；一次性步骤见

@@ -28,6 +28,7 @@ export function collectExceptions ({
   failedDeliveries = [],
   stuckDeliveries = 0,
   artifacts = null,
+  sourceRevisions = null,
   missingMaterials = [],
   lowBalance = null
 } = {}) {
@@ -82,6 +83,28 @@ export function collectExceptions ({
       count: missingArtifacts.length,
       message: `${missingArtifacts.length} 件长期配置的派生产物缺失`,
       detail: missingArtifacts.slice(0, 5).map(item => `${item.integrationId || item.kind} ${item.courseName}·${item.lessonTitle}`).join('；')
+    })
+  }
+
+  const dangerousSources = sourceRevisions?.items?.filter(item => item.status === 'source-state-drift') || []
+  if (dangerousSources.length) {
+    exceptions.push({
+      level: 'warning',
+      code: 'source-state-drift',
+      count: dangerousSources.length,
+      message: `${dangerousSources.length} 篇可再发布 Markdown 与 lesson-state 不一致（直接 republish 可能把旧内容覆盖回来）`,
+      detail: dangerousSources.slice(0, 5).map(item => `${item.courseName}·${item.lessonTitle}`).join('；')
+    })
+  }
+
+  const unpublishedSources = sourceRevisions?.items?.filter(item => item.status === 'unpublished-change') || []
+  if (unpublishedSources.length) {
+    exceptions.push({
+      level: 'warning',
+      code: 'source-unpublished',
+      count: unpublishedSources.length,
+      message: `${unpublishedSources.length} 篇源 Markdown 与 lesson-state 一致，但不同于正式正文（可能有尚未发布的修订）`,
+      detail: unpublishedSources.slice(0, 5).map(item => `${item.courseName}·${item.lessonTitle}`).join('；')
     })
   }
 
