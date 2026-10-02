@@ -9,6 +9,7 @@ import {
   discardSiteRelease,
   inspectSiteRoot,
   migrateLegacySiteRoot,
+  previousSiteRelease,
   promoteSiteRelease,
   sealSiteRelease,
   siteReleaseLayout,
@@ -59,6 +60,7 @@ test('second promotion switches pointer and keeps previous release for rollback'
   const switched = promoteSiteRelease({ siteRoot: site, releaseDir: second })
 
   assert.equal(switched.previous, first)
+  assert.equal(previousSiteRelease(site).dir, first, '当前 release 之外最新的一份就是回滚目标')
   assert.equal(fs.readFileSync(path.join(site, 'index.html'), 'utf8'), 'new')
   assert.equal(fs.existsSync(path.join(first, 'index.html')), true)
 
