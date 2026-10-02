@@ -22,6 +22,7 @@ import {
 } from '@course/notes'
 
 import { formatInventory, scanArtifactInventory } from './artifact-inventory.mjs'
+import { activeArtifactDirs } from './artifact-sources.mjs'
 import {
   emptyIntegrationManifest,
   normalizeIntegrationManifest,
@@ -1235,22 +1236,8 @@ export function createCommands(context) {
       store.close()
     }
 
-    const dirs = []
-    const walk = (dir, depth) => {
-      if (depth > 3 || !fs.existsSync(dir)) return
-      let entries = []
-      try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
-      let hasArtifact = false
-      for (const entry of entries) {
-        if (!entry.isDirectory()) {
-          if (entry.name === 'brief.json' || entry.name === 'onepage.json') hasArtifact = true
-          continue
-        }
-        walk(path.join(dir, entry.name), depth + 1)
-      }
-      if (hasArtifact) dirs.push(dir)
-    }
-    walk(path.resolve(config.scratchRoot), 0)
+    // 对账也只看当前 replay 产物，避免历史实验/备份制造假 unbound。
+    const dirs = activeArtifactDirs(config.scratchRoot)
     // 期望值用**规范化**指纹（与发布时的 checkBriefBinding / verifyDerived 同一套）
     const manifestFile = path.join(config.scratchRoot, 'integration-manifest.json')
     const configuredIntegrations = fs.existsSync(manifestFile)
@@ -1405,22 +1392,8 @@ export function createCommands(context) {
     const records = JSON.parse(fs.readFileSync(libraryFile, 'utf8'))
 
     // 产物散在各课次的输出目录里（course notes --output-dir 的产物），所以按名字找、不猜路径
-    const dirs = []
-    const walk = (dir, depth) => {
-      if (depth > 3 || !fs.existsSync(dir)) return
-      let entries = []
-      try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
-      let hasArtifact = false
-      for (const entry of entries) {
-        if (!entry.isDirectory()) {
-          if (entry.name === 'brief.json' || entry.name === 'onepage.json') hasArtifact = true
-          continue
-        }
-        walk(path.join(dir, entry.name), depth + 1)
-      }
-      if (hasArtifact) dirs.push(dir)
-    }
-    walk(path.resolve(config.scratchRoot), 0)
+    // 只扫 replays/ 下当前可再发布的派生物；experiments/ 与各种 backup 是历史副本，不算活跃工件。
+    const dirs = activeArtifactDirs(config.scratchRoot)
 
     const integrationDir = path.resolve(options.options['integrations'] || path.join(config.scratchRoot, 'integrations'))
     const manifestFile = integrationManifestPath(options)
