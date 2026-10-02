@@ -357,7 +357,7 @@ var LABELS = {
   discover: '扫描课程', cycle: '继续处理', 'cycle-all': '处理队列',
   notify: '发送通知', doctor: '系统检查', backup: '备份',
   prune: '清理预览', 'prune-apply': '清理原件',
-  retry: '重试', 'refresh-note': '更新笔记', republish: '重新发布',
+  retry: '重试', 'refresh-note': '更新笔记',
   revise: '重写笔记', 'notify-retry': '重发通知',
   'rebuild-content': '重建站点', 'rollback-content': '回滚版本',
   'rebuild-integration': '更新章节', 'rebuild-integrations': '更新全部章节',
@@ -1703,11 +1703,6 @@ function handleAct (act, btn) {
   if (act === 'remove-course-tag') return removeTag('', btn.dataset.tag, 'course', btn.dataset.course)
   if (act === 'retry') return doAction('retry', { replayKey: key }, btn)
   if (act === 'refresh-note') return doAction('refresh-note', { replayKey: key }, btn)
-  if (act === 'republish') {
-    var task = taskByKey(key)
-    if (!task || !task.artifacts || !task.artifacts.transcriptPath) { toast('这条课次还没有转录稿', 'error'); return }
-    return doAction('republish', { transcriptPath: task.artifacts.transcriptPath, course: task.courseName, lesson: task.title, replayKey: key }, btn)
-  }
   if (act === 'cycle') return doAction('cycle', { replayKey: key, maxTasks: 1 }, btn)
   if (act === 'ocr-material') {
     var ocrTask = taskByKey(key)
