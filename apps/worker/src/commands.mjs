@@ -2315,6 +2315,16 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
 
     const index = readSiteIndex(siteRoot)
     const purge = purgeCache(options, { reason: `发布 ${record.slug}`, files: site.written || [] })
+    const integrationRefresh = changed
+      ? refreshConfiguredIntegrations({ records: nextLibrary, course: record.courseName, lessonTitle: record.lessonTitle })
+      : { configured: fs.existsSync(path.join(config.scratchRoot, 'integration-manifest.json')), matched: 0, refreshed: [], errors: [] }
+    if (integrationRefresh.errors?.length) {
+      stderr(
+        `单课正文已发布，但有 ${integrationRefresh.errors.length} 份章级整合自动重建失败：` +
+        integrationRefresh.errors.map(item => `${item.id}（${item.message}）`).join('；') +
+        '。旧整合仍会被 artifacts/reconcile 标为 stale，不会伪装成新版本。'
+      )
+    }
 
     // 同一条内容只通知一次（去重键带内容指纹：改好之后重发要能再推一次）
     let delivery = null
@@ -2376,6 +2386,12 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
         semanticIndex: release
           ? (changed ? 'stale_not_carried' : (fs.existsSync(path.join(siteRoot, 'embeddings.json')) ? 'carried' : 'absent'))
           : 'legacy_site',
+        integrationRefresh: {
+          configured: Boolean(integrationRefresh.configured),
+          matched: integrationRefresh.matched || 0,
+          refreshed: (integrationRefresh.refreshed || []).map(item => item.id),
+          errors: integrationRefresh.errors || []
+        },
         // 时间语义：lessonDate 是这节课的日期（排序与展示），firstPublishedAt 进 RSS，
         // updatedAt 供日报判断"昨天更新了什么"；lessonDateSource 说明日期是哪来的。
         lessonDate: record.lessonDate,
