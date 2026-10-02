@@ -4015,6 +4015,65 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
     return 0
   }
 
+  /**
+   * 用当前转录稿 + 当前已上传课件重新生成这一节笔记，并在成功后直接发布。
+   *
+   * 这是“课件晚到”的产品动作：不重新下载、不重新转写。已有 lesson-state 作为修订基线，
+   * 把全部现有写作节点标成需要重写；notes --revise 会重新挂载 readDecks() 读到的最新课件。
+   */
+  async function refreshNote(options) {
+    const replayKey = requireOption(options.options, 'replay-key', 'refresh-note')
+    const current = withLedger(store => store.getTask(replayKey))
+    if (!current) throw new Error(`账本里没有这个课次：${replayKey}`)
+    const transcriptPath = String(current.artifacts?.transcriptPath || '')
+    if (!transcriptPath || !fs.existsSync(transcriptPath)) {
+      throw new Error('这节课还没有可用的转录稿，不能只更新笔记')
+    }
+    const outputDir = path.dirname(transcriptPath)
+    const statePath = path.join(outputDir, 'lesson-state.json')
+    if (!fs.existsSync(statePath)) throw new Error('这节课还没有笔记生成状态，不能执行更新笔记')
+
+    const state = JSON.parse(fs.readFileSync(statePath, 'utf8'))
+    const nodes = Array.isArray(state.lesson?.nodes) ? state.lesson.nodes : []
+    const targets = nodes.map(node => String(node.id || node.outlineNodeId || '').trim()).filter(Boolean)
+    if (!targets.length) throw new Error('找不到可更新的笔记模块')
+
+    // published / completed 是终态，notes 不能直接领取；先回到“转录稿已就绪”。
+    // 只改任务阶段，不动转录稿、原笔记或公开站点；后续任何一步失败，线上旧版本仍在。
+    withLedger(store => store.resetTask({ replayKey, stage: 'transcript_ready' }))
+
+    const noteCode = await notes({
+      ...options,
+      quiet: true,
+      options: {
+        'replay-key': replayKey,
+        transcript: transcriptPath,
+        course: current.course_name,
+        lesson: current.title,
+        'output-dir': outputDir,
+        revise: targets.join(','),
+        request: '结合当前已上传的课件重新核对并更新整篇笔记。保留准确内容，补充课件提供的结构、术语与信息，并修正与课件不一致之处。',
+        'ignore-cost-window': '1'
+      },
+      flags: new Set()
+    })
+    if (noteCode !== 0) return noteCode
+
+    // 新正文会让旧的一页纸等派生产物失效；这一动作的承诺是“更新后直接可看”，
+    // 所以一并重建需要随正文更新的派生内容，再走正常 publish 原子发布。
+    return publish({
+      ...options,
+      quiet: true,
+      options: {
+        from: outputDir,
+        course: current.course_name,
+        lesson: current.title,
+        'replay-key': replayKey
+      },
+      flags: new Set(['regenerate-derived'])
+    })
+  }
+
   async function download(options) {
     const replayKey = requireOption(options.options, 'replay-key', 'download')
     const courseKey = requireOption(options.options, 'course-key', 'download')
@@ -4318,7 +4377,7 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
 
   // 键名必须与 CLI 命令名一致：'admin-passwd' 带连字符，不能用标识符简写
   return {
-    doctor, discover, download, transcribe, notes, materials, balance, publish,
+    doctor, discover, download, transcribe, notes, 'refresh-note': refreshNote, materials, balance, publish,
     notify, cycle, verify, status, retry, prune, backup, digest, 'ppt-reminder': pptReminder,
     brief: briefRun, onepage: onepageRun, sourcemap: sourceMapRun, integrate: integrateRun,
     artifacts: artifactsRun, reconcile: reconcileRun, 'source-sync': sourceSync, embed: embedRun,
@@ -4351,6 +4410,8 @@ export const USAGE = `用法：course <命令> [选项]
                                            --write-units 只决定分几次模型调用写完（1 = 一次写完）；
                                            --revise 只重写指定模块（其余模块草稿保留），需配合 --request
                                            --ocr 强制先补课件的图片文字（图片版课件会自动补，不必加）
+  refresh-note --replay-key <键>             用现有转录稿与当前课件更新整篇笔记并直接发布；
+                                           不重新下载、不重新转写
   materials  --file <课件> --course <名称> --lesson <课次> [--name <文件名>]
              [--course-scope] [--applies-to <课次,课次>] [--replay-key <键>]
              [--ocr] [--ocr-max-pages <张数>] [--ocr-concurrency <条数>]
