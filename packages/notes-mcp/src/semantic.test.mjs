@@ -296,7 +296,12 @@ test('接线：字面零命中才走语义回退，且带标注；字面命中�
 
 test('服务响应会把 stale semantic index 标成 available=false，而不是伪装成“按意思也没找到”', async () => {
   const { createNotesService } = await import('./service.mjs')
-  const records = RECORDS
+  const { normalizeRecord } = await import('./records.mjs')
+  const records = RECORDS.map(item => normalizeRecord({
+    ...item,
+    metadata: { concepts: [], statutes: [], cases: [], keywords: [] },
+    anchors: { concepts: {}, statutes: {}, cases: {} }
+  }))
   const semantic = {
     enabled: true,
     status: () => ({ enabled: true, available: false, reason: 'library_revision_mismatch' }),
