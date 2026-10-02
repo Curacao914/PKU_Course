@@ -308,14 +308,17 @@ export function describeOcrProgress(job = {}, materials = []) {
 
   // 新版 Python 在每张图完成后都会把 completed 写进进度文件。旧进度文件没有这个字段，
   // 因此保留“总数 - 当前 metadata pending”的兼容兜底。
+  const hasImageProgress = records.some(item => item && item.completed != null && Number.isFinite(Number(item.completed)))
   const recordDone = records.reduce((sum, item) => {
     const images = Math.max(0, Number(item?.images || 0))
-    if (Number.isFinite(Number(item?.completed))) return sum + Math.max(0, Number(item.completed))
+    if (item?.completed != null && Number.isFinite(Number(item.completed))) return sum + Math.max(0, Number(item.completed))
     if (item?.status === 'done') return sum + Math.max(0, images - Number(item.pending || 0))
     return sum
   }, 0)
   const legacyDone = Math.max(0, total - metadataPending)
-  const done = Math.max(0, Math.min(total, Math.max(recordDone, legacyDone)))
+  // 新版进度文件已经按“每张图”回报 completed，就不能再让旧 metadata 的粗粒度估算把它抬高。
+  // 只有整个 job 都是旧格式时才使用 total - metadataPending 兜底。
+  const done = Math.max(0, Math.min(total, hasImageProgress ? recordDone : legacyDone))
   return {
     running: true,
     total,
