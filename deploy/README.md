@@ -154,8 +154,14 @@ curl -fsS http://127.0.0.1:3101/healthz
 因此内容层也具备“旧版或新版二选一”的提交语义。旧 release 暂不由 publish 自动删除：
 先让维护与回滚策略积累一段真实运行数据，再决定保留数量，避免刚上线就把回滚余量清掉。
 
-**回滚内容**暂时使用目标 release 的绝对路径做显式切换；不要手工 rsync 半套文件回去。
-当前模块已经保留每次 publish 输出里的 `release.previous`，后续管理台会把这件事做成明确按钮。
+内容回滚也走同一事务入口，不要手工 rsync 半套文件：
+
+```bash
+node ~/course-runtime/apps/worker/bin/course.mjs publish --rollback-site --yes
+```
+
+它会选择当前版本之外最新的一份 release，先做完整性校验，再原子切换，并定向清理新旧两版涉及的
+CDN URL。连续再执行一次会切回刚才那一版，因此每次都会在 JSON 输出里明确给出 `from / to`。
 
 详细契约见 `docs/17-内容生命周期.md`。
 
