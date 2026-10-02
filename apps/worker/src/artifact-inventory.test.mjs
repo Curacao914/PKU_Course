@@ -106,7 +106,7 @@ test('指纹口径：简报的 sourceChecksum 是**规范化**指纹，不能拿
 
 
 test('configured integration missing from disk is reported instead of disappearing from inventory', () => {
-  const root = temp()
+  const root = tmp()
   const integrationDir = path.join(root, 'integrations')
   fs.mkdirSync(integrationDir, { recursive: true })
   const inventory = scanArtifactInventory({
@@ -126,4 +126,5 @@ test('configured integration missing from disk is reported instead of disappeari
   assert.equal(item.kind, 'integration')
   assert.equal(item.integrationId, '刑事执行法::罪刑均衡')
   assert.match(formatInventory(inventory), /长期整合清单要求存在/)
+  fs.rmSync(root, { recursive: true, force: true })
 })
