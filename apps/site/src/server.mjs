@@ -196,18 +196,22 @@ export function createRequestHandler({
        */
       const semanticKey = String(process.env.COURSE_EMBED_API_KEY || '')
       const semanticIndex = String(process.env.COURSE_EMBED_INDEX || path.join(normalizedRoot, 'embeddings.json'))
+      const source = createLocalLibrarySource({ file: libraryPath })
       const semantic = createSemanticFallback({
         indexFile: semanticIndex,
         apiKey: semanticKey,
         model: String(process.env.COURSE_EMBED_MODEL || 'text-embedding-v3'),
         timeoutMs: Number(process.env.COURSE_EMBED_TIMEOUT_MS || 1000),
         minScore: Number(process.env.COURSE_EMBED_MIN_SCORE || 0.55),
+        // 每次语义回退前都取当前发布库 revision。site symlink 原子切换后无需重启进程，
+        // 旧 embeddings 会立刻因 revision 不匹配而安全失效，直到 course embed 重绑。
+        getLibraryRevision: () => source.revision(),
         // 第一次失败就写一行日志：线上排"回退为什么没生效"只能靠它（不然只能看到 used:false）
         onFailure: reason => process.stderr.write(`[site] 语义回退失败：${reason}\n`)
       })
       process.stderr.write(`[site] 语义回退：${semantic.enabled ? '已启用' : '未启用（没配 COURSE_EMBED_API_KEY）'}；索引 ${semanticIndex}\n`)
       notesService = createNotesService({
-        source: createLocalLibrarySource({ file: libraryPath }),
+        source,
         siteOrigin: mcpOrigin,
         semantic
       })

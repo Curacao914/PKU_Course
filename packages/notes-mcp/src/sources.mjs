@@ -1,3 +1,4 @@
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
@@ -63,20 +64,24 @@ export function createLocalLibrarySource({ file } = {}) {
     }
     if (cache && cache.mtimeMs === stat.mtimeMs && cache.size === stat.size) return cache.records
     let raw
+    let bytes
     try {
-      raw = JSON.parse(fs.readFileSync(target, 'utf8'))
+      bytes = fs.readFileSync(target)
+      raw = JSON.parse(bytes.toString('utf8'))
     } catch (error) {
       throw new ToolError(`发布库不是合法 JSON：${target}（${error instanceof Error ? error.message : String(error)}）`)
     }
     if (!Array.isArray(raw)) throw new ToolError(`发布库格式不对：${target} 应当是记录数组（course publish 的产物）`)
     const records = raw.map(normalizeRecord).filter(record => record.slug)
-    cache = { mtimeMs: stat.mtimeMs, size: stat.size, records }
+    const revision = crypto.createHash('sha256').update(bytes).digest('hex')
+    cache = { mtimeMs: stat.mtimeMs, size: stat.size, records, revision }
     return records
   }
 
   return {
     kind: 'local',
     describe: () => ({ kind: 'local', label: '本地发布库', location: target, live: true }),
+    revision: () => { readLibrary(); return cache?.revision || '' },
     listNotes: async () => readLibrary(),
     readMarkdown: async slug => {
       const record = readLibrary().find(item => item.slug === slug)

@@ -4,7 +4,7 @@ import path from 'node:path'
 /**
  * 工件依赖失效记录（Phase 5.2 C1）。
  *
- * 每次生成派生视图（简报 / 一页纸 / 章级整合）时，它都记下了"我绑在哪一版正文上"。
+ * 每次生成派生视图（简报 / 一页纸 / 章级整合 / 语义索引）时，它都记下了"我绑在哪一版正文上"。
  * 但**发布时的校验只在发布那一刻生效**：正文后来重写了、一节笔记重跑了，那些旧产物
  * 就静静地烂在磁盘上，没人知道它们已经与正文不一致——直到某次发布被"不同源"卡住，
  * 或者更糟：它们已经不参与发布了，但人还在看。
@@ -47,6 +47,8 @@ export function scanArtifactInventory ({
   records = [],
   integrationDir = '',
   configuredIntegrations = [],
+  semanticIndexFile = '',
+  libraryRevision = '',
   /**
    * 简报/一页纸的绑定指纹**不是**发布库里的 checksum：
    *   checksum（library.json）    = 原始字节的 SHA-256（markdownBytesChecksum）
@@ -143,6 +145,27 @@ export function scanArtifactInventory ({
     })
   }
 
+  // 语义索引是“整库级”派生物：查询侧要求它明确绑定当前 libraryRevision。
+  // 文件不存在不算异常（公开 semantic 默认关闭，索引本来就是可选能力）；一旦存在，就必须可追溯。
+  if (semanticIndexFile && fs.existsSync(semanticIndexFile)) {
+    const semantic = readJson(semanticIndexFile)
+    const bound = str(semantic?.libraryRevision)
+    const current = str(libraryRevision)
+    let status = 'fresh'
+    if (!semantic || !bound) status = 'unbound'
+    else if (!current || bound !== current) status = 'stale'
+    items.push({
+      kind: 'semantic-index',
+      file: semanticIndexFile,
+      courseName: '',
+      lessonTitle: '',
+      slug: '',
+      boundChecksum: bound.slice(0, 12),
+      currentChecksum: current.slice(0, 12),
+      status
+    })
+  }
+
   const counts = { fresh: 0, stale: 0, unbound: 0, orphan: 0 }
   for (const item of items) {
     if (!(item.status in counts)) counts[item.status] = 0
@@ -153,7 +176,7 @@ export function scanArtifactInventory ({
 
 /** 给人看的一行行报告。 */
 export function formatInventory (inventory = { items: [], counts: {} }) {
-  if (!inventory.items.length) return '工件依赖：还没发现任何派生视图（简报/一页纸/整合）。'
+  if (!inventory.items.length) return '工件依赖：还没发现任何派生视图（简报/一页纸/整合/语义索引）。'
   const missing = inventory.counts.missing ? `，缺失 ${inventory.counts.missing}` : ''
   const lines = [`工件依赖：共 ${inventory.total} 件——新鲜 ${inventory.counts.fresh}，失效 ${inventory.counts.stale}${missing}，未绑定 ${inventory.counts.unbound}，孤立 ${inventory.counts.orphan}`]
   for (const item of inventory.items) {

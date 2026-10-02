@@ -208,6 +208,9 @@ export function createNotesService({ source, siteOrigin = '', semantic = null } 
         semanticUsed = false
       }
     }
+    const semanticState = typeof semantic?.status === 'function'
+      ? semantic.status()
+      : { enabled: Boolean(semantic?.enabled), available: Boolean(semantic?.enabled), reason: '' }
     return {
       query: text,
       course: course ? scoped[0]?.courseName || String(course) : '',
@@ -216,7 +219,12 @@ export function createNotesService({ source, siteOrigin = '', semantic = null } 
       includeBody: Boolean(includeBody),
       ...found,
       lexicalTotal: found.total,
-      semantic: { used: semanticUsed, enabled: Boolean(semantic?.enabled) },
+      semantic: {
+        used: semanticUsed,
+        enabled: Boolean(semantic?.enabled),
+        available: Boolean(semanticState.available),
+        reason: String(semanticState.reason || '')
+      },
       total: hits.length,
       limit,
       hits: hits.slice(0, limit)

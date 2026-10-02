@@ -27,6 +27,21 @@ test('本地发布库：读记录、读正文、来源可描述', async () => {
   await assert.rejects(() => source.readMarkdown('notes/不存在/第一课'), ToolError)
 })
 
+test('本地发布库：revision 绑定原始 library 字节，并随原子发布后的新文件即时变化', async t => {
+  const file = tempLibrary(t)
+  const source = createLocalLibrarySource({ file })
+  await source.listNotes()
+  const first = source.revision()
+  assert.match(first, /^[0-9a-f]{64}$/)
+
+  const records = readLibrary()
+  records.push({ ...records[0], slug: 'notes/国际法学/revision-测试', lessonTitle: 'revision 测试' })
+  fs.writeFileSync(file, JSON.stringify(records, null, 2))
+  await source.listNotes()
+  const second = source.revision()
+  assert.notEqual(second, first, 'library 文件内容变化后 revision 必须同步变化，不需要重启进程')
+})
+
 test('本地发布库：按 mtime/size 变化即时重读，不是进程启动时读死', async t => {
   const file = tempLibrary(t)
   const source = createLocalLibrarySource({ file })
