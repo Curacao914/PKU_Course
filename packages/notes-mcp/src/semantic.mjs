@@ -1,3 +1,4 @@
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 
 /**
@@ -52,10 +53,12 @@ export function parseEmbeddingIndex (raw, options = {}) {
     items.set(key, { fingerprint, vector: normalize(vector) })
   }
   return {
+    version: Number(payload.version || 1),
     provider: String(payload.provider || ''),
     model: String(payload.model || ''),
     dim: expectedDim || (items.size ? items.values().next().value.vector.length : 0),
     createdAt: String(payload.createdAt || ''),
+    libraryRevision: String(payload.libraryRevision || ''),
     cost: payload.cost || null,
     items,
     skipped
@@ -100,18 +103,73 @@ function safeJson (text) {
  * 读索引文件（按 mtime 缓存：发布写完 embeddings.json 之后不必重启进程）。
  * 文件不存在 → null（回退能力关闭，而不是报错）。
  */
-export function loadEmbeddingIndex (file, { now = () => Date.now() } = {}) {
+export function libraryFileRevision (file) {
+  const target = String(file || '').trim()
+  if (!target) return { exists: false, revision: '', reason: 'no_library_file' }
+  try {
+    const bytes = fs.readFileSync(target)
+    return {
+      exists: true,
+      revision: crypto.createHash('sha256').update(bytes).digest('hex'),
+      reason: 'ok'
+    }
+  } catch (error) {
+    return {
+      exists: false,
+      revision: '',
+      reason: error?.code === 'ENOENT' ? 'library_missing' : 'library_unreadable'
+    }
+  }
+}
+
+/**
+ * 读索引文件（按 mtime 缓存：发布写完 embeddings.json 之后不必重启进程）。
+ *
+ * 如果调用方给 expectedLibraryRevision，则索引必须：
+ *   1. 自己声明 libraryRevision；
+ *   2. 与当前 library.json 的原始字节 SHA-256 完全一致。
+ *
+ * 这道门是“整份索引属于哪一版发布库”的边界；通过后，查询时还会继续逐小节核对
+ * section fingerprint。两层都过才会真正参与召回。
+ */
+export function loadEmbeddingIndex (file, { now = () => Date.now(), expectedLibraryRevision = '' } = {}) {
   if (!file) return { index: null, reason: 'no_index_file' }
   let stat
   try { stat = fs.statSync(file) } catch { return { index: null, reason: 'missing' } }
+
+  const validateRevision = (index, loadedReason) => {
+    const expected = String(expectedLibraryRevision || '').trim()
+    if (!expected) return { index, reason: loadedReason }
+    if (!String(index?.libraryRevision || '').trim()) {
+      return {
+        index: null,
+        reason: 'library_revision_missing',
+        expectedLibraryRevision: expected,
+        actualLibraryRevision: ''
+      }
+    }
+    if (index.libraryRevision !== expected) {
+      return {
+        index: null,
+        reason: 'library_revision_mismatch',
+        expectedLibraryRevision: expected,
+        actualLibraryRevision: index.libraryRevision
+      }
+    }
+    return { index, reason: loadedReason }
+  }
+
   const cached = loadEmbeddingIndex.cache?.get(file)
-  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return { index: cached.index, reason: 'cached' }
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+    // expected revision 不进缓存键：library 可以在 index 文件不动时变化，所以每次都重新比。
+    return validateRevision(cached.index, 'cached')
+  }
   const index = parseEmbeddingIndex(fs.readFileSync(file, 'utf8'))
   if (!index) return { index: null, reason: 'unreadable' }
   if (!loadEmbeddingIndex.cache) loadEmbeddingIndex.cache = new Map()
   loadEmbeddingIndex.cache.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, index })
   void now
-  return { index, reason: 'loaded' }
+  return validateRevision(index, 'loaded')
 }
 
 /**
@@ -309,6 +367,7 @@ function sectionTitleOf (record, sectionId) {
  */
 export function createSemanticFallback ({
   indexFile = '',
+  libraryFile = '',
   apiKey = '',
   model = 'text-embedding-v3',
   timeoutMs = 1000,
@@ -329,8 +388,25 @@ export function createSemanticFallback ({
     get enabled () { return embedder.enabled },
     stats: () => embedder.stats(),
     async search ({ query, records = [], snippetOf = null, limit: asked } = {}) {
-      const loaded = loadEmbeddingIndex(indexFile)
-      if (!loaded.index) { report(`索引不可用（${loaded.reason}）：${indexFile}`); return [] }
+      let expectedLibraryRevision = ''
+      if (String(libraryFile || '').trim()) {
+        const library = libraryFileRevision(libraryFile)
+        if (!library.exists) {
+          report(`发布库版本不可用（${library.reason}）：${libraryFile}`)
+          return []
+        }
+        expectedLibraryRevision = library.revision
+      }
+      const loaded = loadEmbeddingIndex(indexFile, { expectedLibraryRevision })
+      if (!loaded.index) {
+        const detail = loaded.reason === 'library_revision_mismatch'
+          ? `索引绑定 ${String(loaded.actualLibraryRevision || '').slice(0, 12)}，当前库 ${String(loaded.expectedLibraryRevision || '').slice(0, 12)}`
+          : loaded.reason === 'library_revision_missing'
+            ? '索引没有 libraryRevision（旧格式，需重新 course embed）'
+            : loaded.reason
+        report(`索引不可用（${detail}）：${indexFile}`)
+        return []
+      }
       const vector = await embedder.embed(query)
       if (!vector) {
         const stats = embedder.stats()
