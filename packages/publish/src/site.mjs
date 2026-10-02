@@ -1954,9 +1954,13 @@ const SEARCH_SCRIPT = `<script>
           results.innerHTML = '';
           // "没有这条" / "服务没答上来" / "语义入口没开"是三件事，不能都说成"知识库没有"
           var message = '字面没有找到「' + text + '」';
-          message += semantic.enabled === false
-            ? '；本站未启用语义检索，所以也不能按意思找相近的小节。'
-            : '；按意思找也没有相近的小节。';
+          if (semantic.enabled === false) {
+            message += '；本站未启用语义检索，所以也不能按意思找相近的小节。';
+          } else if (semantic.available === false) {
+            message += '；语义索引当前不可用（通常是在等待正文变更后的增量重建），所以这次没有按意思继续找。';
+          } else {
+            message += '；按意思找也没有相近的小节。';
+          }
           show(message + '换个更具体的术语、法条或人名试试（问句里的疑问词会被自动去掉）。');
           return;
         }
