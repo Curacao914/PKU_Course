@@ -113,7 +113,13 @@ function buildFixture() {
     { replay_key: 'replay-audit-2', course_key: 'course-1', course_name: '刑事执行法', title: '第7-8节' }
   ])
   const first = store.claimTask({ replayKey: 'replay-audit-1', workerId: 'audit' })
-  store.reportStage({ id: first.task.id, stage: 'transcript_ready', message: '转录完成', data: { artifacts: { transcriptPath, slug: 'xingfa-zhixing-5-6' } } })
+  // 主夹具代表“已经发布、后来又补传课件”的真实场景：详情页因此必须出现“更新笔记”。
+  store.reportStage({
+    id: first.task.id,
+    stage: 'published',
+    message: '已发布',
+    data: { artifacts: { transcriptPath, slug: 'xingfa-zhixing-5-6' } }
+  })
   const second = store.claimTask({ replayKey: 'replay-audit-2', workerId: 'audit' })
   store.reportStage({ id: second.task.id, stage: 'needs_attention', message: '连续失败', error: '模型连续返回空结果' })
 
@@ -936,7 +942,9 @@ async function auditAdmin(page, site, fixture, calls, dialogs, failures) {
 
   // 动作名称可以简化，底层命令语义不能漂。
   if (!calls.some(argv => argv[0] === 'cycle' && argv[2] === '5')) failures.push('「处理队列」没有按 --max-tasks 5 发出去')
-  if (!calls.some(argv => argv[0] === 'cycle' && argv[2] === '1')) failures.push('「继续处理」没有按单课次执行')
+  if (!calls.some(argv => argv[0] === 'refresh-note' && argv.includes('--replay-key') && argv.includes('replay-audit-1'))) {
+    failures.push('已发布课次的「更新笔记」没有走到 refresh-note')
+  }
   if (!calls.some(argv => argv[0] === 'notes' && argv.includes('--revise'))) failures.push('「重写笔记」没有走到 notes --revise')
   if (!calls.some(argv => argv[0] === 'prune' && argv.includes('--apply'))) failures.push('「清理原件」没有带 --apply')
 
@@ -993,6 +1001,7 @@ async function auditCoursewareFlow(page, site, fixture, failures) {
 
   // 第一次预览请求故意断掉：前端应静默重试一次，而不是把 TypeError: Failed to fetch 扔给用户。
   let previewRequests = 0
+  expectedPreviewDisconnect = true
   await page.route('**/api/admin/material?**', async route => {
     if (route.request().method() === 'GET') {
       previewRequests += 1
@@ -1002,10 +1011,16 @@ async function auditCoursewareFlow(page, site, fixture, failures) {
   })
 
   const row = '#detail .file[data-value="讲座课件.pptx"] .name'
-  await page.click(row)
-  await page.waitForSelector('#detail .pages .page', { timeout: 6000 })
-  await page.unroute('**/api/admin/material?**')
-  const opened = await page.$$eval('#detail .pages .page', nodes => nodes.length)
+  try {
+    await page.click(row)
+    await page.waitForSelector('#detail .pages .page', { timeout: 6000 })
+    // Chromium 的 resource error 通常与 abort 同步冒出；留一点时间让 console 事件落完。
+    await page.waitForTimeout(120)
+  } finally {
+    await page.unroute('**/api/admin/material?**')
+    expectedPreviewDisconnect = false
+  }
+  const opened = await page.$eval('#detail .pages .page', nodes => nodes.length)
   const firstLabel = (await page.textContent('#detail .pages .row span')).trim()
   const previewToast = (await page.textContent('#toast').catch(() => '')).trim()
   await record('预览断线会自动重试',
@@ -1121,6 +1136,8 @@ async function auditCoursewareFlow(page, site, fixture, failures) {
  * 用一个布尔把两边连起来，比把 404 全局放行安全得多。
  */
 let expectedHttp404 = false
+// 课件预览重试专项会故意让第一次 GET 断线；只在这几百毫秒里忽略对应的一条 Chromium 控制台错误。
+let expectedPreviewDisconnect = false
 
 async function auditNotePage(page, site, noteUrl, failures) {
   const results = []
@@ -3035,6 +3052,8 @@ async function main() {
     // 429 是搜索页那一步**自己造的**：拦截 /api/search 回一个限流响应，专门验证
     // "服务端拒绝时说清原因"。浏览器把它记成控制台错误是预期的，不算缺陷。
     if (/429 \(Too Many Requests\)/.test(message.text())) return
+    // 课件预览专项故意 abort 第一次请求，验证第二次自动恢复；只在该窗口忽略这条网络错误。
+    if (expectedPreviewDisconnect && /ERR_CONNECTION_FAILED|Failed to load resource/.test(message.text())) return
     // 404 只在"故意注入 .md 失败"的那一小段里被忽略（expectedHttp404 由那一步自己开关），
     // 其它时间出现 404 仍然算缺陷——不要为了省事把 404 全局放行。
     if (expectedHttp404 && /404 \(Not Found\)/.test(message.text())) return
