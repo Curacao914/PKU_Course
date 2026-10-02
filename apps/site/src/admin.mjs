@@ -41,7 +41,7 @@ const DEFAULT_RUN_TIMEOUT_MS = 15 * 60 * 1000
  */
 export const ALLOWED_ACTIONS = new Set([
   'doctor', 'discover', 'cycle', 'notify', 'notify-retry', 'download', 'transcribe', 'notes', 'publish', 'status',
-  'retry', 'revise', 'republish', 'prune', 'backup', 'balance',
+  'retry', 'revise', 'refresh-note', 'republish', 'prune', 'backup', 'balance',
   'rollback-content', 'rebuild-content', 'rebuild-integration', 'rebuild-integrations',
   'ocr-material'
 ])
@@ -302,10 +302,20 @@ export function readOcrProgress(file) {
 export function describeOcrProgress(job = {}, materials = []) {
   const records = readOcrProgress(job.progressPath)
   const current = [...records].reverse().find(item => item && item.status === 'running') || null
-  const pending = materials.reduce((sum, item) => sum + Number(item.ocrPending || 0), 0)
+  const metadataPending = materials.reduce((sum, item) => sum + Number(item.ocrPending || 0), 0)
   const planned = Number(job.plan?.images || 0)
-  const total = planned > 0 ? planned : pending
-  const done = Math.max(0, Math.min(total, total - pending))
+  const total = planned > 0 ? planned : metadataPending
+
+  // 新版 Python 在每张图完成后都会把 completed 写进进度文件。旧进度文件没有这个字段，
+  // 因此保留“总数 - 当前 metadata pending”的兼容兜底。
+  const recordDone = records.reduce((sum, item) => {
+    const images = Math.max(0, Number(item?.images || 0))
+    if (Number.isFinite(Number(item?.completed))) return sum + Math.max(0, Number(item.completed))
+    if (item?.status === 'done') return sum + Math.max(0, images - Number(item.pending || 0))
+    return sum
+  }, 0)
+  const legacyDone = Math.max(0, total - metadataPending)
+  const done = Math.max(0, Math.min(total, Math.max(recordDone, legacyDone)))
   return {
     running: true,
     total,
@@ -313,6 +323,7 @@ export function describeOcrProgress(job = {}, materials = []) {
     percent: total > 0 ? Math.round((done / total) * 100) : 0,
     current: current ? String(current.name || '') : '',
     currentImages: Number(current?.images || 0),
+    currentDone: Number(current?.completed || 0),
     materials: Number(job.plan?.materials || 0),
     startedAt: job.startedAt || null
   }
@@ -363,6 +374,8 @@ export function buildActionArgs(action, payload = {}, workerPath = '') {
         ...(payload.replayKey ? ['--replay-key', String(payload.replayKey)] : [])
       ]
     }
+    case 'refresh-note':
+      return [...base, 'refresh-note', '--replay-key', need('replayKey')]
     case 'notify-retry':
       return [...base, 'notify', '--retry-failed']
     case 'rollback-content':
@@ -961,6 +974,17 @@ export function createAdminHandler({
     }
     // 活着的识别进程只查一次：逐课次去读那个文件等于把同一份 ocr-state.json 读 60 遍
     const liveOcr = runningOcr()
+    // OCR 是后台任务，不能只挂在“当前选中的那节课”上。给状态页一份全局列表，
+    // 运行面板因此能在用户切到别的课程以后继续显示哪份课件识别到哪里。
+    status.ocrJobs = liveOcr.map(job => {
+      let materials = []
+      try { materials = listMaterials({ root: materialsRoot, course: job.course, lesson: job.lesson || '' }) } catch {}
+      return {
+        courseName: job.course || '',
+        lesson: job.lesson || '',
+        ...describeOcrProgress(job, materials)
+      }
+    })
     try {
       const store = openLedger(path.resolve(scratchRoot, 'ledger.sqlite'))
       try {
