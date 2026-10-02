@@ -394,6 +394,45 @@ function buildFixture() {
     plan: { materials: 1, images: 4 }
   }], null, 2))
 
+  // 管理台「内容」页的真实夹具：一条长期章节定义 + 对应整合产物。
+  fs.writeFileSync(path.join(scratchRoot, 'integration-manifest.json'), JSON.stringify({
+    version: 1,
+    integrations: [{
+      id: 'audit-integration',
+      course: '刑事执行法',
+      topic: '执行程序与执行措施',
+      lessons: ['第5-6节'],
+      enabled: true
+    }]
+  }, null, 2))
+  const integrationsDir = path.join(scratchRoot, 'integrations')
+  fs.mkdirSync(integrationsDir, { recursive: true })
+  const currentLibrary = JSON.parse(fs.readFileSync(path.join(siteRoot, 'library.json'), 'utf8'))
+  const source = currentLibrary.find(item => item.courseName === '刑事执行法') || currentLibrary[0]
+  fs.writeFileSync(path.join(integrationsDir, 'audit.json'), JSON.stringify({
+    kind: 'course-integration',
+    integrationId: 'audit-integration',
+    course: '刑事执行法',
+    topic: '执行程序与执行措施',
+    generatedAt: '2026-09-25T10:04:00.000Z',
+    lessons: [{
+      slug: source.slug,
+      lessonTitle: '第5-6节',
+      checksum: source.checksum || '',
+      contentFingerprint: 'audit'
+    }]
+  }, null, 2))
+  fs.writeFileSync(path.join(integrationsDir, 'audit.md'), '# 审计整合\n')
+
+  // 内容 release 也按生产形态来：site 是 symlink，旁边至少两份完整快照，回滚按钮才真能点。
+  const releasesRoot = siteRoot + '.releases'
+  const legacy = path.join(releasesRoot, 'legacy-audit')
+  const current = path.join(releasesRoot, 'release-audit')
+  fs.mkdirSync(releasesRoot, { recursive: true })
+  fs.renameSync(siteRoot, legacy)
+  fs.cpSync(legacy, current, { recursive: true })
+  fs.symlinkSync(path.relative(path.dirname(siteRoot), current), siteRoot, 'dir')
+
   return {
     dir, scratchRoot, siteRoot, outputDir, transcriptPath, noteUrl: '/' + record.slug + '.html',
     materialsRoot, ocrStatePath, ocrProgressPath
@@ -425,6 +464,11 @@ const EXPECTED = {
   // 整合材料生成还没实现：按钮点了要如实说自己没做，这不算缺陷（下一步实现）
   'pick-file': '已归档',
   'ocr-material': '完成',
+  'rebuild-content': '完成',
+  'rollback-content': '完成',
+  'rebuild-integration': '完成',
+  'rebuild-integrations': '完成',
+  'save-integration': '章节已保存',
   integrate: '还没做',
   'add-tag': '先写标签名',   // 审计不填标签输入框：这条分支本来就要说"先写标签名"
   'cancel-upload': '取消',
@@ -436,7 +480,7 @@ const EXPECTED = {
  * 这几个动作的反馈是界面状态本身（展开课件、切换设置分类），不是右下角提示条，
  * 所以不能套"必须弹提示"那一关：改成点击后核对状态真的变了。
  */
-const DEFERRED_ACTS = new Set(['delete-material'])
+const DEFERRED_ACTS = new Set(['delete-material', 'delete-integration'])
 
 /** 在页面里造一个 File 并模拟拖放——浏览器只认页面里造出来的 File 对象。 */
 async function dropFileOn(page, selector, { name, bytes, type }) {
@@ -521,6 +565,23 @@ async function auditAdmin(page, site, fixture, calls, dialogs, failures) {
       if (selected !== key) failures.push('管理台 课程 · 点了课次之后没有选中标记（' + key + ' → ' + selected + '）')
       return '详情「' + String(title).trim() + '」'
     },
+    'edit-integration': async (selector) => {
+      const id = await page.getAttribute(selector, 'data-id')
+      await page.click(selector)
+      await page.waitForTimeout(120)
+      const value = await page.inputValue('[data-integration-text="topic"]').catch(() => '')
+      const draftId = await page.evaluate(() => window.state && window.state.contentDraft && window.state.contentDraft.id)
+      if (draftId !== id || !value) failures.push('管理台 内容 · 点编辑之后表单没有载入章节定义')
+      return '编辑 ' + id
+    },
+    'new-integration': async (selector) => {
+      await page.click(selector)
+      await page.waitForTimeout(120)
+      const value = await page.inputValue('[data-integration-text="topic"]').catch(() => 'x')
+      const draftId = await page.evaluate(() => window.state && window.state.contentDraft && window.state.contentDraft.id)
+      if (draftId || value) failures.push('管理台 内容 · 清空表单没有真的清空')
+      return '新建表单'
+    },
     'open-material': async (selector) => {
       await page.click(selector)
       await page.waitForSelector('#detail .pages .page', { timeout: 5000 }).catch(() => {})
@@ -550,7 +611,7 @@ async function auditAdmin(page, site, fixture, calls, dialogs, failures) {
   await page.evaluate(() => window.load({ quiet: true }))
   await page.waitForTimeout(200)
 
-  const tabNames = ['overview', 'courses', 'settings']
+  const tabNames = ['overview', 'courses', 'content', 'settings']
   for (const tab of tabNames) {
     await openAll()
     await page.click('.seg button[data-tab="' + tab + '"]')
@@ -649,6 +710,14 @@ async function auditAdmin(page, site, fixture, calls, dialogs, failures) {
         await page.fill('#tab-' + tab + ' [data-request]', '把这一节压缩到 1200 字并拆成列表')
       }
       if (act === 'save-password') await page.fill('[data-pw="next"]', 'audit-password-2026')
+      if (act === 'save-integration') {
+        const topic = await page.inputValue('[data-integration-text="topic"]').catch(() => '')
+        if (!topic) {
+          await page.fill('[data-integration-text="topic"]', '浏览器审计章节')
+          const checkbox = await page.$('[data-integration-lesson]')
+          if (checkbox && !(await checkbox.isChecked())) await checkbox.check()
+        }
+      }
 
       await openAll()
       const before = calls.length
@@ -712,6 +781,24 @@ async function auditAdmin(page, site, fixture, calls, dialogs, failures) {
       else if (expected && !toast.text.includes(expected)) failures.push('管理台 ' + tab + ' · ' + act + '：提示是「' + toast.text + '」，预期包含「' + expected + '」')
       else if (!expected && /失败|还没接上|没成功/.test(toast.text)) failures.push('管理台 ' + tab + ' · ' + act + '：' + toast.text)
     }
+  }
+
+  // 删除章节定义：确认之后 manifest 与对应整合产物都要从界面消失；单课内容不受影响。
+  await page.click('.seg button[data-tab="content"]')
+  const integrationDelete = await page.$('#tab-content [data-act="delete-integration"]')
+  if (integrationDelete) {
+    const beforeItems = await page.$eval('#tab-content [data-act="edit-integration"]', nodes => nodes.length)
+    await integrationDelete.click()
+    await page.waitForFunction(() => !document.querySelector('#tab-content [data-act="delete-integration"][data-id="audit-integration"]'), { timeout: 5000 }).catch(() => {})
+    const afterItems = await page.$eval('#tab-content [data-act="edit-integration"]', nodes => nodes.length)
+    const deleteToast = (await page.textContent('#toast').catch(() => '')).trim()
+    if (!(afterItems === beforeItems - 1 && /章节定义已删除/.test(deleteToast))) {
+      failures.push('管理台 内容 · 删除章节定义没有从界面消失（' + beforeItems + ' → ' + afterItems + '，提示「' + deleteToast + '」）')
+    } else {
+      console.log('  [内容] 删除章节定义 ✓ ' + beforeItems + ' → ' + afterItems)
+    }
+  } else {
+    failures.push('管理台 内容 · 没找到删除章节定义按钮')
   }
 
   // 状态必须跨重绘保持：用户报过"我什么都没动，点开的栏目自己收回去"。
