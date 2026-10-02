@@ -5,6 +5,8 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { chromium } from 'playwright-core'
 
+import { describePkuFailure } from './pku-network.mjs'
+
 import {
   chooseCurrentCourses,
   courseKey,
@@ -270,7 +272,16 @@ async function waitPortal(context, timeout = 90_000) {
 }
 
 async function ensureLoggedIn(context, page, credentials) {
-  await page.goto(resolveAcquisitionLimits().startUrl, { waitUntil: 'domcontentloaded', timeout: 90_000 })
+  /**
+   * 打开教学网首页这一步最容易撞上"节假日只能校园网访问"：
+   * 那是外部网络条件，程序绕不过去，但至少要说清楚——直接告诉他去连校园网或学校 VPN，
+   * 而不是把 net::ERR_NAME_NOT_RESOLVED 原样扔出去。
+   */
+  try {
+    await page.goto(resolveAcquisitionLimits().startUrl, { waitUntil: 'domcontentloaded', timeout: 90_000 })
+  } catch (error) {
+    throw describePkuFailure(error, { action: '打开教学网首页' })
+  }
   await page.waitForTimeout(1000)
   for (const candidate of context.pages()) {
     if (await isPortal(candidate)) return { page: candidate, mode: 'existing-session' }

@@ -3,6 +3,9 @@ export {
   resolveAcquisitionLimits
 } from './acquisition-runtime.mjs'
 
+// 教学网连不上时的说法（校园网/VPN 提示）：登录、发现课表这些入口共用
+export { PKU_UNREACHABLE_HINT, describePkuFailure, looksLikeNetworkFailure } from './pku-network.mjs'
+
 export {
   DEFAULT_MIN_FREE_BYTES,
   checkFreeSpace,

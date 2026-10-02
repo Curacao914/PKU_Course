@@ -1136,6 +1136,9 @@ async function auditCoursewareFlow(page, site, fixture, failures) {
  * 用一个布尔把两边连起来，比把 404 全局放行安全得多。
  */
 let expectedHttp404 = false
+// 同理：验收里会**故意断网**看前端提示，浏览器必然记一条 ERR_FAILED——那是被注入的失败，
+// 只在开关打开的那一小段里放行，其它时间的网络错误仍然算缺陷。
+let expectedNetworkFailure = false
 // 课件预览重试专项会故意让第一次 GET 断线；只在这几百毫秒里忽略对应的一条 Chromium 控制台错误。
 let expectedPreviewDisconnect = false
 
@@ -3020,6 +3023,329 @@ async function auditSourceMapRoundTrip (page, site, failures) {
   return results
 }
 
+
+/**
+ * 管理台验收：按用户给的 10 项清单逐条走一遍真实界面。
+ *
+ * 与 auditAdmin 的区别：auditAdmin 测"每个按钮点下去有反馈、argv 正确"，
+ * 这里是**产品验收**——跨课程的后台任务显示、预览不跳顶、单模块课次的笔记区、
+ * 课件区入口、三种课次状态的主操作、概览统计可点、内容页与设置页的用词，
+ * 桌面与手机各过一遍。夹具数据只读+少量补充（另加一条别的课程的课次与一份待识别课件）。
+ */
+async function auditAdminAcceptance (page, site, fixture, calls, failures) {
+  const results = []
+  const record = async (name, ok, detail) => {
+    results.push({ name, ok, detail })
+    console.log('  ' + (ok ? '✔' : '✖') + ' ' + name.padEnd(24) + detail)
+    if (!ok) failures.push('管理台验收 ' + name + '：' + detail)
+  }
+  console.log('管理台验收（用户清单 1–10）')
+  // 单条选择器等不到就该立刻算失败，而不是每条都干等 30 秒（整段验收有几十次点击）
+  const defaultTimeout = page.getDefaultTimeout ? page.getDefaultTimeout() : 30000
+  page.setDefaultTimeout(4000)
+
+  // ── 夹具补充：另加一条别的课程的课次（未完成档）与一份待识别课件 ──
+  const store = openLedger(path.join(fixture.scratchRoot, 'ledger.sqlite'))
+  try {
+    store.discoverReplays([
+      { replay_key: 'replay-audit-3', course_key: 'course-2', course_name: '商法概论', title: '第3-4节' }
+    ])
+    const third = store.getTask('replay-audit-3')
+    if (third && third.stage === 'discovered') {
+      store.claimTask({ replayKey: 'replay-audit-3', workerId: 'audit' })
+      store.reportStage({ id: third.id, stage: 'transcript_ready', message: '已转写待写笔记' })
+    }
+  } finally { store.close() }
+  const otherProgress = path.join(fixture.scratchRoot, 'ocr', 'audit-2.progress.json')
+  const writeOcrState = (entries) => fs.writeFileSync(fixture.ocrStatePath, JSON.stringify(entries, null, 2))
+  const ocrEntry = (course, lesson, progressPath, images, completed) => ({
+    course, lesson, pid: process.pid, startedAt: '2026-09-25T10:02:00.000Z',
+    logPath: path.join(fixture.scratchRoot, 'ocr', 'audit.log'),
+    progressPath, plan: { materials: 1, images }
+  })
+  const writeProgress = (file, name, images, completed) => fs.writeFileSync(file, JSON.stringify({
+    updatedAt: '2026-09-25T10:05:00.000Z',
+    records: [{ name, status: 'running', images, completed, pending: images - completed, at: '2026-09-25T10:05:00.000Z' }]
+  }, null, 2))
+  writeProgress(otherProgress, '商法课件.pptx', 3, 1)
+  writeProgress(fixture.ocrProgressPath, '图片版课件.pptx', 4, 1)
+  writeOcrState([
+    ocrEntry('刑事执行法', '第5-6节', fixture.ocrProgressPath, 4, 1),
+    ocrEntry('商法概论', '第3-4节', otherProgress, 3, 1)
+  ])
+
+  // 与 auditAdmin 同一套用法：重新拉一次状态用页面自己的 load()，不整页刷新（不丢选择）
+  const reload = async () => { await page.evaluate(() => window.load && window.load()); await page.waitForTimeout(500) }
+  const ocrFooter = async () => (await page.textContent('#ocrJobs').catch(() => '')) || ''
+  const goTab = async tab => {
+    await page.click('.seg button[data-tab="' + tab + '"]').catch(() => {})
+    await page.waitForTimeout(250)
+  }
+  const pick = async (course, lesson) => {
+    await goTab('courses')
+    await page.click('#courses .item[data-act="pick-course"][data-value="' + course + '"]').catch(() => {})
+    await page.waitForTimeout(250)
+    await page.click('#lessons .item[data-act="pick-lesson"][data-value="' + lesson + '"]').catch(() => {})
+    await page.waitForTimeout(450)
+  }
+  const detailText = async () => ((await page.textContent('#detail').catch(() => '')) || '').replace(/\s+/g, ' ')
+
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto(site.url + '/admin/', { waitUntil: 'domcontentloaded' })
+  await page.waitForTimeout(1200)
+  await page.$eval('#outCard', node => { node.open = true }).catch(() => {})
+
+  // ── 1. 不同课程同时识别：切课程/切页面后底部仍显示正确的课程、文件与进度，且数字递增 ──
+  await pick('刑事执行法', 'replay-audit-1')
+  const footerBoth = await ocrFooter()
+  await record('跨课程后台任务都显示',
+    /刑事执行法.*第5-6节/.test(footerBoth) && /商法概论.*第3-4节/.test(footerBoth) && /图片版课件\.pptx/.test(footerBoth) && /商法课件\.pptx/.test(footerBoth),
+    footerBoth.replace(/\s+/g, ' ').trim().slice(0, 120))
+  const firstNumbers = (footerBoth.match(/(\d+)\/(\d+)/g) || []).join(' ')
+  await pick('商法概论', 'replay-audit-3')
+  const footerOther = await ocrFooter()
+  await record('切到别的课程仍显示正确课程与文件',
+    /商法概论.*第3-4节/.test(footerOther) && /商法课件\.pptx/.test(footerOther) && /刑事执行法.*第5-6节/.test(footerOther),
+    footerOther.replace(/\s+/g, ' ').trim().slice(0, 120))
+  // 识别进度在推进（真实进程会一直写进度文件）：刷新后数字必须变大，而不是长期停在 0/N
+  writeProgress(fixture.ocrProgressPath, '图片版课件.pptx', 4, 3)
+  writeProgress(otherProgress, '商法课件.pptx', 3, 2)
+  await reload()
+  const footerAdvanced = await ocrFooter()
+  const advancedNumbers = (footerAdvanced.match(/(\d+)\/(\d+)/g) || []).join(' ')
+  const advanced = (footerAdvanced.match(/3\/4/) && footerAdvanced.match(/2\/3/)) || false
+  await record('进度数字逐图增加',
+    Boolean(advanced) && advancedNumbers !== firstNumbers,
+    firstNumbers + ' → ' + advancedNumbers)
+  const runPanel = await page.evaluate(() => {
+    const box = document.querySelector('.run-console')
+    if (!box) return { maxHeight: '', overflowY: '' }
+    const style = getComputedStyle(box)
+    return { maxHeight: style.maxHeight, overflowY: style.overflowY }
+  })
+  await record('运行面板有固定高度可滚',
+    /auto|scroll/.test(runPanel.overflowY) && parseFloat(runPanel.maxHeight) <= 340,
+    'max-height=' + runPanel.maxHeight + '，overflow-y=' + runPanel.overflowY)
+
+  // ── 2. 预览：展开/收起/再开/加载更多都不跳顶；断网不抛 TypeError ──
+  await pick('刑事执行法', 'replay-audit-1')
+  // 打开 12 页那份课件（另一份只有 2 页，测不到"继续加载"）
+  await page.click('#detail [data-act="open-material"][data-value="讲座课件.pptx"]')
+  await page.waitForSelector('#detail .pages .page', { timeout: 5000 }).catch(() => {})
+  const scrollBefore = await page.evaluate(() => ({ win: Math.round(window.scrollY), detail: Math.round((document.getElementById('detail') || {}).scrollTop || 0) }))
+  // 直接在页面里点：Playwright 的 click 会先把按钮滚进视野，那是动作的副作用，会污染"有没有跳顶"的测量
+  await page.evaluate(() => { const button = document.querySelector('#detail [data-act="load-more"]'); if (button) button.click() })
+  await page.waitForTimeout(700)
+  const afterLoad = await page.evaluate(() => ({ win: Math.round(window.scrollY), detail: Math.round((document.getElementById('detail') || {}).scrollTop || 0), pages: document.querySelectorAll('#detail .pages .page').length }))
+  await page.click('#detail [data-act="close-material"]')
+  await page.waitForTimeout(300)
+  await page.click('#detail [data-act="open-material"][data-value="讲座课件.pptx"]')
+  await page.waitForTimeout(500)
+  const afterReopen = await page.evaluate(() => ({ win: Math.round(window.scrollY), pages: document.querySelectorAll('#detail .pages .page').length, hasMore: Boolean(document.querySelector('#detail [data-act="load-more"]')) }))
+  await record('预览加载更多不跳回顶部',
+    Math.abs(afterLoad.win - scrollBefore.win) <= 8 && Math.abs(afterLoad.detail - scrollBefore.detail) <= 8,
+    '窗口 ' + scrollBefore.win + ' → ' + afterLoad.win + '，详情栏 ' + scrollBefore.detail + ' → ' + afterLoad.detail + '，页数 ' + afterLoad.pages)
+  await record('收起再打开仍在原处且有更多可加载',
+    Math.abs(afterReopen.win - scrollBefore.win) <= 8 && afterReopen.pages >= 8,
+    '窗口 ' + afterReopen.win + '，已显示 ' + afterReopen.pages + ' 页，继续加载=' + afterReopen.hasMore)
+
+  // 先收起重开一次：回到"还有更多可加载"的状态，断网才有请求可发
+  await page.click('#detail [data-act="close-material"]').catch(() => {})
+  await page.waitForTimeout(250)
+  await page.click('#detail [data-act="open-material"][data-value="讲座课件.pptx"]').catch(() => {})
+  await page.waitForTimeout(400)
+  // 课件预览走的是 /api/admin/material（单数）；断网后 fetchMaterialJson 会重试一次再给可读提示
+  await page.route('**/api/admin/material?**', route => route.abort())
+  expectedNetworkFailure = true
+  await page.evaluate(() => { const button = document.querySelector('#detail [data-act="load-more"]'); if (button) button.click() })
+  await page.waitForTimeout(1500)
+  const offline = await page.evaluate(() => {
+    const toast = document.getElementById('toast')
+    return { toast: toast ? toast.textContent.trim() : '', body: (document.body.innerText || '') }
+  })
+  await page.unroute('**/api/admin/material?**')
+  expectedNetworkFailure = false
+  await record('断网时不把 TypeError 甩给用户',
+    !/Failed to fetch/i.test(offline.toast) && !/Failed to fetch/i.test(offline.body) && /连接中断|暂时无法读取|稍后重试/.test(offline.toast),
+    '提示「' + offline.toast.slice(0, 40) + '」')
+
+  // ── 3. 单模块的已发布课次：不再出现大模块表，主要显示字数/更新时间/修改要求 ──
+  await pick('刑事执行法', 'replay-audit-1')
+  const single = await page.evaluate(() => {
+    const blocks = [...document.querySelectorAll('#detail .block')]
+    const note = blocks.find(node => /笔记/.test((node.querySelector('h3') || {}).textContent || ''))
+    return {
+      hasNoteBlock: Boolean(note),
+      tables: note ? note.querySelectorAll('table').length : -1,
+      text: note ? note.textContent.replace(/\s+/g, ' ').trim() : '',
+      placeholder: note && note.querySelector('input[data-request]') ? note.querySelector('input[data-request]').getAttribute('placeholder') : '',
+      modules: document.querySelectorAll('#detail [data-act="revise"]').length
+    }
+  })
+  await record('单模块不出现模块表',
+    single.hasNoteBlock && single.tables === 0 && single.modules === 0,
+    '笔记块表格 ' + single.tables + ' 个，逐模块重写按钮 ' + single.modules + ' 个')
+  await record('笔记区显示字数/更新时间/修改要求',
+    /字/.test(single.text) && /更新/.test(single.text) && /修改要求/.test(single.placeholder || ''),
+    single.text.slice(0, 60) + '｜输入框提示「' + (single.placeholder || '（无）') + '」')
+
+  // ── 4. 课件区：虚线框是主要入口；只有待识别时才出现低调的"补识别" ──
+  const courseware = await page.evaluate(() => {
+    const zone = document.querySelector('#detail .dropzone')
+    const ocr = document.querySelector('#detail [data-act="ocr-material"]')
+    const uploadBtns = [...document.querySelectorAll('#detail button')].filter(node => /上传/.test(node.textContent || ''))
+    return {
+      hasDropzone: Boolean(zone),
+      ocr: ocr ? { text: ocr.textContent.trim(), cls: ocr.className } : null,
+      running: /图片识别/.test((document.querySelector('#detail .status') || {}).textContent || ''),
+      uploadButtons: uploadBtns.length
+    }
+  })
+  await record('课件区以虚线框为主入口',
+    courseware.hasDropzone && courseware.uploadButtons === 0,
+    '虚线框=' + courseware.hasDropzone + '，额外的上传按钮 ' + courseware.uploadButtons + ' 个')
+  // 三态：正在识别 → 只显示进度；有待识别且没在跑 → 出现低调的"补识别"；没有待识别 → 不出现
+  await record('识别进行中时只显示进度、不给补识别',
+    courseware.running && !courseware.ocr,
+    '课次状态含「图片识别」=' + courseware.running + '，补识别按钮=' + Boolean(courseware.ocr))
+  writeOcrState([])
+  await reload()
+  await pick('刑事执行法', 'replay-audit-1')
+  const pendingState = await page.evaluate(() => {
+    const ocr = document.querySelector('#detail [data-act="ocr-material"]')
+    return ocr ? { text: ocr.textContent.trim(), cls: ocr.className } : null
+  })
+  await record('有待识别图片时出现低调的"补识别"',
+    Boolean(pendingState) && /补识别/.test(pendingState.text) && /quiet/.test(pendingState.cls),
+    pendingState ? '按钮「' + pendingState.text + '」class=' + pendingState.cls : '（没有补识别按钮）')
+  await pick('商法概论', 'replay-audit-3')
+  const noPendingState = await page.evaluate(() => Boolean(document.querySelector('#detail [data-act="ocr-material"]')))
+  await record('没有待识别时"补识别"不出现', !noPendingState, noPendingState ? '仍然显示着' : '没有这个按钮')
+
+  // ── 5. 三种课次状态的主操作语义 ──
+  await pick('刑事执行法', 'replay-audit-1')
+  const publishedActions = await page.evaluate(() => {
+    const nodes = [...document.querySelectorAll('#detail .row [data-act], #detail .row a.act')]
+    return nodes.map(node => ({
+      text: node.textContent.trim(), act: node.dataset.act || 'link', cls: node.className,
+      h: Math.round(node.getBoundingClientRect().height), top: Math.round(node.getBoundingClientRect().top)
+    }))
+  })
+  const forbidden = ['立即跑这一节', '清除失败', '重新发布']
+  const detailTextAll = await detailText()
+  await record('已发布课次：更新笔记 + 查看笔记',
+    publishedActions.some(item => /更新笔记/.test(item.text)) && publishedActions.some(item => /查看笔记/.test(item.text)) &&
+      !forbidden.some(text => detailTextAll.includes(text)),
+    publishedActions.map(item => item.text + '(' + item.h + 'px)').join(' / '))
+  const sameRow = publishedActions.filter(item => /更新笔记|查看笔记/.test(item.text))
+  await record('两个按钮同一行、尺寸一致',
+    sameRow.length === 2 && new Set(sameRow.map(item => item.top)).size === 1 && new Set(sameRow.map(item => item.h)).size === 1,
+    sameRow.map(item => item.text + ' top=' + item.top + ' h=' + item.h).join('；'))
+  await pick('刑事执行法', 'replay-audit-2')
+  const failedActions = await page.evaluate(() => [...document.querySelectorAll('#detail [data-act]')].map(node => node.textContent.trim()).filter(Boolean))
+  await record('失败课次主操作是重试',
+    failedActions.includes('重试') && !failedActions.some(text => forbidden.some(bad => text.includes(bad))),
+    failedActions.join(' / '))
+  await pick('商法概论', 'replay-audit-3')
+  const pendingActions = await page.evaluate(() => [...document.querySelectorAll('#detail [data-act]')].map(node => node.textContent.trim()).filter(Boolean))
+  await record('未完成课次主操作是继续处理',
+    pendingActions.includes('继续处理') && !pendingActions.some(text => forbidden.some(bad => text.includes(bad))),
+    pendingActions.join(' / '))
+
+  // ── 6. 点"更新笔记"只走 refresh-note（用现有转录 + 课件，自动发布由 worker 负责）──
+  await pick('刑事执行法', 'replay-audit-1')
+  const beforeCalls = calls.length
+  await page.click('#detail [data-act="refresh-note"]').catch(() => {})
+  await page.waitForTimeout(900)
+  const newCalls = calls.slice(beforeCalls)
+  await record('更新笔记 = refresh-note（不重下不重转）',
+    newCalls.some(argv => argv[0] === 'refresh-note') && !newCalls.some(argv => argv[0] === 'transcribe' || argv[0] === 'download'),
+    newCalls.map(argv => argv.slice(0, 3).join(' ')).join('；') || '（没有新命令）')
+
+  // ── 7. 概览三个统计可点，跳到课程页对应筛选 ──
+  for (const [value, label] of [['published', '已发布'], ['active', '进行中'], ['queued', '排队中']]) {
+    await goTab('overview')
+    await page.waitForTimeout(200)
+    const countText = await page.textContent('[data-act="view-stage"][data-value="' + value + '"]').catch(() => '')
+    const expected = Number((countText || '').replace(/\D/g, '')) || 0
+    await page.click('[data-act="view-stage"][data-value="' + value + '"]').catch(() => {})
+    await page.waitForTimeout(400)
+    const state = await page.evaluate(() => {
+      const filter = document.querySelector('.view-filter')
+      const rows = [...document.querySelectorAll('#courses .item[data-act="pick-course"]')]
+      return {
+        filter: filter ? filter.textContent.replace(/\s+/g, ' ').trim() : '',
+        // 筛选生效时每门课显示的是"这门课在这个状态下有几节"
+        perCourse: rows.map(node => Number(((node.querySelector('.meta') || {}).textContent || '0').trim()) || 0),
+        tab: (document.querySelector('.seg button[aria-selected="true"]') || {}).textContent || ''
+      }
+    })
+    const sum = state.perCourse.reduce((total, value) => total + value, 0)
+    await record('概览「' + label + '」可点并跳到筛选结果',
+      /课程/.test(state.tab) && state.filter.includes(label) && sum === expected && state.perCourse.every(value => value > 0),
+      '统计 ' + expected + '，课程页筛选「' + state.filter.slice(0, 12) + '」，各课命中 ' + JSON.stringify(state.perCourse))
+  }
+
+  // ── 8/9. 内容页与设置页的用词 ──
+  const wording = async (tab, selector) => {
+    await goTab(tab)
+    await page.waitForTimeout(300)
+    return ((await page.textContent(selector).catch(() => '')) || '').replace(/\s+/g, ' ')
+  }
+  const contentText = await wording('content', '#tab-content')
+  await record('内容页只讲产品语言',
+    /站点版本/.test(contentText) && /长期章节/.test(contentText) &&
+      !/原子发布|manifest|章节范围由你确认一次|命令行可用/.test(contentText),
+    contentText.slice(0, 90))
+  // 设置页有多个分栏（维护/通知记录/存储占用/运行参数/登录密码）：只看当前那一栏会漏，
+  // 逐栏都读一遍才是"设置页的表述"这件事本身。
+  await goTab('settings')
+  const paneTexts = await page.evaluate(async () => {
+    const out = {}
+    const buttons = [...document.querySelectorAll('#settingsRail [data-act="pick-pane"]')]
+    for (const button of buttons) {
+      button.click()
+      await new Promise(resolve => setTimeout(resolve, 120))
+      out[(button.textContent || '').trim()] = (document.getElementById('tab-settings').textContent || '').replace(/\s+/g, ' ')
+    }
+    return out
+  })
+  const settingsText = Object.values(paneTexts).join(' ')
+  const forbiddenSettings = ['完整链路', '投递通知', '备份账本', '清理预演', '跟随环境变量'].filter(text => settingsText.includes(text))
+  await record('设置页用产品语言',
+    /处理队列/.test(settingsText) && /刷新课程/.test(settingsText) && /发送通知/.test(settingsText) &&
+      /系统检查/.test(settingsText) && /备份/.test(settingsText) && forbiddenSettings.length === 0,
+    (forbiddenSettings.length ? '出现工程用语：' + forbiddenSettings.join('、') + '｜' : '') +
+      Object.keys(paneTexts).join('/') + '：' + settingsText.slice(0, 70))
+
+  // ── 10. 桌面与 390 各看一遍：不横移、按钮同行 ──
+  for (const view of [{ label: '桌面 1440', width: 1440, height: 900 }, { label: '手机 390', width: 390, height: 844 }]) {
+    await page.setViewportSize({ width: view.width, height: view.height })
+    await page.waitForTimeout(400)
+    await pick('刑事执行法', 'replay-audit-1')
+    const layout = await page.evaluate(() => {
+      const row = [...document.querySelectorAll('#detail .row [data-act], #detail .row a.act')]
+        .filter(node => /更新笔记|查看笔记/.test(node.textContent || ''))
+      const dropzone = document.querySelector('#detail .dropzone')
+      const footer = document.getElementById('ocrJobs')
+      return {
+        scrollWidth: document.documentElement.scrollWidth,
+        viewport: window.innerWidth,
+        sameRow: row.length >= 1 ? new Set(row.map(node => Math.round(node.getBoundingClientRect().top))).size : 0,
+        dropzoneWidth: dropzone ? Math.round(dropzone.getBoundingClientRect().width) : 0,
+        footerWidth: footer ? Math.round(footer.getBoundingClientRect().width) : 0
+      }
+    })
+    await record(view.label + '：页面不横移、按钮同行',
+      layout.scrollWidth <= layout.viewport + 1 && layout.sameRow <= 1,
+      'scrollWidth ' + layout.scrollWidth + '/' + layout.viewport + '，按钮行数 ' + layout.sameRow + '，虚线框 ' + layout.dropzoneWidth + 'px')
+  }
+
+  await page.setViewportSize({ width: 1280, height: 900 })
+  if (page.setDefaultTimeout) page.setDefaultTimeout(defaultTimeout)
+  return results
+}
+
 async function main() {
   const fixture = buildFixture()
   const calls = []
@@ -3057,6 +3383,7 @@ async function main() {
     // 404 只在"故意注入 .md 失败"的那一小段里被忽略（expectedHttp404 由那一步自己开关），
     // 其它时间出现 404 仍然算缺陷——不要为了省事把 404 全局放行。
     if (expectedHttp404 && /404 \(Not Found\)/.test(message.text())) return
+    if (expectedNetworkFailure && /net::ERR_FAILED|Failed to load resource/.test(message.text())) return
     failures.push('控制台报错：' + message.text())
   })
   // 余额是外部网络调用，审计里换成固定值
@@ -3069,19 +3396,41 @@ async function main() {
   }))
   await page.addInitScript(token => { try { localStorage.setItem('course.admin.token', token) } catch (e) {} }, TOKEN)
 
+  /**
+   * 分组开关：COURSE_AUDIT_ONLY=admin 时只跑管理台那两段。
+   * 全量审计现在要 5 分钟以上（含建站、多视口、PDF 数页数），
+   * 迭代管理台这一块时没必要每次都等全部跑完；默认仍然是全量。
+   */
+  const only = String(process.env.COURSE_AUDIT_ONLY || '').trim()
+  const wants = group => !only || only === group
   try {
-    await auditAdmin(page, site, fixture, calls, dialogs, failures)
-    console.log('')
-    await auditNotePage(page, site, fixture.noteUrl, failures)
-    console.log('')
-    await auditSearch(page, site, failures)
-    console.log('')
-    await auditIndexPages(page, site, fixture.noteUrl, failures)
-    console.log('')
-    await auditMobileLayout(page, site, fixture.noteUrl, failures)
-    await auditOnepagePrint(page, site, fixture.noteUrl, failures)
-    console.log('')
-    await auditSourceMapRoundTrip(page, site, failures)
+    if (only === 'acceptance') {
+      await auditAdminAcceptance(page, site, fixture, calls, failures)
+      console.log('')
+    } else if (wants('admin')) {
+      await auditAdmin(page, site, fixture, calls, dialogs, failures)
+      console.log('')
+      await auditAdminAcceptance(page, site, fixture, calls, failures)
+      console.log('')
+    }
+    if (wants('note')) {
+      await auditNotePage(page, site, fixture.noteUrl, failures)
+      console.log('')
+    }
+    if (wants('search')) {
+      await auditSearch(page, site, failures)
+      console.log('')
+    }
+    if (wants('index')) {
+      await auditIndexPages(page, site, fixture.noteUrl, failures)
+      console.log('')
+    }
+    if (wants('mobile')) await auditMobileLayout(page, site, fixture.noteUrl, failures)
+    if (wants('onepage')) {
+      await auditOnepagePrint(page, site, fixture.noteUrl, failures)
+      console.log('')
+      await auditSourceMapRoundTrip(page, site, failures)
+    }
     if (process.env.COURSE_AUDIT_SHOTS) {
       console.log('')
       await captureReadingShots(page, site, fixture, process.env.COURSE_AUDIT_SHOTS)
