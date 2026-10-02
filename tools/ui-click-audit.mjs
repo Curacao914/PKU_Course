@@ -880,6 +880,42 @@ async function auditAdmin(page, site, fixture, calls, dialogs, failures) {
     else console.log('  [概览] 去处理链接 →  切到 ' + target + ' 区')
   }
 
+  // 最后一遍“用户能看到的文字”审计：产品名词留下，工程实现词退到详细输出。
+  await page.click('.seg button[data-tab="content"]')
+  await page.waitForTimeout(120)
+  const contentCopy = (await page.textContent('#tab-content')).replace(/\s+/g, ' ').trim()
+  if (!/站点版本/.test(contentCopy) || !/长期章节/.test(contentCopy) ||
+      /正式站版本|章级整合|原子发布|章节范围由你确认一次|命令行|未接线|规划中/.test(contentCopy)) {
+    failures.push('管理台 内容 · 仍有实现层文案：「' + contentCopy.slice(0, 300) + '」')
+  } else {
+    console.log('  [内容] 产品术语 ✓ 站点版本 / 长期章节')
+  }
+
+  await page.click('.seg button[data-tab="settings"]')
+  await page.click('#settingsRail [data-act="pick-pane"][data-value="maintenance"]')
+  const maintenanceCopy = (await page.textContent('#settingsDetail')).replace(/\s+/g, ' ').trim()
+  if (!/处理队列/.test(maintenanceCopy) || !/刷新课程/.test(maintenanceCopy) || !/系统检查/.test(maintenanceCopy) ||
+      /跑一轮完整链路|扫描教学网|投递通知|备份账本|清理预演/.test(maintenanceCopy)) {
+    failures.push('管理台 设置 · 维护页仍有工程式文案：「' + maintenanceCopy + '」')
+  } else {
+    console.log('  [设置] 维护动作产品化 ✓')
+  }
+  await page.click('#settingsRail [data-act="pick-pane"][data-value="deliveries"]')
+  const deliveryCopy = (await page.textContent('#settingsDetail')).replace(/\s+/g, ' ').trim()
+  if (/course-note|\bfailed\b|\bpending\b|\bclaimed\b/.test(deliveryCopy) ||
+      !/课程笔记/.test(deliveryCopy) || !/失败/.test(deliveryCopy)) {
+    failures.push('管理台 设置 · 通知记录仍暴露内部状态：「' + deliveryCopy + '」')
+  } else {
+    console.log('  [设置] 通知记录人话化 ✓')
+  }
+  await page.click('#settingsRail [data-act="pick-pane"][data-value="params"]')
+  const paramsCopy = (await page.textContent('#settingsDetail')).replace(/\s+/g, ' ').trim()
+  if (/跟随环境变量|\/tmp\/|\.course-worker/.test(paramsCopy)) {
+    failures.push('管理台 设置 · 运行参数仍暴露环境/路径细节：「' + paramsCopy.slice(0, 300) + '」')
+  } else {
+    console.log('  [设置] 运行参数无环境路径 ✓')
+  }
+
   console.log('管理台按钮（' + results.length + ' 个）')
   for (const row of results) console.log('  [' + row.tab + '] ' + row.act.padEnd(16) + row.toast + (row.argv ? '  →  course ' + row.argv.join(' ') : ''))
   if (dialogs.length) console.log('  确认弹窗 ' + dialogs.length + ' 次：' + dialogs.join(' / '))
