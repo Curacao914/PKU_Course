@@ -2441,6 +2441,34 @@ async function auditMobileLayout (page, site, noteUrl, failures) {
   await record('用途不被逐字换行', cardState.purposeHeight > 0 && cardState.purposeHeight <= 40 && cardState.purposeWidth > 60,
     '「' + cardState.purposeText + '」' + cardState.purposeWidth + '×' + cardState.purposeHeight + 'px（单行、有宽度）')
 
+  // 内容页：桌面是双栏，但手机上必须上下叠。两块各挤 195px 会让 release 名与课次选择器都碎掉。
+  await page.click('.seg button[data-tab="content"]')
+  await page.waitForSelector('#tab-content .content-grid', { timeout: 5000 })
+  await page.waitForTimeout(150)
+  const contentLayout = await page.evaluate(() => {
+    const grid = document.querySelector('#tab-content .content-grid')
+    const children = grid ? [...grid.children] : []
+    const rects = children.map(node => {
+      const rect = node.getBoundingClientRect()
+      return { top: Math.round(rect.top), left: Math.round(rect.left), width: Math.round(rect.width) }
+    })
+    return {
+      count: rects.length,
+      first: rects[0] || null,
+      second: rects[1] || null,
+      columns: grid ? getComputedStyle(grid).gridTemplateColumns : ''
+    }
+  })
+  await record('内容页手机端上下叠放',
+    contentLayout.count === 2 &&
+      contentLayout.second.top > contentLayout.first.top &&
+      Math.abs(contentLayout.second.left - contentLayout.first.left) <= 2 &&
+      contentLayout.first.width >= 340 &&
+      contentLayout.second.width >= 340,
+    'columns=' + contentLayout.columns + '，第一块 ' +
+      (contentLayout.first ? contentLayout.first.width + 'px' : '无') + '，第二块 top=' +
+      (contentLayout.second ? contentLayout.second.top : '无'))
+
   await page.setViewportSize({ width: 1280, height: 900 })
   return results
 }
