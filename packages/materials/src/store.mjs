@@ -229,9 +229,10 @@ export async function ocrMaterial({
   const target = path.join(dir, name)
   const progress = ocrProgressOf(progressFile)
   const images = Number(entry.imageCount || 0)
+  const targetImages = Math.max(0, Number(entry.ocrPending || 0)) || images
   writeOcrProgress(progress, {
-    name, status: 'running', images, completed: 0,
-    pending: Number(entry.ocrPending || 0), at: at.toISOString()
+    name, status: 'running', images: targetImages, completed: 0,
+    pending: targetImages, at: at.toISOString()
   })
   if (!fs.existsSync(target)) {
     const skipped = { at: at.toISOString(), engine: '', attempted: 0, pending: entry.ocrPending || 0, skipped: '原件已删除，无法补识别' }
@@ -250,7 +251,7 @@ export async function ocrMaterial({
         ...env,
         COURSE_OCR_PROGRESS_FILE: progress,
         COURSE_OCR_PROGRESS_NAME: name,
-        COURSE_OCR_PROGRESS_TOTAL: String(images || entry.ocrPending || 0)
+        COURSE_OCR_PROGRESS_TOTAL: String(targetImages)
       },
       ocr: true, ocrMaxPages, ocrConcurrency
     })
@@ -276,8 +277,8 @@ export async function ocrMaterial({
   meta.updatedAt = at.toISOString()
   fs.writeFileSync(metaPath, `${JSON.stringify(meta, null, 2)}\n`)
   writeOcrProgress(progress, {
-    name, status: 'done', images: (deck.images || []).length || images,
-    completed: Math.max(0, ((deck.images || []).length || images) - Number(deck.ocrPending || 0)),
+    name, status: 'done', images: targetImages,
+    completed: Math.max(0, targetImages - Number(deck.ocrPending || 0)),
     pending: Number(deck.ocrPending || 0), at: at.toISOString()
   })
   return { entry: meta.materials[index], deck, skipped: false }
