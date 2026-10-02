@@ -291,7 +291,33 @@ test('接线：字面零命中才走语义回退，且带标注；字面命中�
   const degraded = await broken.searchNotes({ query: '合同解除后的溯及力' })
   assert.equal(degraded.hits.length, 0)
   assert.equal(degraded.semantic.used, false)
+  assert.equal(degraded.semantic.available, true, '服务异常与“索引不可用”是两件事；这个 mock 没有 status()，沿用 enabled')
 })
+
+test('服务响应会把 stale semantic index 标成 available=false，而不是伪装成“按意思也没找到”', async () => {
+  const { createNotesService } = await import('./service.mjs')
+  const records = RECORDS
+  const semantic = {
+    enabled: true,
+    status: () => ({ enabled: true, available: false, reason: 'library_revision_mismatch' }),
+    search: async () => []
+  }
+  const service = createNotesService({
+    source: {
+      kind: 'test',
+      describe: () => ({ kind: 'test' }),
+      listNotes: async () => records,
+      readMarkdown: async () => '正文'
+    },
+    semantic
+  })
+  const result = await service.searchNotes({ query: '完全不同的说法' })
+  assert.equal(result.hits.length, 0)
+  assert.equal(result.semantic.enabled, true)
+  assert.equal(result.semantic.available, false)
+  assert.equal(result.semantic.reason, 'library_revision_mismatch')
+})
+
 
 test('端到端：服务 → 真实语义回退（桩 fetch）能召回，且标注齐全', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-semantic-e2e-'))
