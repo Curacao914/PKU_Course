@@ -1388,6 +1388,9 @@ export function createCommands(context) {
       topic: options.options.topic || '',
       generatedAt: clockNow().toISOString()
     })
+    if (options.flags?.has('save')) {
+      plan.integrationId = String(options.options.id || `${plan.course}::${plan.topic}`).trim()
+    }
     const written = writeIntegrationPlan(plan, outputDir)
 
     let saved = null
