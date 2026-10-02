@@ -64,7 +64,32 @@ export function collectExceptions ({
     })
   }
 
-  const staleArtifacts = artifacts?.items?.filter(item => item.status === 'stale') || []
+  const semanticUnbound = artifacts?.items?.filter(item =>
+    item.kind === 'semantic-index' && item.status === 'unbound') || []
+  if (semanticUnbound.length) {
+    exceptions.push({
+      level: 'warning',
+      code: 'semantic-index-unbound',
+      count: semanticUnbound.length,
+      message: '语义索引还是旧格式，未绑定当前 library revision；查询侧已安全停用',
+      detail: '运行 course embed --max-cost <元> 重新绑定；未变化小节会复用旧向量，只为变化部分付费'
+    })
+  }
+
+  const semanticStale = artifacts?.items?.filter(item =>
+    item.kind === 'semantic-index' && item.status === 'stale') || []
+  if (semanticStale.length) {
+    exceptions.push({
+      level: 'warning',
+      code: 'semantic-index-stale',
+      count: semanticStale.length,
+      message: '语义索引绑定的是旧版 library；查询侧已安全停用',
+      detail: '运行 course embed --max-cost <元> 增量重建并绑定当前 revision'
+    })
+  }
+
+  const staleArtifacts = artifacts?.items?.filter(item =>
+    item.status === 'stale' && item.kind !== 'semantic-index') || []
   if (staleArtifacts.length) {
     exceptions.push({
       level: 'warning',
