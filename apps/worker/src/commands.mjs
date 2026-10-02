@@ -1016,6 +1016,10 @@ export function createCommands(context) {
     const siteRoot = path.resolve(options.options['site-root'] || path.join(config.scratchRoot, 'site'))
     const libraryFile = path.resolve(options.options.library || path.join(siteRoot, 'library.json'))
     if (!fs.existsSync(libraryFile)) throw new Error(`找不到发布库 ${libraryFile}（先 course publish，或用 --library 指一份）`)
+    // 两个 revision 分工不同：
+    //   revisionBefore —— 当前文件的真实字节 hash，用于昂贵向量化期间的并发保护；
+    //   payload.libraryRevision —— embeddings 最终所处 release 里 library.json 的真实字节 hash。
+    const revisionBefore = libraryRevision(libraryFile)
     const records = JSON.parse(fs.readFileSync(libraryFile, 'utf8'))
     const indexFile = path.resolve(options.options.out || path.join(siteRoot, 'embeddings.json'))
     const apiKey = String(env.COURSE_EMBED_API_KEY || env.DASHSCOPE_API_KEY || '').trim()
@@ -1045,7 +1049,9 @@ export function createCommands(context) {
     }
     if (!units.length) throw new Error('发布库里没有任何可向量化的小节（先跑一次 course publish --rebuild --write-back 让记录带上小节索引）')
 
-    // ② 增量：指纹一致的小节复用旧向量
+    // ② 增量复用：这里故意**不**要求旧索引 libraryRevision 与当前库一致。
+    // 整份索引可以已经过期，但每个 unchanged section 仍可按 fingerprint 安全复用旧向量，
+    // 这正是“正文改一节，只为这一节重新付费”的落点。
     const existing = loadEmbeddingIndex(indexFile).index
     const items = {}
     const todo = []
@@ -1058,11 +1064,9 @@ export function createCommands(context) {
       todo.push(unit)
     }
 
-    // ③ 只对"新出现/改过"的小节花钱
+    // ③ 只对“新出现/改过”的小节花钱
     let stats = { tokens: 0, calls: 0, hits: 0, costCny: 0 }
     if (todo.length) {
-      // 缓存文件名与 tools/semantic-eval.mjs 的默认值一致（embeddings-cache-<provider>.json）：
-      // 实验跑过的文本，建索引时不必再花钱
       const cacheFile = String(options.options.cache || env.COURSE_EMBED_CACHE || path.join(config.scratchRoot, 'embeddings-cache-dashscope.json'))
       const result = await embedTexts({
         texts: todo.map(unit => unit.text),
@@ -1079,17 +1083,63 @@ export function createCommands(context) {
       })
     }
 
+    const liveLibrary = path.resolve(libraryFile) === path.resolve(path.join(siteRoot, 'library.json'))
+    const liveIndex = path.resolve(indexFile) === path.resolve(path.join(siteRoot, 'embeddings.json'))
+    const atomic = liveLibrary && liveIndex && usesAtomicSiteReleases(siteRoot)
+    // publishViaRelease 用 writeJsonAtomic(records)，其确切字节就是下面这份序列化。
+    const stagedLibraryBytes = `${JSON.stringify(records, null, 2)}\n`
+    const targetLibraryRevision = atomic
+      ? createHash('sha256').update(stagedLibraryBytes).digest('hex')
+      : revisionBefore.revision
+
     const payload = {
-      version: 1,
+      version: 2,
       provider: 'dashscope',
       model,
       dim: Object.values(items)[0]?.vector?.length || 0,
-      createdAt: new Date().toISOString(),
+      createdAt: clockNow().toISOString(),
+      libraryRevision: targetLibraryRevision,
       cost: { tokens: stats.tokens, calls: stats.calls, cacheHits: stats.hits, cny: Number(stats.costCny.toFixed(4)), capCny },
       counts: { units: units.length, reused: units.length - todo.length, embedded: todo.length },
       items
     }
-    writeJsonAtomic(indexFile, payload)
+
+    let release = null
+    if (atomic) {
+      // 网络调用都做完以后才拿发布锁：不让一次慢 embedding 阻塞正常课程发布。
+      // 如果这期间 library 变了，向量文本已经进缓存，重跑能复用，不会重复花钱。
+      const lock = acquirePublishLock({
+        lockPath: publishLockPath(siteRoot),
+        info: { kind: 'embed' },
+        warnings: line => stderr(line)
+      })
+      if (!lock.ok) throw new Error(lock.message)
+      try {
+        const check = checkRevisionUnchanged({ file: libraryFile, expected: revisionBefore.revision })
+        if (!check.ok) throw new Error(check.message)
+        const outcome = publishViaRelease({
+          siteRoot,
+          records,
+          expectedRevision: revisionBefore.revision,
+          origin: options.options.origin || 'https://course.law-tech.dev',
+          carryEmbeddings: false,
+          extraFiles: {
+            'embeddings.json': `${JSON.stringify(payload, null, 2)}\n`
+          }
+        })
+        release = {
+          current: outcome.release.current,
+          previous: outcome.release.previous,
+          validatedNotes: outcome.release.validation.notes
+        }
+      } finally {
+        lock.release()
+      }
+    } else {
+      const check = checkRevisionUnchanged({ file: libraryFile, expected: revisionBefore.revision })
+      if (!check.ok) throw new Error(check.message)
+      writeJsonAtomic(indexFile, payload)
+    }
 
     emit({
       indexFile,
@@ -1099,7 +1149,10 @@ export function createCommands(context) {
       dim: payload.dim,
       costCny: payload.cost.cny,
       capCny,
-      library: libraryFile
+      library: libraryFile,
+      libraryRevision: payload.libraryRevision,
+      atomicRelease: Boolean(release),
+      release
     }, options)
     return 0
   }
@@ -2084,7 +2137,14 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
    * 只在 siteRoot 已经是本项目管理的 symlink（或全新不存在）时使用；旧式实体目录继续走
    * 兼容路径，必须显式 --migrate-site-root 才切换，避免一次普通发布偷偷改部署拓扑。
    */
-  function publishViaRelease({ siteRoot, records, expectedRevision = '', origin = '', carryEmbeddings = false } = {}) {
+  function publishViaRelease({
+    siteRoot,
+    records,
+    expectedRevision = '',
+    origin = '',
+    carryEmbeddings = false,
+    extraFiles = {}
+  } = {}) {
     const transaction = beginSiteRelease({ siteRoot, now: clockNow() })
     let sealed = ''
     try {
@@ -2095,7 +2155,17 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
         docs: readPublicDocs()
       })
       writeJsonAtomic(path.join(transaction.stagingDir, 'library.json'), records)
-      if (carryEmbeddings && fs.existsSync(siteRoot)) {
+      const extraNames = new Set()
+      for (const [name, value] of Object.entries(extraFiles || {})) {
+        // release extras 目前只允许根目录单文件：不接受 ../ 或子目录，避免一个派生物接口变成任意路径写入。
+        if (!name || path.basename(name) !== name || name === '.' || name === '..') {
+          throw new Error(`拒绝写入非法 release 附加文件名：${name}`)
+        }
+        const target = path.join(transaction.stagingDir, name)
+        fs.writeFileSync(target, Buffer.isBuffer(value) ? value : String(value))
+        extraNames.add(name)
+      }
+      if (carryEmbeddings && !extraNames.has('embeddings.json') && fs.existsSync(siteRoot)) {
         copyReleaseFileIfPresent({ fromRoot: siteRoot, toRoot: transaction.stagingDir, name: 'embeddings.json' })
       }
       const validation = validateSiteRelease(transaction.stagingDir)
