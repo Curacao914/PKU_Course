@@ -21,5 +21,8 @@
     "shots": "node tools/ui-shots.mjs",
     "test:all": "npm test && npm run test:py",
     "course": "node apps/worker/bin/course.mjs"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "2.117.2"
   }
 }
