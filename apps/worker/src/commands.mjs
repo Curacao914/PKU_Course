@@ -1283,6 +1283,8 @@ export function createCommands(context) {
       records,
       integrationDir: path.join(config.scratchRoot, 'integrations'),
       configuredIntegrations,
+      semanticIndexFile: path.join(siteRoot, 'embeddings.json'),
+      libraryRevision: libraryRevision(libraryFile).revision,
       checksumOf: record => markdownChecksum(record.markdown || '')
     })
     const sourceRevisions = scanSourceRevisions({
@@ -1440,6 +1442,8 @@ export function createCommands(context) {
       records,
       integrationDir,
       configuredIntegrations,
+      semanticIndexFile: path.resolve(options.options.embeddings || path.join(siteRoot, 'embeddings.json')),
+      libraryRevision: libraryRevision(libraryFile).revision,
       checksumOf: record => markdownChecksum(record.markdown || '')
     })
     const report = formatInventory(inventory)
@@ -1447,6 +1451,7 @@ export function createCommands(context) {
     emit({
       dirs: dirs.length,
       integrationDir,
+      semanticIndexFile: path.resolve(options.options.embeddings || path.join(siteRoot, 'embeddings.json')),
       total: inventory.total,
       counts: inventory.counts,
       stale: inventory.items.filter(item => item.status === 'stale').map(item => ({ kind: item.kind, courseName: item.courseName, lessonTitle: item.lessonTitle, staleLessons: item.staleLessons || [] })),
