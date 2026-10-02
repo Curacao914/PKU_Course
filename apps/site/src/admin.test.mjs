@@ -7,7 +7,14 @@ import test from 'node:test'
 
 import { openLedger } from '@course/store'
 
-import { ADMIN_HTML, ALLOWED_ACTIONS, buildActionArgs, createAdminHandler, redactStatus } from './admin.mjs'
+import {
+  ADMIN_HTML,
+  ALLOWED_ACTIONS,
+  buildActionArgs,
+  contentReleaseReport,
+  createAdminHandler,
+  redactStatus
+} from './admin.mjs'
 
 const TOKEN = 'test-admin-token'
 
@@ -332,6 +339,15 @@ test('admin actions map to whitelisted CLI argv, never to a shell string', async
   await run('notify-retry')
   assert.deepEqual(calls.at(-1).args.slice(1), ['notify', '--retry-failed'])
 
+  await run('rebuild-content')
+  assert.deepEqual(calls.at(-1).args.slice(1), ['publish', '--rebuild'])
+
+  await run('rollback-content')
+  assert.deepEqual(calls.at(-1).args.slice(1), ['publish', '--rollback-site', '--yes'])
+
+  await run('rebuild-integration', { id: '刑法::总论' })
+  assert.deepEqual(calls.at(-1).args.slice(1), ['integrate', '--configured', '--id', '刑法::总论'])
+
   // 缺参数要被挡住，而不是拼出一条残缺命令
   const bad = await run('revise', { course: '刑法分论' })
   assert.equal(bad.res.state.status, 400)
@@ -341,6 +357,91 @@ test('admin actions map to whitelisted CLI argv, never to a shell string', async
   const unknown = await run('rm-rf')
   assert.equal(unknown.res.state.status, 400)
   assert.equal(unknown.body.error, 'unsupported_action')
+})
+
+test('content release report recognizes atomic mode and keeps rollback candidates', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'course-content-release-'))
+  const site = path.join(root, 'site')
+  const releases = site + '.releases'
+  fs.mkdirSync(releases, { recursive: true })
+  const first = path.join(releases, 'legacy-20261001')
+  const second = path.join(releases, 'release-20261002')
+  for (const dir of [first, second]) {
+    fs.mkdirSync(dir)
+    fs.writeFileSync(path.join(dir, 'library.json'), JSON.stringify([{ slug: 'notes/a' }]))
+  }
+  fs.symlinkSync(path.relative(path.dirname(site), second), site, 'dir')
+
+  const report = contentReleaseReport(site)
+  assert.equal(report.mode, 'atomic')
+  assert.equal(report.current, 'release-20261002')
+  assert.equal(report.canRollback, true)
+  assert.equal(report.releases.find(item => item.current).notes, 1)
+})
+
+test('integration definitions can be managed from the admin API and report fresh/stale/missing', async () => {
+  const { handler, dir, scratchRoot } = fixture()
+  fs.writeFileSync(path.join(dir, 'library.json'), JSON.stringify([{
+    slug: 'notes/刑法分论/第10-12节',
+    courseName: '刑法分论',
+    lessonTitle: '第10-12节',
+    checksum: 'sum-1',
+    markdown: '# 正文'
+  }]))
+
+  const saved = await call(handler, {
+    method: 'PUT',
+    url: '/api/admin/integrations',
+    body: JSON.stringify({
+      definition: {
+        id: 'criminal-general',
+        course: '刑法分论',
+        topic: '总论框架',
+        lessons: ['第10-12节']
+      }
+    })
+  })
+  assert.equal(saved.res.state.status, 200)
+  assert.equal(saved.body.content.integrations.items[0].status, 'missing', '定义存在但产物没生成时要明确报缺失')
+  const manifest = JSON.parse(fs.readFileSync(path.join(scratchRoot, 'integration-manifest.json'), 'utf8'))
+  assert.equal(manifest.integrations[0].id, 'criminal-general')
+
+  const integrationDir = path.join(scratchRoot, 'integrations')
+  fs.mkdirSync(integrationDir, { recursive: true })
+  fs.writeFileSync(path.join(integrationDir, 'criminal.json'), JSON.stringify({
+    kind: 'course-integration',
+    integrationId: 'criminal-general',
+    course: '刑法分论',
+    topic: '总论框架',
+    generatedAt: '2026-10-02T00:00:00.000Z',
+    lessons: [{
+      slug: 'notes/刑法分论/第10-12节',
+      lessonTitle: '第10-12节',
+      checksum: 'sum-1',
+      contentFingerprint: 'abc'
+    }]
+  }))
+  fs.writeFileSync(path.join(integrationDir, 'criminal.md'), '# 整合\n')
+
+  const fresh = await call(handler, { url: '/api/admin/content' })
+  assert.equal(fresh.body.integrations.items[0].status, 'fresh')
+
+  fs.writeFileSync(path.join(dir, 'library.json'), JSON.stringify([{
+    slug: 'notes/刑法分论/第10-12节',
+    courseName: '刑法分论',
+    lessonTitle: '第10-12节',
+    checksum: 'sum-2',
+    markdown: '# 修订'
+  }]))
+  const stale = await call(handler, { url: '/api/admin/content' })
+  assert.equal(stale.body.integrations.items[0].status, 'stale')
+  assert.deepEqual(stale.body.integrations.items[0].staleLessons, ['第10-12节'])
+
+  const removed = await call(handler, { method: 'DELETE', url: '/api/admin/integrations?id=criminal-general' })
+  assert.equal(removed.res.state.status, 200)
+  assert.equal(removed.body.content.integrations.items.length, 0)
+  assert.ok(!fs.existsSync(path.join(integrationDir, 'criminal.json')), '删定义时同一 identity 的整合 JSON 一起清掉')
+  assert.ok(!fs.existsSync(path.join(integrationDir, 'criminal.md')), 'Markdown 产物也一起清掉')
 })
 
 test('run parameters can be edited from the console and are validated', async () => {
@@ -847,7 +948,7 @@ test('every button in the console is wired to a handler, and no handler is orpha
 
 test('every tab and in-page jump target exists', async () => {
   const tabs = new Set([...ADMIN_HTML.matchAll(/data-tab="([^"]+)"/g)].map(m => m[1]))
-  assert.deepEqual([...tabs].sort(), ['courses', 'overview', 'settings'])
+  assert.deepEqual([...tabs].sort(), ['content', 'courses', 'overview', 'settings'])
   for (const tab of tabs) assert.match(ADMIN_HTML, new RegExp('id="tab-' + tab + '"'), 'tab ' + tab + ' 要有一段对应的内容区')
 })
 
@@ -875,6 +976,10 @@ test('each console action produces a CLI command that really exists', async () =
     ['doctor', {}, ['doctor']],
     ['backup', {}, ['backup']],
     ['notify', {}, ['notify']],
+    ['rebuild-content', {}, ['publish', '--rebuild']],
+    ['rollback-content', {}, ['publish', '--rollback-site', '--yes']],
+    ['rebuild-integration', { id: '刑法::总论' }, ['integrate', '--configured', '--id', '刑法::总论']],
+    ['rebuild-integrations', {}, ['integrate', '--configured']],
     // 课次行里的「立即跑这一节」：显式点击＝"我就是要跑"，所以带上 --require-materials 0
     // （整轮那个按钮不带：它做的事与定时任务一样，缺课件就该跳过）
     ['cycle', { replayKey: 'replay-1', maxTasks: 1 },
