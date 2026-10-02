@@ -52,6 +52,7 @@ export function parseEmbeddingIndex (raw, options = {}) {
     items.set(key, { fingerprint, vector: normalize(vector) })
   }
   return {
+    libraryRevision: String(payload.libraryRevision || ''),
     provider: String(payload.provider || ''),
     model: String(payload.model || ''),
     dim: expectedDim || (items.size ? items.values().next().value.vector.length : 0),
@@ -100,18 +101,45 @@ function safeJson (text) {
  * 读索引文件（按 mtime 缓存：发布写完 embeddings.json 之后不必重启进程）。
  * 文件不存在 → null（回退能力关闭，而不是报错）。
  */
-export function loadEmbeddingIndex (file, { now = () => Date.now() } = {}) {
+export function loadEmbeddingIndex (
+  file,
+  {
+    now = () => Date.now(),
+    expectedLibraryRevision = '',
+    allowRevisionMismatch = false
+  } = {}
+) {
   if (!file) return { index: null, reason: 'no_index_file' }
   let stat
   try { stat = fs.statSync(file) } catch { return { index: null, reason: 'missing' } }
+
+  const expected = String(expectedLibraryRevision || '')
+  const validate = (index, sourceReason) => {
+    if (!index) return { index: null, reason: 'unreadable' }
+    if (expected) {
+      if (!index.libraryRevision) {
+        if (!allowRevisionMismatch) return { index: null, reason: 'library_revision_unbound' }
+        return { index, reason: sourceReason, revisionMatch: false, bindingReason: 'library_revision_unbound' }
+      }
+      if (index.libraryRevision !== expected) {
+        if (!allowRevisionMismatch) return { index: null, reason: 'library_revision_mismatch' }
+        return { index, reason: sourceReason, revisionMatch: false, bindingReason: 'library_revision_mismatch' }
+      }
+      return { index, reason: sourceReason, revisionMatch: true, bindingReason: '' }
+    }
+    return { index, reason: sourceReason, revisionMatch: null, bindingReason: '' }
+  }
+
   const cached = loadEmbeddingIndex.cache?.get(file)
-  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return { index: cached.index, reason: 'cached' }
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+    return validate(cached.index, 'cached')
+  }
   const index = parseEmbeddingIndex(fs.readFileSync(file, 'utf8'))
   if (!index) return { index: null, reason: 'unreadable' }
   if (!loadEmbeddingIndex.cache) loadEmbeddingIndex.cache = new Map()
   loadEmbeddingIndex.cache.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, index })
   void now
-  return { index, reason: 'loaded' }
+  return validate(index, 'loaded')
 }
 
 /**
@@ -311,6 +339,7 @@ export function createSemanticFallback ({
   indexFile = '',
   apiKey = '',
   model = 'text-embedding-v3',
+  getLibraryRevision = null,
   timeoutMs = 1000,
   minScore = 0.55,
   limit = 5,
@@ -325,11 +354,26 @@ export function createSemanticFallback ({
     reported = true
     onFailure(reason)
   }
+  const loadBoundIndex = () => {
+    const expected = typeof getLibraryRevision === 'function'
+      ? String(getLibraryRevision() || '')
+      : ''
+    return loadEmbeddingIndex(indexFile, { expectedLibraryRevision: expected })
+  }
   return {
     get enabled () { return embedder.enabled },
     stats: () => embedder.stats(),
+    status: () => {
+      const loaded = loadBoundIndex()
+      return {
+        enabled: embedder.enabled,
+        available: Boolean(loaded.index),
+        reason: loaded.reason,
+        libraryRevision: loaded.index?.libraryRevision || ''
+      }
+    },
     async search ({ query, records = [], snippetOf = null, limit: asked } = {}) {
-      const loaded = loadEmbeddingIndex(indexFile)
+      const loaded = loadBoundIndex()
       if (!loaded.index) { report(`索引不可用（${loaded.reason}）：${indexFile}`); return [] }
       const vector = await embedder.embed(query)
       if (!vector) {
