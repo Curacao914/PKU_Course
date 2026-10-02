@@ -709,6 +709,13 @@ async function auditAdmin(page, site, fixture, calls, dialogs, failures) {
     for (const target of targets) {
       const act = target.act
       const selector = '#tab-' + tab + ' [data-act="' + act + '"]'
+      // 有些动作本身会跳页（例如概览状态数字 → 课程筛选）。下一项审计开始前先回到
+      // 它所属的 tab；否则 Playwright 会找到隐藏 DOM，却永远点不到它。
+      const tabSelected = await page.getAttribute('.seg button[data-tab="' + tab + '"]', 'aria-selected').catch(() => null)
+      if (tabSelected !== 'true') {
+        await page.click('.seg button[data-tab="' + tab + '"]')
+        await page.waitForTimeout(100)
+      }
       // 每次操作后界面会重绘（折叠层又合上），所以每点一个按钮前都先展开
       await openAll()
       // 分栏里的按钮得先切到它那一栏才在
