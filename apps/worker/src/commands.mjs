@@ -2139,28 +2139,45 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
         ...(planned ? { notifyPending: planned } : (carriedPending ? { notifyPending: carriedPending } : {}))
       }
     ]
-    fs.mkdirSync(siteRoot, { recursive: true })
+    let site
+    let release = null
+    const atomic = usesAtomicSiteReleases(siteRoot)
 
-    /**
-     * 先把页面写出去，**最后**才写发布库。
-     *
-     * 顺序是有讲究的：发布库是"提交点"——/api/notes、MCP、站内搜索都读它。
-     * 如果先写库再写页面，中间那几百毫秒里读者会拿到一条指向尚未生成的页面的记录
-     * （点进去 404、搜索命中却打不开）。反过来先写页面，万一写到一半崩了，
-     * 库还是旧的：站点内容与库始终自洽，重跑一次 publish 即可补齐。
-     */
-    const site = writeSite({
-      records: nextLibrary,
-      outputDir: siteRoot,
-      siteOrigin: options.options.origin || 'https://course.law-tech.dev',
-      docs: readPublicDocs()
-    })
-    // 页面写完才动发布库（提交点，见上面的说明）：tmp + fsync + rename 原子替换。
-    // 提交前做一次乐观版本检查：读库到现在被改过就中止——重跑一次是幂等的，
-    // 覆盖别人的改动却是不可恢复的（整条记录消失）。
-    const revisionCheck = checkRevisionUnchanged({ file: libraryForRebuild, expected: revisionBefore.revision })
-    if (!revisionCheck.ok) throw new Error(revisionCheck.message)
-    writeJsonAtomic(libraryForRebuild, nextLibrary)
+    if (atomic) {
+      /**
+       * release 模式：页面、Markdown、公开索引与 library.json 全部先写到新目录，
+       * 校验通过以后一次切换 site symlink。旧版目录完整保留，可一键切回。
+       *
+       * embedding 是正文的派生物：正文一个字没变时可以原样带过去；正文变了就**不带**，
+       * 让语义回退暂时关闭在“没有索引”的安全状态，等 course embed 按新指纹增量重建。
+       * 宁可少一个语义结果，也不能让旧向量替新正文说话。
+       */
+      const outcome = publishViaRelease({
+        siteRoot,
+        records: nextLibrary,
+        expectedRevision: revisionBefore.revision,
+        origin: options.options.origin || 'https://course.law-tech.dev',
+        carryEmbeddings: !changed
+      })
+      site = outcome.site
+      release = outcome.release
+    } else {
+      /**
+       * 旧部署兼容路径：在用户显式执行 --migrate-site-root 之前完全维持原行为。
+       * 这里仍是“页面先写、library 最后提交”，至少保证公开索引不会先于页面出现。
+       */
+      fs.mkdirSync(siteRoot, { recursive: true })
+      site = writeSite({
+        records: nextLibrary,
+        outputDir: siteRoot,
+        siteOrigin: options.options.origin || 'https://course.law-tech.dev',
+        docs: readPublicDocs()
+      })
+      const revisionCheck = checkRevisionUnchanged({ file: libraryForRebuild, expected: revisionBefore.revision })
+      if (!revisionCheck.ok) throw new Error(revisionCheck.message)
+      writeJsonAtomic(libraryForRebuild, nextLibrary)
+    }
+
     const index = readSiteIndex(siteRoot)
     const purge = purgeCache(options, { reason: `发布 ${record.slug}`, files: site.written || [] })
 
@@ -2215,6 +2232,15 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
         notes: index.count,
         siteDir: site.outputDir,
         written: site.written,
+        atomicRelease: Boolean(release),
+        release: release ? {
+          current: release.current,
+          previous: release.previous,
+          validatedNotes: release.validation.notes
+        } : null,
+        semanticIndex: release
+          ? (changed ? 'stale_not_carried' : (fs.existsSync(path.join(siteRoot, 'embeddings.json')) ? 'carried' : 'absent'))
+          : 'legacy_site',
         // 时间语义：lessonDate 是这节课的日期（排序与展示），firstPublishedAt 进 RSS，
         // updatedAt 供日报判断"昨天更新了什么"；lessonDateSource 说明日期是哪来的。
         lessonDate: record.lessonDate,
