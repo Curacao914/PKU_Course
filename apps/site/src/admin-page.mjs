@@ -202,11 +202,13 @@ pre{background:var(--sunken);border-radius:var(--r-md);padding:14px;overflow:aut
 button.item{width:100%;border:0;background:none;font:inherit;text-align:left;color:inherit}
 button.item:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
 
+.content-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.25fr);gap:16px}
 @media (max-width:900px){
   .board,.board.rail-hidden{grid-template-columns:1fr}
   .board .col{max-height:none;border-right:0;border-bottom:1px solid var(--line)}
   .split{grid-template-columns:1fr}
   .split .col{max-height:none;border-right:0;border-bottom:1px solid var(--line)}
+  .content-grid{grid-template-columns:1fr}
 }
 
 /* 通知记录：宽屏四列一行，窄屏两行卡片。 */
@@ -263,10 +265,12 @@ button.item:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
   <nav class="seg" role="tablist">
     <button role="tab" data-tab="overview" aria-selected="true">概览</button>
     <button role="tab" data-tab="courses" aria-selected="false">课程</button>
+    <button role="tab" data-tab="content" aria-selected="false">内容</button>
     <button role="tab" data-tab="settings" aria-selected="false">设置</button>
   </nav>
   <section id="tab-overview"></section>
   <section id="tab-courses" hidden></section>
+  <section id="tab-content" hidden></section>
   <section id="tab-settings" hidden></section>
   <div class="card" style="padding:6px 22px">
     <details class="d" id="outCard" style="border-top:0" data-fold="out">
@@ -288,8 +292,9 @@ var KEY = 'course.admin.token'
 var OPEN_KEY = 'course.admin.open'
 var SEL_KEY = 'course.admin.sel'
 var state = {
-  status: null, balance: null, config: null, storage: null,
+  status: null, balance: null, config: null, storage: null, content: null,
   tab: 'overview', busy: false, requests: {}, uploads: {}, open: {},
+  contentDraft: { id: '', course: '', topic: '', lessons: [], enabled: true },
   sel: { tag: '', year: 'all', course: '', lesson: '', sort: 'desc', rail: false, pane: 'maintenance' },
   preview: null,
   // 没保存的运行参数改动：20 秒轮询重绘与分栏切换都不该把它抹掉
@@ -312,7 +317,11 @@ var LABELS = {
   retry: '放回队列（重跑这条课次，会调用模型）',
   republish: '重新发布页面（用现有笔记，不调用模型）',
   revise: '用模型重写这个模块（调用模型，产生费用）',
-  'notify-retry': '重发失败通知（会发微信）'
+  'notify-retry': '重发失败通知（会发微信）',
+  'rebuild-content': '原子重建站点（不调用模型）',
+  'rollback-content': '回滚上一版内容（不调用模型）',
+  'rebuild-integration': '重建这一章（确定性抽取，不调用模型）',
+  'rebuild-integrations': '重建全部章节（确定性抽取，不调用模型）'
 }
 var MODULE_TEXT = { approved: '已通过', draft: '草稿', reviewing: '审查中', revising: '重写中', pending: '待写', failed: '失败' }
 // 阶段名要说人话：光看"待处理 · 尝试 0 次"没人知道它卡在哪一步
@@ -434,6 +443,13 @@ async function load (options) {
     return false
   }
   state.status = data
+  try {
+    var contentRes = await fetch('/api/admin/content', { headers: headers(false) })
+    var contentData = await contentRes.json().catch(function () { return {} })
+    state.content = contentRes.ok ? contentData : { ok: false, error: contentData.error || 'content_state_failed' }
+  } catch (e) {
+    state.content = { ok: false, error: String(e) }
+  }
   if (!state.config) {
     try { state.config = await (await fetch('/api/admin/config', { headers: headers(false) })).json() } catch (e) {}
   }
@@ -445,7 +461,7 @@ async function load (options) {
 function isDirty () {
   var active = document.activeElement
   if (active && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName)) return true
-  var boxes = document.querySelectorAll('[data-request],[data-pw="next"],[data-newtag]')
+  var boxes = document.querySelectorAll('[data-request],[data-pw="next"],[data-newtag],[data-integration-text]')
   for (var i = 0; i < boxes.length; i += 1) if (boxes[i].value) return true
   return Object.keys(state.configDraft).length > 0
 }
@@ -497,7 +513,7 @@ function render () {
     $('tab-' + btn.dataset.tab).hidden = !on
   })
   renderRunState()
-  renderOverview(); renderCourses(); renderSettings()
+  renderOverview(); renderCourses(); renderContent(); renderSettings()
 }
 function card (inner, style) { return '<div class="card"' + (style ? ' style="' + style + '"' : '') + '>' + inner + '</div>' }
 
@@ -847,6 +863,190 @@ function courseTagHtml (course) {
   }).join('') : '<span class="small muted">暂无标签</span>') +
     '<div class="row" style="margin-top:8px"><input data-newcoursetag="' + esc(course) + '" placeholder="给这门课加标签，回车确认" style="max-width:260px">' +
     '<button class="act" data-act="add-course-tag" data-course="' + esc(course) + '">添加</button></div>'
+}
+
+/* ── 内容：正式站版本 + 章级整合 ── */
+function contentCourseMap () {
+  var map = {}
+  tasks().forEach(function (task) {
+    var course = String(task.courseName || '').trim()
+    var lesson = String(task.title || '').trim()
+    if (!course || !lesson) return
+    if (!map[course]) map[course] = []
+    if (!map[course].includes(lesson)) map[course].push(lesson)
+  })
+  Object.keys(map).forEach(function (course) {
+    map[course].sort(function (a, b) { return a.localeCompare(b, 'zh-CN', { numeric: true }) })
+  })
+  return map
+}
+
+function resetIntegrationDraft (course) {
+  var courses = contentCourseMap()
+  var first = course || Object.keys(courses).sort().at(0) || ''
+  state.contentDraft = { id: '', course: first, topic: '', lessons: [], enabled: true }
+}
+
+function contentStatusPill (status) {
+  var cls = status === 'fresh' ? 'ok' : status === 'stale' ? 'warn' : 'bad'
+  var text = status === 'fresh' ? '已同步' : status === 'stale' ? '需重建' : '缺产物'
+  return '<span class="pill ' + cls + '"><span class="dot"></span>' + text + '</span>'
+}
+
+function releaseTime (value) {
+  if (!value) return ''
+  try { return new Date(value).toLocaleString() } catch (e) { return String(value) }
+}
+
+function renderContent () {
+  var box = $('tab-content')
+  if (!box) return
+  var data = state.content || {}
+  if (!data.ok) {
+    box.innerHTML = card('<h2>内容</h2><p class="muted">暂时读不到内容状态：' + esc(data.error || '尚未加载') + '</p>')
+    return
+  }
+
+  var release = data.release || { mode: 'missing', releases: [] }
+  var atomic = release.mode === 'atomic'
+  var releaseRows = (release.releases || []).map(function (item) {
+    return '<div class="row" style="padding:7px 0;border-bottom:1px solid var(--line);gap:8px">' +
+      '<span class="pill ' + (item.current ? 'ok' : '') + '">' + (item.current ? '当前' : (item.legacy ? '初始版' : '历史')) + '</span>' +
+      '<span style="font-family:var(--mono);font-size:12px">' + esc(item.name) + '</span>' +
+      '<span class="spacer"></span>' +
+      '<span class="small muted">' + (item.notes == null ? '' : item.notes + ' 篇 · ') + esc(releaseTime(item.modifiedAt)) + '</span></div>'
+  }).join('')
+  var releaseCard = card(
+    '<h2>正式站版本</h2>' +
+    '<p class="sub">' + (atomic
+      ? '原子发布已启用 · 当前 ' + esc(release.current || '—')
+      : '当前仍是旧式目录模式；需要先完成一次性迁移') + '</p>' +
+    '<div class="row" style="margin:12px 0">' +
+      '<button class="act primary" data-act="rebuild-content">原子重建站点</button>' +
+      '<button class="act danger" data-act="rollback-content"' + (release.canRollback ? '' : ' disabled') + '>回滚上一版</button>' +
+    '</div>' +
+    '<p class="small muted">重建只用现有发布库，不调用模型；回滚会把正式入口切回上一份完整快照。</p>' +
+    (releaseRows || '<p class="small muted">还没有内容 release。</p>')
+  )
+
+  var items = ((data.integrations || {}).items || [])
+  var integrationRows = items.map(function (item) {
+    var stale = item.staleLessons && item.staleLessons.length
+      ? '<div class="tiny" style="color:var(--warn);margin-top:5px">变化课次：' + esc(item.staleLessons.join('、')) + '</div>'
+      : ''
+    return '<div class="block" style="margin:0">' +
+      '<div class="row" style="align-items:center">' +
+        contentStatusPill(item.status) +
+        '<strong>' + esc(item.topic) + '</strong>' +
+        '<span class="small muted">' + esc(item.course) + ' · ' + item.lessons.length + ' 节</span>' +
+        '<span class="spacer"></span>' +
+        '<button class="act quiet" data-act="edit-integration" data-id="' + esc(item.id) + '">编辑</button>' +
+        '<button class="act" data-act="rebuild-integration" data-id="' + esc(item.id) + '">重建</button>' +
+        '<button class="act danger" data-act="delete-integration" data-id="' + esc(item.id) + '">删除</button>' +
+      '</div>' +
+      '<div class="small" style="margin-top:7px">' + esc(item.lessons.join(' / ')) + '</div>' +
+      stale +
+      '<div class="tiny muted" style="margin-top:5px">' +
+        (item.generatedAt ? '最近生成 ' + esc(releaseTime(item.generatedAt)) : '尚未生成整合产物') +
+      '</div></div>'
+  }).join('')
+
+  var courseMap = contentCourseMap()
+  if (!state.contentDraft.course || !courseMap[state.contentDraft.course]) resetIntegrationDraft()
+  var draft = state.contentDraft
+  var courseOptions = Object.keys(courseMap).sort().map(function (course) {
+    return '<option value="' + esc(course) + '"' + (draft.course === course ? ' selected' : '') + '>' + esc(course) + '</option>'
+  }).join('')
+  var lessonChecks = (courseMap[draft.course] || []).map(function (lesson) {
+    var checked = (draft.lessons || []).includes(lesson)
+    return '<label class="row small" style="gap:7px;margin:4px 0"><input type="checkbox" data-integration-lesson="' + esc(lesson) + '"' +
+      (checked ? ' checked' : '') + '><span>' + esc(lesson) + '</span></label>'
+  }).join('')
+
+  var form = '<div class="block"><div class="row"><h3 style="margin:0">' + (draft.id ? '编辑章节' : '新建章节') + '</h3>' +
+    '<span class="spacer"></span>' + (draft.id ? '<span class="tiny muted">' + esc(draft.id) + '</span>' : '') + '</div>' +
+    '<div class="field"><label>课程</label><select data-integration-course>' + courseOptions + '</select></div>' +
+    '<div class="field"><label>章节主题</label><input data-integration-text="topic" value="' + esc(draft.topic || '') + '" placeholder="例如：罪刑均衡与以刑制罪"></div>' +
+    '<div class="field"><label>固定课次</label><div style="padding:8px 10px;border:1px solid var(--line);border-radius:10px;max-height:220px;overflow:auto">' +
+      (lessonChecks || '<span class="small muted">这门课还没有课次</span>') + '</div></div>' +
+    '<label class="row small" style="gap:8px;margin:8px 0 14px"><input type="checkbox" data-integration-enabled' +
+      (draft.enabled !== false ? ' checked' : '') + '>自动维护这一章</label>' +
+    '<div class="row"><button class="act primary" data-act="save-integration">保存章节</button>' +
+      '<button class="act" data-act="new-integration">清空表单</button></div>' +
+    '<p class="tiny muted" style="margin-top:8px">保存的是明确课次范围；以后同课程新增课次不会自动混进来。正文变化后，包含该课次的章节会自动重建。</p>' +
+    '</div>'
+
+  var integrationsCard = card(
+    '<div class="row"><h2 style="margin:0">章级整合</h2><span class="spacer"></span>' +
+      '<button class="act" data-act="rebuild-integrations"' + (items.length ? '' : ' disabled') + '>重建全部</button></div>' +
+    '<p class="sub">章节范围由你确认一次，后续由系统按正文版本维护。</p>' +
+    '<div style="display:grid;gap:10px;margin:12px 0">' +
+      (integrationRows || '<p class="small muted">还没有长期章节定义。可以先在下面建一个。</p>') +
+    '</div>' + form
+  )
+
+  box.innerHTML = '<div class="content-grid">' +
+    '<div>' + releaseCard + '</div><div>' + integrationsCard + '</div></div>'
+}
+
+async function saveIntegration (btn) {
+  var draft = state.contentDraft || {}
+  if (!draft.course) { toast('先选课程', 'error'); return }
+  if (!String(draft.topic || '').trim()) { toast('先填章节主题', 'error'); return }
+  if (!(draft.lessons || []).length) { toast('至少勾一节课', 'error'); return }
+  var restore = busyButton(btn, '保存中…')
+  try {
+    var definition = {
+      course: draft.course,
+      topic: String(draft.topic || '').trim(),
+      lessons: draft.lessons.slice(),
+      enabled: draft.enabled !== false
+    }
+    if (draft.id) definition.id = draft.id
+    var res = await fetch('/api/admin/integrations', {
+      method: 'PUT', headers: headers(true), body: JSON.stringify({ definition: definition })
+    })
+    var data = await res.json().catch(function () { return {} })
+    if (!res.ok || !data.ok) throw new Error(data.message || data.error || '保存失败')
+    state.content = data.content
+    resetIntegrationDraft(draft.course)
+    renderContent()
+    toast('章节已保存；范围以后不会自动扩张', 'ok')
+  } catch (error) {
+    toast('保存失败：' + error, 'error')
+  } finally { restore() }
+}
+
+async function deleteIntegration (id, btn) {
+  if (!window.confirm('删除这个章节定义及其已生成的整合文件？单课笔记不会受影响。')) return
+  var restore = busyButton(btn, '删除中…')
+  try {
+    var res = await fetch('/api/admin/integrations?id=' + encodeURIComponent(id), { method: 'DELETE', headers: headers(false) })
+    var data = await res.json().catch(function () { return {} })
+    if (!res.ok || !data.ok) throw new Error(data.message || data.error || '删除失败')
+    state.content = data.content
+    if (state.contentDraft.id === id) resetIntegrationDraft()
+    renderContent()
+    toast('章节定义已删除', 'ok')
+  } catch (error) {
+    toast('删除失败：' + error, 'error')
+  } finally { restore() }
+}
+
+function editIntegration (id) {
+  var items = (((state.content || {}).integrations || {}).items || [])
+  var item = items.find(function (entry) { return entry.id === id })
+  if (!item) { toast('找不到这个章节定义', 'error'); return }
+  state.contentDraft = {
+    id: item.id,
+    course: item.course,
+    topic: item.topic,
+    lessons: (item.lessons || []).slice(),
+    enabled: item.enabled !== false
+  }
+  renderContent()
+  var input = document.querySelector('[data-integration-text="topic"]')
+  if (input) input.focus()
 }
 
 /* ── 设置：与课程区一样的分栏（左类别、右内容），不再用竖排展开 ── */
@@ -1406,6 +1606,17 @@ function handleAct (act, btn) {
   if (act === 'revise') return reviseWith(key, btn.dataset.module, btn)
   if (act === 'revise-first') return reviseWith(key, '', btn)
   if (act === 'notify-retry') return doAction('notify-retry', {}, btn)
+  if (act === 'rebuild-content') return doAction('rebuild-content', {}, btn)
+  if (act === 'rollback-content') {
+    if (!window.confirm('回滚到上一份完整内容版本？当前版本不会删除，之后仍然可以再切回来。')) return
+    return doAction('rollback-content', {}, btn)
+  }
+  if (act === 'rebuild-integration') return doAction('rebuild-integration', { id: btn.dataset.id || '' }, btn)
+  if (act === 'rebuild-integrations') return doAction('rebuild-integrations', {}, btn)
+  if (act === 'edit-integration') return editIntegration(btn.dataset.id || '')
+  if (act === 'new-integration') { resetIntegrationDraft(); renderContent(); return }
+  if (act === 'save-integration') return saveIntegration(btn)
+  if (act === 'delete-integration') return deleteIntegration(btn.dataset.id || '', btn)
   if (act === 'discover' || act === 'notify' || act === 'doctor' || act === 'backup') return doAction(act, {}, btn)
   if (act === 'prune') return doAction('prune', {}, btn)
   if (act === 'prune-apply') {
@@ -1512,11 +1723,34 @@ document.addEventListener('input', function (event) {
   if (box) { state.requests[box.dataset.request] = box.value; return }
   // 运行参数的改动先记在本地：切分栏或 20 秒轮询重绘都不该把它抹掉
   var cfg = target.closest('[data-cfg]')
-  if (cfg) state.configDraft[cfg.dataset.cfg] = cfg.value
+  if (cfg) { state.configDraft[cfg.dataset.cfg] = cfg.value; return }
+  var integrationText = target.closest('[data-integration-text]')
+  if (integrationText) {
+    state.contentDraft[integrationText.dataset.integrationText] = integrationText.value
+  }
 })
 document.addEventListener('change', function (event) {
-  var cfg = event.target && event.target.closest ? event.target.closest('[data-cfg]') : null
-  if (cfg) state.configDraft[cfg.dataset.cfg] = cfg.value
+  var target = event.target
+  var cfg = target && target.closest ? target.closest('[data-cfg]') : null
+  if (cfg) { state.configDraft[cfg.dataset.cfg] = cfg.value; return }
+  if (!target || !target.closest) return
+  var course = target.closest('[data-integration-course]')
+  if (course) {
+    state.contentDraft.course = course.value
+    state.contentDraft.lessons = []
+    renderContent()
+    return
+  }
+  var lesson = target.closest('[data-integration-lesson]')
+  if (lesson) {
+    var value = lesson.dataset.integrationLesson
+    var lessons = (state.contentDraft.lessons || []).filter(function (item) { return item !== value })
+    if (lesson.checked) lessons.push(value)
+    state.contentDraft.lessons = lessons
+    return
+  }
+  var enabled = target.closest('[data-integration-enabled]')
+  if (enabled) state.contentDraft.enabled = enabled.checked
 })
 document.addEventListener('toggle', function (event) {
   var node = event.target

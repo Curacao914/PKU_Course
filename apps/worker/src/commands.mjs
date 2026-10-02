@@ -27,7 +27,7 @@ import {
   normalizeIntegrationManifest,
   selectConfiguredIntegrations,
   upsertIntegrationDefinition
-} from './integration-manifest.mjs'
+} from '@course/notes'
 import { collectExceptions, formatExceptions } from './reconcile.mjs'
 import { cacheUrlsFor, extractNoteMetadata, purgeCloudflareCache } from '@course/publish'
 

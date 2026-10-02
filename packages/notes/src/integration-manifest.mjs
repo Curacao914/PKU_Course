@@ -49,6 +49,18 @@ export function upsertIntegrationDefinition(manifest, definition) {
   }
 }
 
+export function removeIntegrationDefinition(manifest, id) {
+  const current = normalizeIntegrationManifest(manifest)
+  const wanted = str(id)
+  if (!wanted) throw new Error('删除整合定义需要 id')
+  const integrations = current.integrations.filter(item => item.id !== wanted)
+  return {
+    version: 1,
+    integrations,
+    removed: integrations.length !== current.integrations.length
+  }
+}
+
 export function selectConfiguredIntegrations(manifest, { id = '', course = '', lesson = '', enabledOnly = true } = {}) {
   const current = normalizeIntegrationManifest(manifest)
   const wantedId = str(id)

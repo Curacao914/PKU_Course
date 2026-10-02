@@ -4,6 +4,7 @@ import test from 'node:test'
 import {
   emptyIntegrationManifest,
   normalizeIntegrationManifest,
+  removeIntegrationDefinition,
   selectConfiguredIntegrations,
   upsertIntegrationDefinition
 } from './integration-manifest.mjs'
@@ -55,6 +56,21 @@ test('affected selection is exact: a changed lesson only refreshes integrations 
     ['a']
   )
   assert.deepEqual(selectConfiguredIntegrations(manifest, { id: 'b' }).map(item => item.id), ['b'])
+})
+
+test('removing a configured integration is explicit and idempotent', () => {
+  const manifest = normalizeIntegrationManifest({
+    integrations: [
+      { id: 'a', course: '刑事执行法', topic: 'A', lessons: ['09-07'] },
+      { id: 'b', course: '刑事执行法', topic: 'B', lessons: ['09-14'] }
+    ]
+  })
+  const first = removeIntegrationDefinition(manifest, 'a')
+  assert.equal(first.removed, true)
+  assert.deepEqual(first.integrations.map(item => item.id), ['b'])
+  const second = removeIntegrationDefinition(first, 'a')
+  assert.equal(second.removed, false)
+  assert.deepEqual(second.integrations.map(item => item.id), ['b'])
 })
 
 test('bad definitions fail early instead of silently broadening the chapter scope', () => {

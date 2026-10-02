@@ -139,6 +139,15 @@ export {
 } from './integration.mjs'
 
 export {
+  emptyIntegrationManifest,
+  normalizeIntegrationDefinition,
+  normalizeIntegrationManifest,
+  removeIntegrationDefinition,
+  selectConfiguredIntegrations,
+  upsertIntegrationDefinition
+} from './integration-manifest.mjs'
+
+export {
   checkMarkerPropagation,
   checkMetadata,
   checkNoteQuality,
