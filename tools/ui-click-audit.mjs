@@ -1020,7 +1020,7 @@ async function auditCoursewareFlow(page, site, fixture, failures) {
     await page.unroute('**/api/admin/material?**')
     expectedPreviewDisconnect = false
   }
-  const opened = await page.$eval('#detail .pages .page', nodes => nodes.length)
+  const opened = await page.$$eval('#detail .pages .page', nodes => nodes.length)
   const firstLabel = (await page.textContent('#detail .pages .row span')).trim()
   const previewToast = (await page.textContent('#toast').catch(() => '')).trim()
   await record('预览断线会自动重试',
