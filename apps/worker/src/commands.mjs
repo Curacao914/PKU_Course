@@ -4026,11 +4026,14 @@ export const USAGE = `用法：course <命令> [选项]
                                            新鲜 / 失效 / 未绑定 / 孤立。只报告，不自动重做
   integrate  --course <名称> [--lessons <课次,课次>] [--topic <主题>]
              [--library <library.json>] [--out-dir <目录>]
-                                           章级整合（跨课次的概念对照 / 反复出现的问题 / 论证推进 /
-                                           待核继承），只做确定性抽取，每一行都带出处；不花钱、不发通知
-             [--replay-key <键>]
-                                           只重跑一页纸摘要：把一节笔记压进一张 A4（复习只看这一页）
-                                           产物带 sourceChecksum（所依据正文的 SHA-256），发布时校验
+             [--save [--id <稳定ID>] [--manifest <清单.json>]]
+                                           章级整合：确定性抽取跨课次概念 / 问题线 / 论证推进 / 待核继承；
+                                           每一行都带出处，不花钱、不发通知。
+                                           --save 把“本次实际解析到的明确课次”写入长期清单；
+                                           必须显式给 --topic，后续不会因同课程新增课次而自动扩张范围
+             --configured [--id <稳定ID>] [--course <名称>] [--manifest <清单.json>]
+                                           按长期清单重建整合；不给 --id 时重建所有启用项。
+                                           普通 publish 修改正文后，也会免费重建包含该课次的配置项
   sourcemap  [--course <名称>] [--lesson <课次>] [--site-root <站点目录>] [--library <library.json>]
              [--write] [--show] [--model --max-cost-cny <元>]
                                            给已发布的一页纸补来源映射（只补映射，正文一个字不动）。
@@ -4044,8 +4047,11 @@ export const USAGE = `用法：course <命令> [选项]
                                            产物带 sourceChecksum（所依据正文的 SHA-256），发布时校验
   publish    --from <笔记目录> [--course <名称>] [--lesson <课次>] [--out <站点目录>] [--origin <域名>] [--no-purge]
              [--replay-key <键>] [--lesson-date <YYYY-MM-DD>]
-             --rebuild                     只按发布库重写站点（换模板/改样式后重建，
-                                           不跑模型、不发通知）
+             --rebuild [--write-back]      只按发布库重写站点（换模板/改样式后重建，
+                                           不跑模型、不发通知；--write-back 同时把派生字段写回库）
+             --migrate-site-root --yes      一次性把旧实体 site/ 迁成 versioned release + symlink。
+                                           生产上先停 public/admin 两个站点进程再执行；
+                                           完成后每次发布均“完整快照校验 → 原子切换”，旧版可回滚
              --no-notify                   更新站点但这一次不排推送
              --regenerate-derived          简报/一页纸与当前正文对不上时用模型重新生成
                                            （默认：直接中止发布——串课的简报比发布失败更糟；
