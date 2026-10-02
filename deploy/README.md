@@ -108,6 +108,57 @@ ssh ubuntu@124.222.111.108 'bash ~/course-staging/deploy/release.sh --rollback' 
 发布撞目录名（会 rsync 进正在跑的版本）、以及 `mv -T` 在 BSD/macOS 上会把新链接挪进旧目录
 （表现为"发布成功但 course-runtime 还指着旧版本"）。
 
+## 内容站点的一次性原子化迁移
+
+代码 release（`~/course-runtime`）与内容 release（`~/.course-worker/site`）是两层不同的版本：
+前者保证“程序更新失败不影响旧程序”，后者保证“**一轮内容构建失败不影响旧内容**”。
+
+新代码合并后，生产上的 `~/.course-worker/site` 如果还是实体目录，普通 publish 会继续走兼容路径；
+**不会因为部署新代码就自动迁移**。只在维护窗口做一次：
+
+```bash
+ssh ubuntu@124.222.111.108
+
+# 1. 先停两个会读取 site/ 的进程。worker/timer 不必因此长期停掉，
+#    但迁移这几秒内不要并发跑 publish。
+systemctl --user stop course-site.service course-admin.service
+
+# 2. 把旧实体目录原样搬成第一份 legacy release，并让 site 变成 symlink。
+#    不跑模型、不重建页面、不发通知。
+node ~/course-runtime/apps/worker/bin/course.mjs publish --migrate-site-root --yes
+
+# 3. 恢复服务并验健康。
+systemctl --user start course-site.service course-admin.service
+curl -fsS http://127.0.0.1:3100/healthz
+curl -fsS http://127.0.0.1:3101/healthz
+```
+
+迁移后的形状：
+
+```
+~/.course-worker/site -> site.releases/legacy-...
+~/.course-worker/site.releases/
+├── legacy-...       # 迁移前的原内容，完整保留
+└── release-...      # 此后每次 publish 的完整快照
+```
+
+之后普通 `course publish` 与 `course publish --rebuild` 都会：
+
+1. 在 `.staging-*` 生成完整站点；
+2. 写入同一版本的 `library.json`；
+3. 校验首页、公开索引、每篇 HTML/Markdown 与一页纸；
+4. 再验一次发布库 revision，防并发覆盖；
+5. seal 成 `release-*`；
+6. 单次 rename 替换 `site` symlink。
+
+因此内容层也具备“旧版或新版二选一”的提交语义。旧 release 暂不由 publish 自动删除：
+先让维护与回滚策略积累一段真实运行数据，再决定保留数量，避免刚上线就把回滚余量清掉。
+
+**回滚内容**暂时使用目标 release 的绝对路径做显式切换；不要手工 rsync 半套文件回去。
+当前模块已经保留每次 publish 输出里的 `release.previous`，后续管理台会把这件事做成明确按钮。
+
+详细契约见 `docs/17-内容生命周期.md`。
+
 ## 服务器上已具备
 
 | 组件 | 状态 |
