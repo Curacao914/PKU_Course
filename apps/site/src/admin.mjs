@@ -553,7 +553,7 @@ export function normalizeTags(input = {}, previous = { order: [], courses: {}, l
  * 每类给一个数字与一句人话说明，界面上画成条状图。
  */
 const STORAGE_CATEGORIES = [
-  { key: 'replays', label: '回放产物', hint: '转录稿、写作状态、运行摘要（视频原件校验后已删）', dir: 'replays' },
+  { key: 'replays', label: '课次处理缓存', hint: '录播下载、分片、转录与写作中间文件；未完成课次会保留媒体以便重试，完成后可安全清理', dir: 'replays' },
   { key: 'materials', label: '课件', hint: '你上传的 PPT / PDF / Word / Excel 与解析出的文字', dir: 'materials' },
   { key: 'site', label: '站点', hint: '生成的 HTML、索引与 RSS', dir: 'site' },
   { key: 'browserProfile', label: '浏览器配置', hint: '登录教学网用的持久化配置（不能删）', dir: 'browser-profile' },

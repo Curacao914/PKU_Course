@@ -1124,7 +1124,7 @@ function renderContent () {
 async function saveIntegration (btn) {
   var draft = state.contentDraft || {}
   if (!draft.course) { toast('先选课程', 'error'); return }
-  if (!String(draft.topic || '').trim()) { toast('先填章节主题', 'error'); return }
+  if (!String(draft.topic || '').trim()) { toast('先填专题名称', 'error'); return }
   if (!(draft.lessons || []).length) { toast('至少勾一节课', 'error'); return }
   var restore = busyButton(btn, '保存中…')
   try {
@@ -1143,14 +1143,14 @@ async function saveIntegration (btn) {
     state.content = data.content
     resetIntegrationDraft(draft.course)
     renderContent()
-    toast('章节已保存', 'ok')
+    toast('专题已保存', 'ok')
   } catch (error) {
     toast('保存失败：' + error, 'error')
   } finally { restore() }
 }
 
 async function deleteIntegration (id, btn) {
-  if (!window.confirm('删除这个章节定义及其已生成的整合文件？单课笔记不会受影响。')) return
+  if (!window.confirm('删除这个专题及其已生成的整合文件？单课笔记不会受影响。')) return
   var restore = busyButton(btn, '删除中…')
   try {
     var res = await fetch('/api/admin/integrations?id=' + encodeURIComponent(id), { method: 'DELETE', headers: headers(false) })
@@ -1159,7 +1159,7 @@ async function deleteIntegration (id, btn) {
     state.content = data.content
     if (state.contentDraft.id === id) resetIntegrationDraft()
     renderContent()
-    toast('章节定义已删除', 'ok')
+    toast('专题已删除', 'ok')
   } catch (error) {
     toast('删除失败：' + error, 'error')
   } finally { restore() }
@@ -1168,7 +1168,7 @@ async function deleteIntegration (id, btn) {
 function editIntegration (id) {
   var items = (((state.content || {}).integrations || {}).items || [])
   var item = items.find(function (entry) { return entry.id === id })
-  if (!item) { toast('找不到这个章节定义', 'error'); return }
+  if (!item) { toast('找不到这个专题', 'error'); return }
   state.contentDraft = {
     id: item.id,
     course: item.course,
