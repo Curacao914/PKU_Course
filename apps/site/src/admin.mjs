@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { clearPassword, asrCostCny, noteCostCny, readPasswordRecord, resolvePricing, validatePassword, verifyPassword, writePassword } from '@course/core'
+import { asrCostCny, noteCostCny, resolvePricing } from '@course/core'
 import { WECHAT_SESSION_MAX_AGE_MINUTES, wechatSessionState } from '@course/notify'
 import { addMaterial, listMaterials, materialDir, readDecks, unassignedDir } from '@course/materials'
 import {
@@ -1185,8 +1185,8 @@ export function createAdminHandler({
   async function handleApi(req, res, pathname, url) {
     if (pathname === `${ADMIN_PREFIX}status`) {
       const snap = snapshot()
-      // 鉴权方式让界面知道：是否已设密码、主令牌是否可用（后者是找回路径）
-      snap.auth = { provider: 'law-tech', passwordSet: Boolean(readPasswordRecord(scratchRoot)), masterTokenSet: Boolean(activeToken) }
+      // 网页鉴权统一由 law-tech SSO 提供；主令牌只保留给服务器内部调用。
+      snap.auth = { provider: 'law-tech', masterTokenSet: Boolean(activeToken) }
       // 微信通道：主动推送需要用户最近和机器人有过互动，界面要把这件事说清楚
       snap.channel = channelHealth()
       snap.tags = readTags(scratchRoot)
@@ -1690,37 +1690,6 @@ export function createAdminHandler({
       return true
     }
 
-    /** 改密码：必须先用当前密码（或主令牌）通过鉴权，再给新密码。 */
-    if (pathname === `${ADMIN_PREFIX}password` && (req.method === 'PUT' || req.method === 'POST')) {
-      let payload = {}
-      try {
-        payload = safeJson(await readBody(req)) || {}
-      } catch (error) {
-        sendJson(res, 400, { ok: false, error: 'bad_body', message: error.message })
-        return true
-      }
-      const provided = String(req.headers['x-course-token'] || '')
-      const byMasterToken = Boolean(activeToken) && provided === activeToken
-      if (!byMasterToken && !verifyPassword(provided, readPasswordRecord(scratchRoot))) {
-        recordFailure(req)
-        sendJson(res, 401, { ok: false, error: 'unauthorized' })
-        return true
-      }
-      const action = String(payload.action || 'set')
-      if (action === 'clear') {
-        clearPassword(scratchRoot)
-        sendJson(res, 200, { ok: true, cleared: true, note: '已清除密码，现在只能用服务器上的主令牌登录' })
-        return true
-      }
-      const problem = validatePassword(payload.password)
-      if (problem) {
-        sendJson(res, 400, { ok: false, error: 'weak_password', message: problem })
-        return true
-      }
-      const file = writePassword(scratchRoot, payload.password)
-      sendJson(res, 200, { ok: true, changed: true, path: file })
-      return true
-    }
 
     if (pathname === `${ADMIN_PREFIX}config`) {
       if (req.method === 'GET') {
