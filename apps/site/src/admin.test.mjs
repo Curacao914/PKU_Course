@@ -942,11 +942,12 @@ test('every tab and in-page jump target exists', async () => {
 })
 
 test('clicking a button gives immediate visible feedback', async () => {
-  // 维护动作动辄跑几分钟：没有"立刻变化"的话，用户会以为按钮没反应
-  assert.match(ADMIN_HTML, /id="toast"/, '要有右下角提示条')
+  // 长动作提交后立刻释放按钮；真正的运行/排队状态统一由任务中心展示。
+  assert.match(ADMIN_HTML, /id="toast"/, '要有轻量提示条')
   assert.match(ADMIN_HTML, /function busyButton/, '按钮要能置灰改字')
-  assert.match(ADMIN_HTML, /setRunState\('正在运行/, '顶部状态灯要立刻切到运行中')
-  assert.match(ADMIN_HTML, /setInterval\(/, '要跟着定时任务自动刷新')
+  assert.match(ADMIN_HTML, /busyButton\(btn, '提交中…'\)/, '提交阶段要立刻给按钮反馈')
+  assert.match(ADMIN_HTML, /status\.queue \|\| \[\]/, '任务中心要读取服务端排队状态')
+  assert.match(ADMIN_HTML, /setInterval\(/, '任务中心要自动刷新')
   // 全站只用事件委托，不用内联 handler（内联写法最容易与引号打架）
   assert.ok(!/\son(click|change|input)=/.test(ADMIN_HTML), '不要内联事件属性')
 })
