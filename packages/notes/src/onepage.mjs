@@ -154,10 +154,11 @@ export function validateOnepage(value = {}) {
  * 生成一页纸；超字数就带着"上一版多少字"再要一次。
  *
  * 实测模型第一次经常会写到 2800—3000 字（大概是"舍不得删"），退回一次基本就压下来了。
- * 只重试一次：第二次还超，说明这节内容确实塞不进一张纸，那就该让人来决定删什么。
+ * 最多压缩两次：第二次仍超时，再给一次更严格的“只保留骨架”指令。
+ * 正常首轮/第二轮合格就立即返回，不会平白增加模型调用。
  */
 export async function generateOnepage({
-  markdown, courseName = '', lessonTitle = '', courseSpec = {}, callModel, modelConfig, retries = 1,
+  markdown, courseName = '', lessonTitle = '', courseSpec = {}, callModel, modelConfig, retries = 2,
   // 可用小节清单（id + 标题）：来源映射只许从这里挑，模型不许自己编 id
   sections = []
 } = {}) {
@@ -181,7 +182,9 @@ export async function generateOnepage({
     } catch (error) {
       lastError = error
       const chars = String(result.parsed?.markdown || '').replace(/\s/g, '').length
-      budgetNote = `写了 ${chars} 字，超过一张 A4 的上限 ${ONEPAGE_MAX_CHARS} 字。请删到 ${ONEPAGE_TARGET_CHARS} 字以内：只留体系与最核心的知识点，例子细节、重复解释、次要案例全部删掉。`
+      budgetNote = attempt >= 1
+        ? `上一版仍有 ${chars} 字。现在必须压到 1800—2200 字：只保留章节骨架、定义/规则、最关键的辨析和结论；删除绝大多数例子、背景、重复说明与次要案例。宁可少覆盖，也绝不能超过 ${ONEPAGE_MAX_CHARS} 字。`
+        : `写了 ${chars} 字，超过一张 A4 的上限 ${ONEPAGE_MAX_CHARS} 字。请删到 ${ONEPAGE_TARGET_CHARS} 字以内：只留体系与最核心的知识点，例子细节、重复解释、次要案例全部删掉。`
     }
   }
   throw lastError

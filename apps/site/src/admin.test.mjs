@@ -663,28 +663,40 @@ test('run rejects unsupported actions and unknown routes', async () => {
   assert.equal(unknown.res.state.status, 404)
 })
 
-test('a second run is refused while one is in flight', async () => {
-  let release
-  const gate = new Promise(resolve => { release = resolve })
+test('a second run queues behind the active job and starts automatically', async () => {
+  let releases = []
   const { handler } = fixture({
-    runCommand: async () => { await gate; return { code: 0, stdout: '{}', stderr: '' } }
+    runCommand: () => new Promise(resolve => { releases.push(() => resolve({ code: 0, stdout: '{}', stderr: '' })) })
   })
 
-  const first = await call(handler, { method: 'POST', url: '/api/admin/run', body: JSON.stringify({ action: 'discover' }) })
+  const first = await call(handler, { method: 'POST', url: '/api/admin/run', body: JSON.stringify({ action: 'discover', course: 'A', lesson: '第一讲' }) })
   assert.equal(first.res.state.status, 202)
+  assert.equal(first.body.status, 'running')
 
-  // 运行期间状态里应能看到"正在运行"，用户才知道按钮为什么没反应
+  const second = await call(handler, { method: 'POST', url: '/api/admin/run', body: JSON.stringify({ action: 'doctor' }) })
+  assert.equal(second.res.state.status, 202)
+  assert.equal(second.body.status, 'queued')
+  assert.equal(second.body.queuePosition, 1)
+
   const during = await call(handler, { url: '/api/admin/status' })
   assert.equal(during.body.running.action, 'discover')
+  assert.equal(during.body.running.meta.course, 'A')
+  assert.equal(during.body.queue.length, 1)
+  assert.equal(during.body.queue[0].id, second.body.jobId)
+  assert.equal(during.body.queue[0].queuePosition, 1)
 
-  const second = await call(handler, { method: 'POST', url: '/api/admin/run', body: JSON.stringify({ action: 'discover' }) })
-  assert.equal(second.res.state.status, 409)
-  assert.equal(second.body.error, 'already_running')
-  assert.equal(second.body.jobId, first.body.jobId, '409 要带上正在跑的 jobId，前端才能接上继续等')
+  releases.shift()()
+  const doneFirst = await waitJob(handler, first.body.jobId)
+  assert.equal(doneFirst.status, 'done')
 
-  release()
-  const done = await waitJob(handler, first.body.jobId)
-  assert.equal(done.status, 'done')
+  for (let i = 0; i < 20 && releases.length === 0; i += 1) await new Promise(resolve => setTimeout(resolve, 5))
+  assert.equal(releases.length, 1, '第一项完成后第二项应自动开始')
+  const runningSecond = await call(handler, { url: '/api/admin/job?id=' + encodeURIComponent(second.body.jobId) })
+  assert.equal(runningSecond.body.status, 'running')
+
+  releases.shift()()
+  const doneSecond = await waitJob(handler, second.body.jobId)
+  assert.equal(doneSecond.status, 'done')
 })
 
 test('a failing run is reported as not ok rather than swallowed', async () => {

@@ -79,17 +79,23 @@ h2{font-size:19px;letter-spacing:-.015em;margin:0 0 10px}
 .todo .t span{color:var(--ink-3);font-size:13.5px}
 .empty-ok{display:flex;align-items:center;gap:10px;color:var(--ok);font-size:15px}
 
-.act{font:inherit;font-size:14px;padding:7px 14px;border-radius:980px;border:1px solid var(--line-2);
+.act{font:inherit;font-size:14px;padding:7px 12px;border-radius:9px;border:1px solid var(--line-2);
   background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;gap:6px;
-  text-decoration:none;line-height:1.45}
-.act:hover{border-color:var(--ink-3);color:var(--ink)}
-.act[disabled],.act[aria-disabled=true]{opacity:.5;cursor:default}
+  text-decoration:none;line-height:1.45;transition:background .14s ease,border-color .14s ease,color .14s ease}
+.act:hover{background:var(--sunken);border-color:var(--ink-3);color:var(--ink)}
+.act[disabled],.act[aria-disabled=true]{opacity:.45;cursor:default}
 .act.primary{background:var(--accent);border-color:var(--accent);color:#fff}
 .act.primary:hover{background:var(--accent-ink);border-color:var(--accent-ink);color:#fff}
 .act.quiet{border-color:transparent;background:var(--sunken);color:var(--ink-2)}
-.act.icon{padding:6px;border-radius:8px;border-color:transparent;background:transparent;color:var(--ink-2)}
-.act.icon:hover{background:var(--sunken);color:var(--ink)}
-.act.danger{border-color:#eccac7;color:var(--danger)}
+.act.danger{border-color:#eccac7;color:var(--danger);background:transparent}
+.act.danger:hover{background:var(--danger-soft);border-color:#e4aaa4;color:var(--danger)}
+.icon-btn{font:inherit;width:30px;height:30px;padding:0;border:0;border-radius:8px;background:transparent;color:var(--ink-3);
+  cursor:pointer;display:inline-flex;align-items:center;justify-content:center;transition:background .14s ease,color .14s ease}
+.icon-btn:hover{background:var(--sunken);color:var(--ink)}
+.icon-btn.danger{color:var(--danger)}
+.icon-btn.danger:hover{background:var(--danger-soft);color:var(--danger)}
+.icon-btn:focus-visible{outline:2px solid var(--accent-soft);outline-offset:1px}
+.icon-btn svg.i{width:17px;height:17px}
 .metric-button{border:0;background:transparent;color:inherit;text-align:left;padding:4px 6px;border-radius:10px;cursor:pointer;min-width:0}
 .metric-button:hover{background:var(--sunken)}
 .metric-button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
@@ -102,6 +108,19 @@ h2{font-size:19px;letter-spacing:-.015em;margin:0 0 10px}
 .run-line .meta{font-size:12px;color:var(--ink-3);white-space:nowrap}
 .run-line .bar{grid-column:2 / -1;height:5px}
 .run-empty{padding:10px 4px;color:var(--ink-3);font-size:13px}
+.run-section-title{padding:0 4px 6px;color:var(--ink-3);font-size:12px;font-weight:600;letter-spacing:.04em}
+.task-row{width:100%;display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:9px;align-items:center;padding:8px 4px;border:0;border-top:1px solid var(--line);background:transparent;color:inherit;text-align:left}
+.task-row:first-of-type{border-top:0}
+.task-button{font:inherit;cursor:pointer;border-radius:9px}
+.task-button:hover{background:var(--sunken)}
+.task-copy{min-width:0;display:flex;flex-direction:column;gap:2px}
+.task-copy strong{font-size:13.5px;font-weight:550;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.task-copy span{font-size:12px;color:var(--ink-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.task-meta{font-size:12px;color:var(--ink-3);white-space:nowrap}
+.task-progress{grid-column:2/-1;height:4px;border-radius:999px;background:var(--sunken);overflow:hidden}
+.task-progress>i{display:block;height:100%;background:var(--accent);border-radius:999px}
+.task-progress.indeterminate>i{width:38%;animation:taskslide 1.4s ease-in-out infinite}
+@keyframes taskslide{0%{transform:translateX(-110%)}50%{transform:translateX(130%)}100%{transform:translateX(310%)}}
 .raw-output{margin-top:8px}
 .raw-output>summary{font-size:12.5px;color:var(--ink-3);cursor:pointer;padding:6px 4px}
 .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
@@ -219,6 +238,18 @@ pre{background:var(--sunken);border-radius:var(--r-md);padding:14px;overflow:aut
 .split .col{border-right:1px solid var(--line);min-width:0;max-height:74vh;overflow:auto;padding:8px 0}
 .split .col:last-child{border-right:0;padding:0}
 .split .pane{padding:18px 20px}
+.pane-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+.pane-actions{margin-top:12px}
+.maintenance-grid{display:grid;gap:10px;margin-top:12px}
+.maintenance-group{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;padding:14px 0;border-top:1px solid var(--line)}
+.maintenance-group:first-child{border-top:0;padding-top:2px}
+.maintenance-group h3{margin:0 0 4px;font-size:14px}
+.maintenance-group p{margin:0;color:var(--ink-3);font-size:12.5px;line-height:1.55;max-width:520px}
+.maintenance-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+.storage-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px;padding-top:14px;border-top:1px solid var(--line)}
+.storage-note{margin:8px 0 0;line-height:1.6}
+.storage-disk{margin-top:12px}
+.storage-bar{grid-column:1/-1}
 button.item{width:100%;border:0;background:none;font:inherit;text-align:left;color:inherit}
 button.item:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
 
@@ -237,6 +268,8 @@ button.item:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
   .split{grid-template-columns:1fr}
   .split .col{max-height:none;border-right:0;border-bottom:1px solid var(--line)}
   .content-grid{grid-template-columns:1fr}
+  .maintenance-group{flex-direction:column}
+  .maintenance-actions{justify-content:flex-start}
 }
 @media (max-width:560px){
   .wrap{padding-left:16px;padding-right:16px}
@@ -292,7 +325,7 @@ button.item:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
       <div class="sheet">
         <div class="row" style="margin-bottom:6px">
           <button class="act" data-act="refresh">刷新</button>
-          <a class="act" href="/" target="_blank" rel="noopener" style="padding:7px 14px;border:1px solid var(--line-2);border-radius:980px">看站点</a>
+          <a class="act" href="/" target="_blank" rel="noopener">看站点</a>
         </div>
       </div>
     </details>
@@ -303,7 +336,7 @@ button.item:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
   <nav class="seg" role="tablist">
     <button role="tab" data-tab="overview" aria-selected="true">概览</button>
     <button role="tab" data-tab="courses" aria-selected="false">课程</button>
-    <button role="tab" data-tab="content" aria-selected="false">内容</button>
+    <button role="tab" data-tab="content" aria-selected="false">专题</button>
     <button role="tab" data-tab="settings" aria-selected="false">设置</button>
   </nav>
   <section id="tab-overview"></section>
@@ -350,13 +383,13 @@ try {
 // 动作名字要写清"会不会花钱、会不会推送到微信、可不可逆"：
 // 这些都靠名字与副标题说，而不是等用户点下去再看结果。
 var LABELS = {
-  discover: '扫描课程', cycle: '继续处理', 'cycle-all': '处理队列',
-  notify: '发送通知', doctor: '系统检查', backup: '备份',
-  prune: '清理预览', 'prune-apply': '清理原件',
+  discover: '扫描录播', cycle: '继续处理', 'cycle-all': '继续处理待办',
+  notify: '发送待发通知', doctor: '运行检查', backup: '创建备份',
+  prune: '检查可清理内容', 'prune-apply': '清理可清理原件',
   retry: '重试', 'refresh-note': '更新笔记',
   revise: '重写笔记', 'notify-retry': '重发通知',
-  'rebuild-content': '重建站点', 'rollback-content': '回滚版本',
-  'rebuild-integration': '更新章节', 'rebuild-integrations': '更新全部章节',
+  'rebuild-content': '重建公开站点', 'rollback-content': '回滚上一版本',
+  'rebuild-integration': '更新专题', 'rebuild-integrations': '更新全部专题',
   'ocr-material': '补识别'
 }
 var MODULE_TEXT = { approved: '已通过', draft: '草稿', reviewing: '审查中', revising: '重写中', pending: '待写', failed: '失败' }
@@ -402,9 +435,10 @@ function bytes (value) {
 }
 function icon (name) {
   var paths = {
-    sort: '<path d="M4 7h10M4 12h7M4 17h4"/>',
+    sortAsc: '<path d="M5 7h8M5 12h6M5 17h4"/><path d="M18 18V6M15 9l3-3 3 3"/>',
+    sortDesc: '<path d="M5 7h8M5 12h6M5 17h4"/><path d="M18 6v12M15 15l3 3 3-3"/>',
     chevron: '<path d="M9 6l6 6-6 6"/>',
-    rail: '<path d="M3 5h18v14H3z"/><path d="M9 5v14"/>',
+    rail: '<rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M9.5 5v14"/>',
     up: '<path d="M12 19V5M6 11l6-6 6 6"/>',
     file: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>',
     // 图片版课件用得上：一张"图里带字"的图标
@@ -506,12 +540,33 @@ function refreshBalance () {
     .then(function (b) { state.balance = b; renderOverview() })
     .catch(function (error) { state.balance = { ok: false, error: String(error) }; renderOverview() })
 }
+function elapsedText (startedAt, finishedAt) {
+  if (!startedAt) return ''
+  var start = new Date(startedAt).getTime()
+  var end = finishedAt ? new Date(finishedAt).getTime() : Date.now()
+  if (!isFinite(start) || !isFinite(end) || end < start) return ''
+  var seconds = Math.max(0, Math.round((end - start) / 1000))
+  if (seconds < 60) return seconds + ' 秒'
+  var minutes = Math.floor(seconds / 60)
+  var rest = seconds % 60
+  return minutes + ' 分' + (rest ? ' ' + rest + ' 秒' : '')
+}
+function jobSubject (job) {
+  var meta = (job && job.meta) || {}
+  return [meta.course, meta.lesson, meta.module].filter(Boolean).join(' · ')
+}
 function renderRunState () {
-  var running = state.status && state.status.running
-  var label = running ? (LABELS[running.action] || '后台任务') : ''
-  setRunState(running ? ('处理中 · ' + label) : '空闲', running ? 'warn' : 'ok')
+  var status = state.status || {}
+  var running = status.running
+  var queued = status.queue || []
+  var ocrJobs = status.ocrJobs || []
+  var activeCount = (running ? 1 : 0) + ocrJobs.length
+  var bits = []
+  if (activeCount) bits.push(activeCount + ' 个进行中')
+  if (queued.length) bits.push(queued.length + ' 个排队')
+  setRunState(bits.length ? bits.join(' · ') : '空闲', bits.length ? 'warn' : 'ok')
   var hint = $('outHint')
-  if (hint) hint.textContent = running ? label : '后台任务与最近操作'
+  if (hint) hint.textContent = running ? (jobSubject(running) || (LABELS[running.action] || '后台任务')) : (bits.length ? bits.join(' · ') : '后台任务与最近操作')
   renderRecentJobs()
 }
 function renderRecentJobs () {
@@ -521,32 +576,47 @@ function renderRecentJobs () {
 
   var ocrJobs = (state.status && state.status.ocrJobs) || []
   ocrBox.innerHTML = ocrJobs.length
-    ? '<div class="run-section"><div class="tiny muted" style="padding:0 4px 4px">图片识别</div>' +
+    ? '<div class="run-section"><div class="run-section-title">图片识别</div>' +
       ocrJobs.map(function (job) {
         var percent = Math.max(0, Math.min(100, Number(job.percent || 0)))
         var label = [job.courseName, job.lesson].filter(Boolean).join(' · ')
-        var current = job.current ? ' · ' + job.current : ''
-        return '<div class="run-line"><span class="status warn">识别中</span>' +
-          '<span class="name">' + esc(label + current) + '</span>' +
-          '<span class="meta">' + Number(job.done || 0) + '/' + Number(job.total || 0) + '</span>' +
-          '<div class="bar"><i style="width:' + percent + '%"></i></div></div>'
+        var current = job.current ? '正在处理 ' + job.current : ('已识别 ' + Number(job.done || 0) + '/' + Number(job.total || 0) + ' 张图')
+        return '<div class="task-row">' +
+          '<span class="pill warn"><span class="dot"></span>识别中</span>' +
+          '<div class="task-copy"><strong>' + esc(label || '图片识别') + '</strong><span>' + esc(current) + '</span></div>' +
+          '<span class="task-meta">' + Number(job.done || 0) + '/' + Number(job.total || 0) + '</span>' +
+          '<div class="task-progress"><i style="width:' + percent + '%"></i></div></div>'
       }).join('') + '</div>'
     : ''
 
-  var jobs = (state.status && state.status.recentJobs) || []
+  var seen = {}
+  var jobs = []
+  function addJob (job) {
+    if (!job || !job.id || seen[job.id]) return
+    seen[job.id] = true
+    jobs.push(job)
+  }
+  addJob(state.status && state.status.running)
+  ;((state.status && state.status.queue) || []).forEach(addJob)
+  ;((state.status && state.status.recentJobs) || []).forEach(addJob)
+
   jobsBox.innerHTML = jobs.length
-    ? '<div class="run-section"><div class="tiny muted" style="padding:0 4px 4px">最近操作</div>' +
-      jobs.map(function (job) {
-        var cls = job.status === 'done' ? 'status ok' : (job.status === 'failed' ? 'status bad' : 'status warn')
+    ? '<div class="run-section"><div class="run-section-title">任务</div>' +
+      jobs.slice(0, 12).map(function (job) {
+        var cls = job.status === 'done' ? 'ok' : job.status === 'failed' ? 'bad' : 'warn'
         var statusText = job.status === 'done' ? '完成' : job.status === 'failed' ? '失败' : job.status === 'running' ? '进行中' : '排队中'
-        var when = job.finishedAt || job.startedAt
-        var clock = ''
-        try { clock = new Date(when).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) } catch (error) {}
-        return '<div class="run-line"><span class="' + cls + '">' + statusText + '</span>' +
-          '<span class="name">' + esc(LABELS[job.action] || job.action) + '</span>' +
-          '<span class="meta">' + esc(clock) + '</span></div>'
+        var subject = jobSubject(job)
+        var detail = subject || (job.status === 'queued' && job.queuePosition ? '队列第 ' + job.queuePosition + ' 项' : '')
+        var time = job.status === 'queued' ? (job.queuePosition ? '第 ' + job.queuePosition + ' 项' : '') : elapsedText(job.startedAt, job.finishedAt)
+        return '<button type="button" class="task-row task-button" data-act="job-output" data-id="' + esc(job.id) + '">' +
+          '<span class="pill ' + cls + '"><span class="dot"></span>' + statusText + '</span>' +
+          '<div class="task-copy"><strong>' + esc(LABELS[job.action] || job.action) + '</strong>' +
+          (detail ? '<span>' + esc(detail) + '</span>' : '') + '</div>' +
+          '<span class="task-meta">' + esc(time) + '</span>' +
+          (job.status === 'running' ? '<div class="task-progress indeterminate"><i></i></div>' : '') +
+          '</button>'
       }).join('') + '</div>'
-    : (ocrJobs.length ? '' : '<div class="run-empty">暂无后台任务</div>')
+    : (ocrJobs.length ? '' : '<div class="run-empty">当前没有后台任务</div>')
 }
 /** 重绘前把 DOM 里的折叠状态抄回来：程序性改 open 不一定及时触发 toggle 事件。 */
 function captureFolds () {
@@ -569,13 +639,21 @@ function card (inner, style) { return '<div class="card"' + (style ? ' style="' 
 /* ── 概览 ── */
 function stageGroup (task) {
   var stage = String(task && task.stage || '')
-  if (stage === 'published' || stage === 'completed') return 'published'
+  if (stage === 'published' || stage === 'completed') return task.quality && task.quality.complete ? 'published' : 'attention'
   if (['downloading','transcribing','building_textpack','writing','publishing'].includes(stage)) return 'active'
   if (['discovered','queued','downloaded','transcript_ready','notes_ready'].includes(stage)) return 'queued'
   return 'attention'
 }
+function taskStatus (task) {
+  var stage = String(task && task.stage || '')
+  if ((stage === 'published' || stage === 'completed') && (!task.quality || !task.quality.complete)) {
+    var missing = task.quality && task.quality.missing ? task.quality.missing : ['完整性状态']
+    return { text: '待补齐', cls: 'warn', note: '缺：' + missing.join('、') }
+  }
+  return { text: STAGE_TEXT[stage] || stage, cls: STAGE_CLASS[stage] || '', note: '' }
+}
 function stageLabel (value) {
-  return value === 'published' ? '已发布' : value === 'active' ? '进行中' : value === 'queued' ? '排队中' : ''
+  return value === 'published' ? '已发布' : value === 'active' ? '进行中' : value === 'queued' ? '排队中' : value === 'attention' ? '待处理' : ''
 }
 function matchesStageFilter (task) {
   return !state.sel.stage || stageGroup(task) === state.sel.stage
@@ -596,6 +674,13 @@ function renderOverview () {
   })
   ;(t.missingMaterials || []).forEach(function (item) {
     todos.push({ title: item.courseName + ' · ' + item.title, note: '缺少课件', label: '上传', tab: 'courses', course: item.courseName, lesson: item.replayKey })
+  })
+  all.filter(function (task) {
+    var stage = String(task.stage || '')
+    return (stage === 'published' || stage === 'completed') && (!task.quality || !task.quality.complete)
+  }).forEach(function (task) {
+    var missing = task.quality && task.quality.missing ? task.quality.missing.join('、') : '完整性状态'
+    todos.push({ title: task.courseName + ' · ' + task.title, note: '待补齐：' + missing, label: '查看', tab: 'courses', course: task.courseName, lesson: task.replayKey })
   })
   if (s.channel && s.channel.ok === false) todos.push({ title: '通知通道不可用', note: '', label: '查看', tab: 'overview' })
   if (t.failedDeliveries) todos.push({ title: t.failedDeliveries + ' 条通知发送失败', note: '', label: '查看', tab: 'settings' })
@@ -684,7 +769,7 @@ function courseList () {
       lessons: list,
       year: years[years.length - 1] || '',
       tags: (tagsOf().courses || {})[course] || [],
-      published: list.filter(function (item) { return item.stage === 'published' }).length,
+      published: list.filter(function (item) { return stageGroup(item) === 'published' }).length,
       stuck: list.some(function (item) { return item.stage === 'needs_attention' || item.stage === 'failed' })
     }
   }).sort(function (a, b) { return String(a.course).localeCompare(String(b.course), 'zh') })
@@ -740,27 +825,28 @@ function renderCourses () {
       '<span class="meta">' + (state.sel.stage ? item.lessons.filter(matchesStageFilter).length : (item.published + '/' + item.lessons.length)) + '</span></div>'
   }).join('')
   var courses = '<div class="col" id="courses">' +
-    '<div class="colhead"><button class="icon" data-act="rail-toggle" title="筛选">' + icon('rail') + '</button>' +
+    '<div class="colhead"><button class="icon-btn" data-act="rail-toggle" title="显示或隐藏筛选" aria-label="显示或隐藏筛选">' + icon('rail') + '</button>' +
     '<span>课程 · ' + shown.length + '</span></div>' +
     (state.sel.stage ? '<div class="view-filter"><span class="pill">' + esc(stageLabel(state.sel.stage)) + '</span>' +
-      '<button class="icon act" data-act="clear-stage" title="清除状态筛选" aria-label="清除状态筛选">' + icon('close') + '</button></div>' : '') +
+      '<button class="icon-btn" data-act="clear-stage" title="清除状态筛选" aria-label="清除状态筛选">' + icon('close') + '</button></div>' : '') +
     (courseItems || '<div class="item muted">没有匹配的课程</div>') + '</div>'
 
   // 中二：课次
   var lessonItems = ''
   if (state.sel.course) {
     lessonItems = '<div class="item" data-act="pick-lesson" data-value="__multi__"' +
-      (state.sel.lesson === '__multi__' ? ' aria-selected="true"' : '') + '><span class="name">多节课程</span>' +
-      '<span class="meta">整合</span></div>'
+      (state.sel.lesson === '__multi__' ? ' aria-selected="true"' : '') + '><span class="name">课程管理</span></div>'
     lessonItems += lessonsOf(state.sel.course).map(function (task) {
+      var view = taskStatus(task)
       return '<div class="item" data-act="pick-lesson" data-value="' + esc(task.replayKey) + '"' +
         (state.sel.lesson === task.replayKey ? ' aria-selected="true"' : '') + '>' +
-        '<span class="dot ' + (STAGE_CLASS[task.stage] || '') + '"></span><span class="name">' + esc(task.title) + '</span></div>'
+        '<span class="dot ' + view.cls + '"></span><span class="name">' + esc(task.title) + '</span>' +
+        (view.text === '待补齐' ? '<span class="meta">待补齐</span>' : '') + '</div>'
     }).join('')
   }
   var lessons = '<div class="col" id="lessons">' +
     '<div class="colhead"><span>课次</span><span class="spacer"></span>' +
-    (state.sel.course ? '<button class="icon" data-act="sort-toggle" title="' + (state.sel.sort === 'asc' ? '正序' : '倒序') + '">' + icon('sort') + '</button>' : '') +
+    (state.sel.course ? '<button class="icon-btn" data-act="sort-toggle" title="' + (state.sel.sort === 'asc' ? '较早课次在前' : '较新课次在前') + '" aria-label="切换课次排序">' + icon(state.sel.sort === 'asc' ? 'sortAsc' : 'sortDesc') + '</button>' : '') +
     '</div>' + lessonItems + '</div>'
 
   // 右：详情
@@ -779,9 +865,13 @@ function detailHtml () {
   var head = '<h2>' + esc(task.title) + '</h2>' +
     '<p class="sub">' + esc(task.courseName) + ' · 转写 ' + money(cost.asrCny) + ' · 笔记 ' + money(cost.notesCny) + '</p>'
 
+  var view = taskStatus(task)
+  var quality = task.quality || null
   var progress = '<div class="block"><h3>状态</h3><div class="row">' +
-    '<span class="pill ' + (STAGE_CLASS[task.stage] || '') + '"><span class="dot"></span>' + esc(STAGE_TEXT[task.stage] || task.stage) + '</span>' +
+    '<span class="pill ' + view.cls + '"><span class="dot"></span>' + esc(view.text) + '</span>' +
+    (quality && quality.complete ? '<span class="tiny muted">正文、简报、主题关键词、一页纸与来源映射均已更新</span>' : '') +
     '</div>' +
+    (view.note ? '<div class="tiny muted" style="margin-top:7px">' + esc(view.note) + '</div>' : '') +
     (task.lastError ? '<div class="errbox"><pre>' + esc(String(task.lastError)) + '</pre></div>' : '') +
     '</div>'
 
@@ -849,7 +939,7 @@ function deckHtml (task) {
         (material.imageCount ? ' · 图 ' + material.imageCount : '') +
         (material.ocrPending ? ' · 待识别 ' + material.ocrPending : '') + '</span>' +
       '<span class="chev">' + icon('chevron') + '</span>' +
-      '<button class="act icon danger" data-act="delete-material" data-key="' + esc(task.replayKey) + '"' +
+      '<button class="icon-btn danger" data-act="delete-material" data-key="' + esc(task.replayKey) + '"' +
       ' data-name="' + esc(material.name) + '" data-scope="' + esc(material.scope || 'lesson') + '"' +
       ' title="删除这份课件" aria-label="删除 ' + esc(material.name) + '">' + icon('trash') + '</button>' +
       '</div>'
@@ -900,7 +990,7 @@ function previewHtml (task) {
   return '<div class="pages" style="margin-top:8px">' +
     '<div class="row" style="justify-content:space-between"><span class="tiny muted">' + esc(preview.name) +
     ' · 共 ' + Number(preview.slideCount || 0) + ' 页，当前显示到第 ' + last + ' 页</span>' +
-    '<button class="icon" data-act="close-material" title="收起预览" aria-label="收起预览">' + icon('close') + '</button></div>' +
+    '<button class="icon-btn" data-act="close-material" title="收起预览" aria-label="收起预览">' + icon('close') + '</button></div>' +
     (pages || '<div class="muted small">没有文字</div>') +
     (preview.hasMore
       ? '<div class="row" style="justify-content:center;margin-top:8px"><button class="act quiet" data-act="load-more">继续加载</button></div>'
@@ -921,7 +1011,7 @@ function integrationHtml () {
   var published = list.filter(function (item) { return stageGroup(item) === 'published' }).length
   return '<h2>' + esc(course) + '</h2><p class="sub">' + list.length + ' 节 · 已发布 ' + published + '</p>' +
     '<div class="block"><h3>课程标签</h3>' + courseTagHtml(course) + '</div>' +
-    '<div class="block"><button class="act" data-go="content">管理长期章节</button></div>'
+    '<div class="block"><button class="act" data-go="content">管理专题整合</button></div>'
 }
 
 function courseTagHtml (course) {
@@ -933,7 +1023,7 @@ function courseTagHtml (course) {
     '<button class="act" data-act="add-course-tag" data-course="' + esc(course) + '">添加</button></div>'
 }
 
-/* ── 内容：站点版本 + 长期章节 ── */
+/* ── 专题整合：跨课次长期维护的主题笔记 ── */
 function contentCourseMap () {
   var map = {}
   tasks().forEach(function (task) {
@@ -971,27 +1061,9 @@ function renderContent () {
   if (!box) return
   var data = state.content || {}
   if (!data.ok) {
-    box.innerHTML = card('<h2>内容</h2><p class="muted">暂时读不到内容状态：' + esc(data.error || '尚未加载') + '</p>')
+    box.innerHTML = card('<h2>专题整合</h2><p class="muted">暂时读不到专题状态：' + esc(data.error || '尚未加载') + '</p>')
     return
   }
-
-  var release = data.release || { mode: 'missing', releases: [] }
-  var atomic = release.mode === 'atomic'
-  var releaseRows = (release.releases || []).map(function (item) {
-    return '<div class="release-row">' +
-      '<span class="pill ' + (item.current ? 'ok' : '') + '">' + (item.current ? '当前' : (item.legacy ? '初始版' : '历史')) + '</span>' +
-      '<span class="release-name">' + esc(item.name) + '</span>' +
-      '<span class="small muted release-meta">' + (item.notes == null ? '' : item.notes + ' 篇 · ') + esc(releaseTime(item.modifiedAt)) + '</span></div>'
-  }).join('')
-  var releaseCard = card(
-    '<h2>站点版本</h2>' +
-    '<p class="sub">' + (atomic ? '当前公开内容 · ' + (release.releases && release.releases[0] ? release.releases[0].notes + ' 篇' : '') : '需要完成站点迁移') + '</p>' +
-    '<div class="row" style="margin:12px 0">' +
-      '<button class="act primary" data-act="rebuild-content">重建站点</button>' +
-      '<button class="act danger" data-act="rollback-content"' + (release.canRollback ? '' : ' disabled') + '>回滚版本</button>' +
-    '</div>' +
-    (releaseRows || '<p class="small muted">暂无历史版本</p>')
-  )
 
   var items = ((data.integrations || {}).items || [])
   var integrationRows = items.map(function (item) {
@@ -1027,28 +1099,28 @@ function renderContent () {
       (checked ? ' checked' : '') + '><span>' + esc(lesson) + '</span></label>'
   }).join('')
 
-  var form = '<div class="block"><div class="row"><h3 style="margin:0">' + (draft.id ? '编辑章节' : '新建章节') + '</h3>' +
+  var form = '<div class="block"><div class="row"><h3 style="margin:0">' + (draft.id ? '编辑专题' : '新建专题') + '</h3>' +
     '<span class="spacer"></span>' + (draft.id ? '<span class="tiny muted">' + esc(draft.id) + '</span>' : '') + '</div>' +
     '<div class="field"><label>课程</label><select data-integration-course>' + courseOptions + '</select></div>' +
-    '<div class="field"><label>章节主题</label><input data-integration-text="topic" value="' + esc(draft.topic || '') + '" placeholder="例如：罪刑均衡与以刑制罪"></div>' +
+    '<div class="field"><label>专题名称</label><input data-integration-text="topic" value="' + esc(draft.topic || '') + '" placeholder="例如：罪刑均衡与以刑制罪"></div>' +
     '<div class="field"><label>包含课次</label><div class="integration-lessons">' +
       (lessonChecks || '<span class="small muted">这门课还没有课次</span>') + '</div></div>' +
     '<label class="integration-enabled"><input type="checkbox" data-integration-enabled' +
-      (draft.enabled !== false ? ' checked' : '') + '><span>自动更新</span></label>' +
-    '<div class="row"><button class="act primary" data-act="save-integration">保存章节</button>' +
+      (draft.enabled !== false ? ' checked' : '') + '><span>随所选课次更新</span></label>' +
+    '<div class="row"><button class="act primary" data-act="save-integration">保存专题</button>' +
       '<button class="act" data-act="new-integration">清空</button></div>' +
     '</div>'
 
   var integrationsCard = card(
-    '<div class="row"><h2 style="margin:0">长期章节</h2><span class="spacer"></span>' +
+    '<div class="row"><div><h2 style="margin:0">专题整合</h2>' +
+      '<p class="sub" style="margin-top:5px">把同一课程的多节课组织成持续更新的专题笔记。</p></div><span class="spacer"></span>' +
       '<button class="act" data-act="rebuild-integrations"' + (items.length ? '' : ' disabled') + '>更新全部</button></div>' +
     '<div style="display:grid;gap:10px;margin:12px 0">' +
-      (integrationRows || '<p class="small muted">暂无章节</p>') +
+      (integrationRows || '<p class="small muted">还没有专题</p>') +
     '</div>' + form
   )
 
-  box.innerHTML = '<div class="content-grid">' +
-    '<div>' + releaseCard + '</div><div>' + integrationsCard + '</div></div>'
+  box.innerHTML = integrationsCard
 }
 
 async function saveIntegration (btn) {
@@ -1116,7 +1188,8 @@ var SETTINGS_PANES = [
   { key: 'maintenance', label: '维护' },
   { key: 'deliveries', label: '通知记录' },
   { key: 'storage', label: '存储占用' },
-  { key: 'params', label: '运行参数' }
+  { key: 'params', label: '运行参数' },
+  { key: 'advanced', label: '高级维护' }
 ]
 
 function settingsPane () {
@@ -1133,18 +1206,39 @@ function paneMeta (key) {
 
 function maintenancePane () {
   return '<h2>维护</h2>' +
-    '<div class="row" style="margin-bottom:14px"><button class="act primary" data-act="cycle-all">处理队列</button>' +
-    '<button class="act" data-act="discover">刷新课程</button></div>' +
-    '<div class="row"><button class="act" data-act="notify">发送通知</button>' +
-    '<button class="act" data-act="doctor">系统检查</button><button class="act" data-act="backup">备份</button>' +
-    '<button class="act" data-act="prune">查看可清理项</button><button class="act danger" data-act="prune-apply">清理原件</button></div>'
+    '<div class="maintenance-grid">' +
+      '<section class="maintenance-group"><div><h3>课程同步</h3><p>从教学网扫描新的录播课次；已发现但未完成的课次按顺序进入处理队列。</p></div>' +
+        '<div class="maintenance-actions"><button class="act primary" data-act="discover">扫描录播</button>' +
+        '<button class="act" data-act="cycle-all">继续处理待办</button></div></section>' +
+      '<section class="maintenance-group"><div><h3>系统健康</h3><p>检查服务、凭据、磁盘空间和任务链状态，不会修改课程内容。</p></div>' +
+        '<div class="maintenance-actions"><button class="act" data-act="doctor">运行检查</button></div></section>' +
+    '</div>'
 }
 
 function deliveriesPane (deliveries, rows, failed) {
-  return '<h2>通知记录</h2><p class="small muted">最近 ' + Math.min(10, deliveries.length) + ' 条</p>' +
+  return '<div class="pane-head"><div><h2>通知记录</h2><p class="small muted">最近 ' + Math.min(10, deliveries.length) + ' 条</p></div>' +
+    '<button class="act" data-act="notify">发送待发通知</button></div>' +
     (rows ? '<ul class="notify-list">' + rows + '</ul>' : '<p class="muted small">暂无通知</p>') +
-    (failed ? '<div class="row" style="margin-top:10px"><button class="act primary" data-act="notify-retry">重试 ' + failed + ' 条失败通知</button></div>' : '')
+    (failed ? '<div class="row pane-actions"><button class="act primary" data-act="notify-retry">重试 ' + failed + ' 条失败通知</button></div>' : '')
 }
+
+function advancedPane () {
+  var release = (state.content && state.content.release) || { releases: [] }
+  var current = (release.releases || []).find(function (item) { return item.current }) || (release.releases || [])[0] || null
+  var currentText = current
+    ? ((current.notes == null ? '' : current.notes + ' 篇 · ') + releaseTime(current.modifiedAt))
+    : '暂无版本信息'
+  return '<h2>高级维护</h2>' +
+    '<p class="small muted">用于发布异常、迁移或恢复；日常使用通常不需要。</p>' +
+    '<div class="maintenance-grid">' +
+      '<section class="maintenance-group"><div><h3>备份</h3><p>保存账本与关键运行数据，供故障恢复使用。</p></div>' +
+        '<div class="maintenance-actions"><button class="act" data-act="backup">创建备份</button></div></section>' +
+      '<section class="maintenance-group"><div><h3>公开站点</h3><p>当前：' + esc(currentText) + '</p></div>' +
+        '<div class="maintenance-actions"><button class="act" data-act="rebuild-content">重建公开站点</button>' +
+        '<button class="act" data-act="rollback-content"' + (release.canRollback ? '' : ' disabled') + '>回滚上一版本</button></div></section>' +
+    '</div>'
+}
+
 
 function renderSettings () {
   var c = state.config || { values: {}, editable: {} }
@@ -1204,8 +1298,9 @@ function renderSettings () {
   var body = pane === 'maintenance' ? maintenancePane()
     : pane === 'deliveries' ? deliveriesPane(deliveries, rows, failed)
       : pane === 'storage' ? '<h2>存储占用</h2><div id="storageBody">' + storageHtml() + '</div>'
-        : '<h2>运行参数</h2>' + fields +
-          '<div class="row"><button class="act primary" data-act="save-config">保存设置</button></div>'
+        : pane === 'advanced' ? advancedPane()
+          : '<h2>运行参数</h2>' + fields +
+            '<div class="row"><button class="act primary" data-act="save-config">保存设置</button></div>'
 
   $('tab-settings').innerHTML = '<div class="split">' +
     '<div class="col" id="settingsRail"><div class="colhead"><span>设置</span></div>' + rail + '</div>' +
@@ -1213,8 +1308,12 @@ function renderSettings () {
 }
 
 function storageHtml () {
+  var actions = '<div class="storage-actions">' +
+    '<button class="act" data-act="prune">检查可清理内容</button>' +
+    '<button class="act danger" data-act="prune-apply">清理可清理原件</button></div>' +
+    '<p class="small muted storage-note">先检查、再清理。检查只计算候选，不删除文件；清理会删除可以安全释放的回放媒体原件，保留转录、课件解析结果和已发布笔记。</p>'
   if (!state.storage) {
-    return '<div class="row"><button class="act" data-act="storage-load">查看占用</button></div>'
+    return '<div class="row"><button class="act" data-act="storage-load">计算存储占用</button></div>' + actions
   }
   var list = state.storage.categories || []
   var total = state.storage.totalBytes || 1
@@ -1222,54 +1321,61 @@ function storageHtml () {
     var percent = Math.max(2, Math.round((item.bytes / total) * 100))
     return '<div class="storage-row"><div>' + esc(item.label) + '</div><div class="muted small">' + bytes(item.bytes) + '</div>' +
       '<div class="hint">' + esc(item.hint) + '</div>' +
-      '<div style="grid-column:1/-1"><div class="bar"><i style="width:' + percent + '%"></i></div></div></div>'
+      '<div class="storage-bar"><div class="bar"><i style="width:' + percent + '%"></i></div></div></div>'
   }).join('')
   var disk = state.storage.disk
-  return rows + (disk ? '<p class="small muted" style="margin-top:12px">磁盘：已用 ' + bytes(disk.totalBytes - disk.freeBytes) + ' / 共 ' + bytes(disk.totalBytes) + '，可用 ' + bytes(disk.freeBytes) + '</p>' : '') +
-    '<div class="row" style="margin-top:10px"><button class="act quiet" data-act="storage-load">重新计算</button></div>'
+  return rows +
+    (disk ? '<p class="small muted storage-disk">磁盘：已用 ' + bytes(disk.totalBytes - disk.freeBytes) + ' / 共 ' + bytes(disk.totalBytes) + '，可用 ' + bytes(disk.freeBytes) + '</p>' : '') +
+    '<div class="row pane-actions"><button class="act quiet" data-act="storage-load">重新计算</button></div>' + actions
 }
 
 /* ── 动作 ── */
 function go (tab) { state.tab = tab; render(); window.scrollTo({ top: 0, behavior: 'smooth' }) }
 
 async function doAction (action, extra, btn) {
-  if (state.busy || (state.status && state.status.running)) { toast('已有任务正在处理，请稍后', 'info'); return }
   var label = LABELS[action] || action
-  var restore = busyButton(btn, '处理中…')
+  var restore = busyButton(btn, '提交中…')
   state.busy = true
-  setRunState('正在运行 ' + label, 'warn')
-  out('运行中…（' + label + '）')
-  toast('已开始：' + label, 'info')
   try {
-    var res = await fetch('/api/admin/run', { method: 'POST', headers: headers(true), body: JSON.stringify(Object.assign({ action: action }, extra || {})) })
+    var res = await fetch('/api/admin/run', {
+      method: 'POST',
+      headers: headers(true),
+      body: JSON.stringify(Object.assign({ action: action }, extra || {}))
+    })
     var data = await res.json().catch(function () { return {} })
-    if (res.status === 409) toast('已有其他任务正在处理，请稍后', 'info')
-    var jobId = data.jobId
-    if (!jobId) {
-      // 老服务端（或参数被拒）没有 jobId：照旧把响应打出来
+    if (!res.ok || !data.jobId) {
       out(JSON.stringify(data, null, 2))
-      if (res.status !== 409) toast('操作未完成：' + (data.message || data.error || label), 'error')
-      return
+      toast('操作未提交：' + (data.message || data.error || label), 'error')
+      return data
     }
-    // 长动作动辄几分钟：拿 jobId 轮询，而不是挂着一个请求等（刷新页面也能接着看）
-    out('已开始（任务 ' + jobId + '），等待结果…')
-    var snapshot = data
-    for (var attempt = 0; attempt < 600; attempt += 1) {
-      await new Promise(function (resolve) { setTimeout(resolve, 1500) })
-      var poll = await fetch('/api/admin/job?id=' + encodeURIComponent(jobId), { headers: headers(false) })
-      snapshot = await poll.json().catch(function () { return {} })
-      if (!snapshot.status || snapshot.status !== 'running') break
-      if (attempt % 8 === 7) out('仍在运行：' + label + '（已等 ' + Math.round((attempt + 1) * 1.5) + ' 秒）')
-    }
-    out(JSON.stringify(snapshot, null, 2))
-    if (snapshot.status === 'done') toast('已完成：' + label, 'ok')
-    else if (snapshot.status === 'running') toast(label + '仍在后台处理', 'info')
-    else toast('操作未完成：' + (snapshot.error || snapshot.message || label), 'error')
+    var queued = data.status === 'queued'
+    var message = queued
+      ? ('已加入队列' + (data.queuePosition ? ' · 第 ' + data.queuePosition + ' 项' : '') + '：' + label)
+      : ('已开始：' + label)
+    out(message + '\n任务 ' + data.jobId)
+    toast(message, 'info')
+    await load()
+    return data
   } catch (error) {
     out('请求失败：' + ((error && error.message) || error))
     toast('连接中断，请稍后重试', 'error')
-  } finally { state.busy = false; restore() }
-  load()
+  } finally {
+    state.busy = false
+    restore()
+  }
+}
+
+async function showJobOutput (id) {
+  if (!id) return
+  try {
+    var res = await fetch('/api/admin/job?id=' + encodeURIComponent(id), { headers: headers(false) })
+    var data = await res.json().catch(function () { return {} })
+    out(JSON.stringify(data, null, 2))
+    var details = $('outCard')
+    if (details) details.open = true
+  } catch (error) {
+    toast('读不到任务详情', 'error')
+  }
 }
 
 function setStatus (key, text, kind) {
@@ -1658,13 +1764,14 @@ function handleAct (act, btn) {
     return
   }
   if (act === 'storage-load') return loadStorage(btn)
-  if (act === 'add-tag') { var box = document.querySelector('[data-newtag="' + key + '"]'); return addTag(key, box && box.value, 'lesson') }
+  if (act === 'job-output') return showJobOutput(btn.dataset.id || '')
+  if (act === 'add-tag') { var box = document.querySelector('[data-newtag="' + key + '"]'); return addTag(key, box && box.value, 'lesson').then(function () { if (box) box.value = '' }) }
   if (act === 'remove-tag') return removeTag(key, btn.dataset.tag, 'lesson')
-  if (act === 'add-course-tag') { var cbox = document.querySelector('[data-newcoursetag="' + btn.dataset.course + '"]'); return addTag('', cbox && cbox.value, 'course', btn.dataset.course) }
+  if (act === 'add-course-tag') { var cbox = document.querySelector('[data-newcoursetag="' + btn.dataset.course + '"]'); return addTag('', cbox && cbox.value, 'course', btn.dataset.course).then(function () { if (cbox) cbox.value = '' }) }
   if (act === 'remove-course-tag') return removeTag('', btn.dataset.tag, 'course', btn.dataset.course)
-  if (act === 'retry') return doAction('retry', { replayKey: key }, btn)
-  if (act === 'refresh-note') return doAction('refresh-note', { replayKey: key }, btn)
-  if (act === 'cycle') return doAction('cycle', { replayKey: key, maxTasks: 1 }, btn)
+  if (act === 'retry') { var retryTask = taskByKey(key); return doAction('retry', { replayKey: key, course: retryTask && retryTask.courseName, lesson: retryTask && retryTask.title }, btn) }
+  if (act === 'refresh-note') { var refreshTask = taskByKey(key); return doAction('refresh-note', { replayKey: key, course: refreshTask && refreshTask.courseName, lesson: refreshTask && refreshTask.title }, btn) }
+  if (act === 'cycle') { var cycleTask = taskByKey(key); return doAction('cycle', { replayKey: key, maxTasks: 1, course: cycleTask && cycleTask.courseName, lesson: cycleTask && cycleTask.title }, btn) }
   if (act === 'ocr-material') {
     var ocrTask = taskByKey(key)
     if (!ocrTask) { toast('找不到这条课次', 'error'); return }
@@ -1856,8 +1963,8 @@ document.addEventListener('keydown', function (event) {
     return
   }
   if (event.key !== 'Enter') return
-  if (target.dataset.newtag) { event.preventDefault(); run(function () { return addTag(target.dataset.newtag, target.value, 'lesson') }); return }
-  if (target.dataset.newcoursetag) { event.preventDefault(); run(function () { return addTag('', target.value, 'course', target.dataset.newcoursetag) }); return }
+  if (target.hasAttribute && target.hasAttribute('data-newtag')) { event.preventDefault(); run(function () { return addTag(target.dataset.newtag, target.value, 'lesson').then(function () { target.value = '' }) }); return }
+  if (target.hasAttribute && target.hasAttribute('data-newcoursetag')) { event.preventDefault(); run(function () { return addTag('', target.value, 'course', target.dataset.newcoursetag).then(function () { target.value = '' }) }); return }
   if (target.dataset.request) {
     event.preventDefault()
     run(function () { return reviseWith(target.dataset.request, '', document.querySelector('[data-act="revise-first"][data-key="' + target.dataset.request + '"]')) })
@@ -1869,7 +1976,7 @@ load()
 setInterval(function () {
   if (state.busy || document.hidden) return
   run(function () { return load({ quiet: true }) })
-}, 20000)
+}, 5000)
 </script>
 </body>
 </html>

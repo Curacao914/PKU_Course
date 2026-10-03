@@ -11,11 +11,12 @@ import {
   emptyIntegrationManifest,
   normalizeIntegrationManifest,
   removeIntegrationDefinition,
-  upsertIntegrationDefinition
+  upsertIntegrationDefinition,
+  checkBriefBinding
 } from '@course/notes'
 
 import { ADMIN_HTML } from './admin-page.mjs'
-import { readSiteIndex } from '@course/publish'
+import { readSiteIndex, verifySourceMap } from '@course/publish'
 import { openLedger } from '@course/store'
 
 /**
@@ -24,8 +25,8 @@ import { openLedger } from '@course/store'
  * 安全约定：
  *   1. 未配置令牌时**一律 503**（fail closed），而不是"没配就等于开放"；
  *   2. 响应里**只出现 set / missing**，绝不回显任何密钥取值；
- *   3. 同一时刻只允许一次运行——手动触发与定时任务撞车会互相抢租约，
- *      与其让它们竞争，不如直接告诉调用方"正在运行中"；
+ *   3. 重任务仍然串行执行，但管理台允许继续提交——后来的动作进入 OWNER FIFO 队列，
+ *      不让用户被一个长任务锁死，也不在 2 核机器上强开危险并发；
  *   4. 登录失败按来源 IP 计数并在窗口期内拒绝，避免令牌被暴力尝试。
  */
 
@@ -755,6 +756,7 @@ export function createAdminHandler({
 } = {}) {
   const failures = new Map()
   let running = null
+  const pendingJobs = []
   /**
    * 进程内的"长动作"快照（Phase 5.2 C2）。
    *
@@ -766,7 +768,136 @@ export function createAdminHandler({
    * 尝试次数），所以"重启后还能不能续跑"靠的是账本，不是这个 Map。
    */
   const jobs = new Map()
-  const JOB_KEEP = 20
+  const JOB_KEEP = 30
+
+  function jobMeta(payload = {}) {
+    return {
+      replayKey: String(payload.replayKey || ''),
+      course: String(payload.course || ''),
+      lesson: String(payload.lesson || ''),
+      module: String(payload.module || ''),
+      integrationId: String(payload.id || '')
+    }
+  }
+
+  function jobView(job, includeOutput = false) {
+    const queuePosition = job.status === 'queued'
+      ? Math.max(1, pendingJobs.findIndex(item => item.id === job.id) + 1)
+      : 0
+    return {
+      id: job.id,
+      action: job.action,
+      status: job.status,
+      queuedAt: job.queuedAt || null,
+      startedAt: job.startedAt || null,
+      finishedAt: job.finishedAt || null,
+      exitCode: job.exitCode === null || job.exitCode === undefined ? null : job.exitCode,
+      meta: job.meta || {},
+      queuePosition,
+      ...(job.error ? { error: job.error } : {}),
+      ...(includeOutput ? { result: job.result, stderr: job.stderr } : {})
+    }
+  }
+
+  async function executeJob(job) {
+    job.status = 'running'
+    job.startedAt = new Date(now()).toISOString()
+    running = job
+    try {
+      const result = await runCommand(job.args, { env: workerEnv, timeoutMs: DEFAULT_RUN_TIMEOUT_MS })
+      const parsed = safeJson(result.stdout)
+      job.status = result.code === 0 ? 'done' : 'failed'
+      job.exitCode = result.code
+      job.result = parsed ? redactStatus(parsed) : null
+      job.stderr = String(result.stderr || '').slice(-4000)
+    } catch (error) {
+      job.status = 'failed'
+      job.error = error instanceof Error ? error.message : String(error)
+    } finally {
+      job.finishedAt = new Date(now()).toISOString()
+      running = null
+      drainJobs()
+    }
+  }
+
+  function drainJobs() {
+    if (running || !pendingJobs.length) return
+    const job = pendingJobs.shift()
+    void executeJob(job)
+  }
+
+  function enqueueJob(action, args, payload) {
+    const job = {
+      id: randomUUID(),
+      action,
+      args,
+      meta: jobMeta(payload),
+      status: 'queued',
+      queuedAt: new Date(now()).toISOString(),
+      startedAt: null,
+      finishedAt: null,
+      exitCode: null,
+      result: null,
+      stderr: '',
+      error: ''
+    }
+    jobs.set(job.id, job)
+    pendingJobs.push(job)
+    while (jobs.size > JOB_KEEP) {
+      const first = jobs.keys().next().value
+      if (first === running?.id || pendingJobs.some(item => item.id === first)) break
+      jobs.delete(first)
+    }
+    drainJobs()
+    return job
+  }
+
+  function contentQualityMap() {
+    const result = new Map()
+    const file = path.join(root, 'library.json')
+    if (!fs.existsSync(file)) return result
+    let records = []
+    try {
+      const parsed = JSON.parse(fs.readFileSync(file, 'utf8'))
+      records = Array.isArray(parsed) ? parsed : (parsed.records || parsed.notes || [])
+    } catch {
+      return result
+    }
+    for (const record of records) {
+      const course = String(record.courseName || '')
+      const lesson = String(record.lessonTitle || '')
+      const markdown = String(record.markdown || '')
+      if (!course || !lesson) continue
+      const missing = []
+      if (!markdown.trim()) missing.push('正文')
+      const brief = record.brief || {}
+      const briefCheck = checkBriefBinding(brief, { course, lesson, markdown })
+      if (!brief.briefing || !(brief.keyPoints || []).length || !briefCheck.ok || !briefCheck.bound) missing.push('简报')
+      if (!String(record.theme || '').trim()) missing.push('主题')
+      if (!(record.keywords || []).length) missing.push('关键词')
+      const onepage = record.onepage || {}
+      if (!String(onepage.markdown || '').trim()) {
+        missing.push('一页纸')
+      } else {
+        const mapCheck = verifySourceMap(onepage.sourceMap, {
+          slug: record.slug || '',
+          noteMarkdown: markdown,
+          onepageMarkdown: onepage.markdown,
+          sections: record.sections || null
+        })
+        if (!mapCheck.ok || !mapCheck.bound) missing.push('来源映射')
+      }
+      result.set(course + '\u0000' + lesson, {
+        complete: missing.length === 0,
+        missing,
+        hasBrief: Boolean(brief.briefing),
+        hasOnepage: Boolean(onepage.markdown),
+        updatedAt: record.updatedAt || ''
+      })
+    }
+    return result
+  }
+
   // 主令牌由 handle() 每次请求传进来，但 handleApi 也需要它（鉴权 + 找回路径提示），
   // 因此在这里留一个当前请求的闭包副本。
   let activeToken = ''
@@ -1020,23 +1151,16 @@ export function createAdminHandler({
 
   function snapshot() {
     const pricing = resolvePricing(process.env)
+    const qualityByLesson = contentQualityMap()
     const status = {
       generatedAt: new Date(now()).toISOString(),
       pricing,
       // 正在运行的状态要暴露出来：否则用户点完按钮看不到反馈，
       // 又在别处点一次会撞上 409 却不明白为什么
-      running: running ? { action: running.action, startedAt: running.startedAt } : null,
-      // 最近任务：**进程内**快照（最多 JOB_KEEP 条），服务重启就没了。页面上必须这么说，
-      // 不能让人以为这是完整的任务历史——已确认的阶段在账本里（每条课次的 stage）。
-      recentJobs: [...jobs.values()].slice(-8).reverse().map(job => ({
-        id: job.id,
-        action: job.action,
-        status: job.status,
-        startedAt: job.startedAt,
-        finishedAt: job.finishedAt || null,
-        exitCode: job.exitCode === null || job.exitCode === undefined ? null : job.exitCode,
-        error: job.error || ''
-      })),
+      running: running ? jobView(running) : null,
+      queue: pendingJobs.map(job => jobView(job)),
+      // 最近任务：进程内快照；服务重启就没了，持久阶段仍以账本为准。
+      recentJobs: [...jobs.values()].slice(-12).reverse().map(job => jobView(job)),
       ledger: null,
       site: null,
       runs: []
@@ -1099,7 +1223,8 @@ export function createAdminHandler({
             ocr: ocrJob ? describeOcrProgress(ocrJob, materialList) : null,
             materials: materialList,
             lesson,
-            cost: lessonCostOf(task, lesson, pricing)
+            cost: lessonCostOf(task, lesson, pricing),
+            quality: qualityByLesson.get(String(task.course_name || '') + '\u0000' + String(task.title || '')) || null
           }
         })
         status.spend = tasks.reduce((sum, task) => ({
@@ -1590,11 +1715,6 @@ export function createAdminHandler({
     }
 
     if (pathname === `${ADMIN_PREFIX}run` && req.method === 'POST') {
-      if (running) {
-        // 409 里带上正在跑的那个 jobId：前端可以直接"接上"它继续等，而不是只能干瞪眼
-        sendJson(res, 409, { ok: false, error: 'already_running', startedAt: running.startedAt, action: running.action, jobId: running.jobId || null })
-        return true
-      }
       let payload = {}
       try {
         payload = safeJson(await readBody(req)) || {}
@@ -1616,49 +1736,14 @@ export function createAdminHandler({
         return true
       }
 
-      const job = {
-        id: randomUUID(),
-        action,
-        args,
-        status: 'running',
-        startedAt: new Date(now()).toISOString(),
-        finishedAt: null,
-        exitCode: null,
-        result: null,
-        stderr: '',
-        error: ''
-      }
-      jobs.set(job.id, job)
-      // 只留最近 20 个：这是给人看的进度快照，不是审计日志（审计在账本里）
-      while (jobs.size > JOB_KEEP) jobs.delete(jobs.keys().next().value)
-      running = { action, startedAt: job.startedAt, jobId: job.id }
-
-      // 不 await：立刻把 jobId 交给调用方，长动作在后台跑
-      void (async () => {
-        try {
-          const result = await runCommand(args, { env: workerEnv, timeoutMs: DEFAULT_RUN_TIMEOUT_MS })
-          const parsed = safeJson(result.stdout)
-          job.status = result.code === 0 ? 'done' : 'failed'
-          job.exitCode = result.code
-          job.result = parsed ? redactStatus(parsed) : null
-          job.stderr = String(result.stderr || '').slice(-4000)
-        } catch (error) {
-          job.status = 'failed'
-          job.error = error instanceof Error ? error.message : String(error)
-        } finally {
-          job.finishedAt = new Date(now()).toISOString()
-          running = null
-        }
-      })()
+      const job = enqueueJob(action, args, payload)
 
       sendJson(res, 202, {
         ok: true,
         accepted: true,
         jobId: job.id,
-        action,
-        status: job.status,
-        startedAt: job.startedAt,
-        poll: `${ADMIN_PREFIX}job?id=${job.id}`
+        ...jobView(job),
+        poll: ADMIN_PREFIX + 'job?id=' + job.id
       })
       return true
     }
@@ -1671,22 +1756,11 @@ export function createAdminHandler({
         sendJson(res, 404, {
           ok: false,
           error: 'job_not_found',
-          message: '进程内只保留最近 20 个任务、重启即清空；持久状态请看 /api/admin/status（账本就是记录）'
+          message: '进程内只保留最近 30 个任务、重启即清空；持久阶段仍以账本为准'
         })
         return true
       }
-      sendJson(res, 200, {
-        ok: true,
-        jobId: job.id,
-        action: job.action,
-        status: job.status,
-        startedAt: job.startedAt,
-        finishedAt: job.finishedAt,
-        exitCode: job.exitCode,
-        result: job.result,
-        stderr: job.stderr,
-        ...(job.error ? { error: job.error } : {})
-      })
+      sendJson(res, 200, { ok: true, ...jobView(job, true) })
       return true
     }
 

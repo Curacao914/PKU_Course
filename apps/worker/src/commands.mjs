@@ -2488,7 +2488,18 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
      * 且各自与自己的生成侧成对（指纹算法必须两边一致）。
      */
     const resolveDerived = async ({ label, file, check, regenerate }) => {
-      if (!fs.existsSync(file)) return { applied: false, value: null, reason: 'missing', regenerated: false }
+      if (!fs.existsSync(file)) {
+        try {
+          const payload = await regenerate()
+          fs.writeFileSync(file, `${JSON.stringify(payload, null, 2)}\n`)
+          stderr(`${label}已补生成`)
+          return { applied: true, value: payload, reason: 'generated', regenerated: true }
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error)
+          stderr(`${label}补生成失败：${reason}（正文仍继续发布，管理台会标记待补齐）`)
+          return { applied: false, value: null, reason: 'missing_generate_failed', error: reason, regenerated: false }
+        }
+      }
       let value = null
       let problems = null
       try {
