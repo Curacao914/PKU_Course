@@ -1352,7 +1352,7 @@ async function doAction (action, extra, btn) {
     var message = queued
       ? ('已加入队列' + (data.queuePosition ? ' · 第 ' + data.queuePosition + ' 项' : '') + '：' + label)
       : ('已开始：' + label)
-    out(message + '\n任务 ' + data.jobId)
+    out(message + '\\n任务 ' + data.jobId)
     toast(message, 'info')
     await load()
     return data
