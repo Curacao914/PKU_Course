@@ -491,10 +491,9 @@ test('the balance endpoint reports provider state without blocking the status pa
 test('legacy console passwords no longer authenticate browser API access', async () => {
   const { handler, scratchRoot } = fixture()
 
-  const set = await call(handler, { method: 'PUT', url: '/api/admin/password', body: JSON.stringify({ password: 'wo-de-mi-ma-2026' }) })
-  assert.equal(set.res.state.status, 200)
-  const onDisk = fs.readFileSync(path.join(scratchRoot, 'admin-password.json'), 'utf8')
-  assert.ok(!onDisk.includes('wo-de-mi-ma-2026'), '旧密码文件即使存在也不能保存明文')
+  const retired = await call(handler, { method: 'PUT', url: '/api/admin/password', body: JSON.stringify({ password: 'wo-de-mi-ma-2026' }) })
+  assert.ok([404, 410].includes(retired.res.state.status), '旧 Course 密码接口必须退役')
+  assert.equal(fs.existsSync(path.join(scratchRoot, 'admin-password.json')), false, '退役接口不得再创建密码文件')
 
   const byPassword = await call(handler, { url: '/api/admin/status' }, { token: 'wo-de-mi-ma-2026' })
   assert.equal(byPassword.res.state.status, 401, '统一登录后旧 Course 密码不得继续作为浏览器凭据')
