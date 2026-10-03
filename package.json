@@ -12,7 +12,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "test": "node --test \"packages/*/src/*.test.mjs\" \"apps/*/src/*.test.mjs\" \"tools/*.test.mjs\"",
+    "test": "node --test \"packages/*/src/*.test.mjs\" \"apps/*/src/*.test.mjs\" \"tools/*.test.mjs\" \"apps/control/src/server/*.test.mjs\"",
     "test:acquisition": "node --test \"packages/acquisition/src/*.test.mjs\"",
     "test:core": "node --test \"packages/core/src/*.test.mjs\"",
     "test:asr": "node --test \"packages/asr/src/*.test.mjs\"",
