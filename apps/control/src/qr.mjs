@@ -34,7 +34,15 @@ async function clickQrTab(context) {
   while (Date.now() < deadline) {
     for (const page of context.pages()) {
       for (const frame of page.frames()) {
-        for (const label of ['扫码登录', '二维码登录', '北京大学 App']) {
+        const exactTab = frame.locator('#qrcode_panel_top_bar').first()
+        if (await exactTab.count().catch(() => 0) && await exactTab.isVisible().catch(() => false)) {
+          await exactTab.click()
+          await frame.locator('#qrcode_panel').waitFor({ state: 'visible', timeout: 5000 }).catch(() => {})
+          await sleep(400)
+          return
+        }
+
+        for (const label of ['QR Code', '扫码登录', '二维码登录', '北京大学 App']) {
           const candidate = frame.getByText(label, { exact: false }).first()
           if (await candidate.count().catch(() => 0) && await candidate.isVisible().catch(() => false)) {
             await candidate.click().catch(() => {})
@@ -51,6 +59,19 @@ async function clickQrTab(context) {
 async function screenshot(context) {
   const page = context.pages().at(-1)
   if (!page) return ''
+
+  for (const frame of page.frames()) {
+    const qrImage = frame.locator('#qrcode_panel img').first()
+    if (await qrImage.count().catch(() => 0) && await qrImage.isVisible().catch(() => false)) {
+      return 'data:image/png;base64,' + (await qrImage.screenshot({ type: 'png' })).toString('base64')
+    }
+
+    const qrPanel = frame.locator('#qrcode_panel').first()
+    if (await qrPanel.count().catch(() => 0) && await qrPanel.isVisible().catch(() => false)) {
+      return 'data:image/png;base64,' + (await qrPanel.screenshot({ type: 'png' })).toString('base64')
+    }
+  }
+
   return 'data:image/png;base64,' + (await page.screenshot({ type: 'png', fullPage: false })).toString('base64')
 }
 
