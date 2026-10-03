@@ -218,7 +218,7 @@ test('the reading page keeps its tools in the top bar instead of a floating pane
 })
 
 test('public pages include a hidden owner management entry backed by Course session state', () => {
-  const html = renderHomePage([record()])
+  const html = renderIndexPage([record()])
   assert.match(html, /data-course-admin/)
   assert.match(html, /href="\/admin"/)
   assert.match(html, /\/_auth\/session/)
