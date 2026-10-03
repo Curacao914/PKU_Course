@@ -126,7 +126,15 @@ check_roles() {
       fail "找不到单元 ${name}（~/.config/systemd/user 与 /etc/systemd/system 里都没有它）。请先跑 deploy/install-units.sh；确实要跳过就设 COURSE_ROLE_CHECK=warn"
     fi
     if [ "$expected" = "control" ]; then
-      log "   · $name role=control 健康端口=$(service_port "$entry")"
+      grep -q '^Environment=COURSE_CONTROL_HOST=127.0.0.1$' "$unit" ||
+        fail "$name 必须显式绑定 COURSE_CONTROL_HOST=127.0.0.1"
+      grep -q '^KillMode=control-group$' "$unit" ||
+        fail "$name 必须使用 KillMode=control-group"
+      grep -q '^CPUQuota=' "$unit" ||
+        fail "$name 缺少 CPUQuota cgroup 限额"
+      grep -q '^MemoryMax=' "$unit" ||
+        fail "$name 缺少 MemoryMax cgroup 限额"
+      log "   · $name role=control loopback+cgroup=ok 健康端口=$(service_port "$entry")"
       continue
     fi
     found="$(grep -o 'COURSE_SITE_ROLE=[a-z]*' "$unit" | head -1 | cut -d= -f2 || true)"

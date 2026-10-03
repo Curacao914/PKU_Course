@@ -21,15 +21,20 @@ export function signRequest({ key, timestamp = Date.now(), nonce = crypto.random
     'x-course-signature': crypto.createHmac('sha256', key).update(canonical({ ...request, timestamp, nonce })).digest('hex')
   }
 }
+export function assertSignedRequestEnvelope({ headers, now = Date.now, windowMs = 60_000 }) {
+  const timestamp = headers['x-course-timestamp']; const nonce = headers['x-course-nonce']
+  const ownerId = headers['x-course-owner-id']; const signature = headers['x-course-signature']
+  const stamp = now()
+  if (!/^\d{1,16}$/.test(timestamp || '') || Math.abs(stamp - Number(timestamp)) > windowMs ||
+    !/^[0-9a-f]{32}$/.test(nonce || '') || !UUID.test(ownerId || '') || !/^[0-9a-f]{64}$/.test(signature || '')) throw unauthorized()
+  return { timestamp, nonce, ownerId, signature, stamp }
+}
+
 export function createRequestVerifier({ key, now = Date.now, windowMs = 60_000, maxNonces = 10000 }) {
   assertKey(key)
   const seen = new Map()
   return ({ headers, method, path, body = '' }) => {
-    const timestamp = headers['x-course-timestamp']; const nonce = headers['x-course-nonce']
-    const ownerId = headers['x-course-owner-id']; const signature = headers['x-course-signature']
-    const stamp = now()
-    if (!/^\d{1,16}$/.test(timestamp || '') || Math.abs(stamp - Number(timestamp)) > windowMs ||
-      !/^[0-9a-f]{32}$/.test(nonce || '') || !UUID.test(ownerId || '') || !/^[0-9a-f]{64}$/.test(signature || '')) throw unauthorized()
+    const { timestamp, nonce, ownerId, signature, stamp } = assertSignedRequestEnvelope({ headers, now, windowMs })
     const expected = signRequest({ key, timestamp, nonce, ownerId, method, path, body })['x-course-signature']
     if (!equal(signature, expected)) throw unauthorized()
     for (const [n, expires] of seen) if (expires < stamp) seen.delete(n)

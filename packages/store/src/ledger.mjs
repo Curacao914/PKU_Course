@@ -112,6 +112,7 @@ export function openLedger(databasePath = ':memory:', options = {}) {
       SELECT * FROM tasks
       WHERE (? IS NULL OR stage = ?)
         AND (? IS NULL OR owner_id = ?)
+        AND (? IS NULL OR resource_class = ?)
       ORDER BY priority DESC, id
       LIMIT ?
     `),
@@ -254,8 +255,10 @@ export function openLedger(databasePath = ':memory:', options = {}) {
       return hydrate(statements.findByReplayKey.get(String(replayKey)))
     },
 
-    listTasks({ stage = null, ownerId = null, limit = 100 } = {}) {
-      return statements.listTasks.all(stage, stage, ownerId, ownerId, limit).map(hydrate)
+    listTasks({ stage = null, ownerId = null, resourceClass = null, limit = 100 } = {}) {
+      return statements.listTasks
+        .all(stage, stage, ownerId, ownerId, resourceClass, resourceClass, limit)
+        .map(hydrate)
     },
 
     /**

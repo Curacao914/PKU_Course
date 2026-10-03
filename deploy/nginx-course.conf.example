@@ -12,6 +12,8 @@
 # 客户端自己伪造的前缀换不掉身份。前提是 env.public 里写 COURSE_TRUSTED_PROXIES=127.0.0.1,::1
 # （nginx 就在本机）——不写的话服务端不读任何转发头，所有读者共用一个限流桶。
 
+limit_req_zone $binary_remote_addr zone=course_control:10m rate=10r/s;
+
 # ---------- 公开站点 ----------
 # course.law-tech.dev —— 直连入口（不再经 Cloudflare 隧道）
 #
@@ -54,6 +56,8 @@ server {
     # Vercel 上的 law-tech.dev 通过这一条访问多用户控制面。
     # 浏览器本身拿不到 COURSE_CONTROL_SIGNING_KEY；请求必须由 law-tech 服务端转发。
     location ^~ /_control/ {
+        limit_req zone=course_control burst=20 nodelay;
+        limit_req_status 429;
         proxy_pass http://127.0.0.1:3102/;
         proxy_http_version 1.1;
         proxy_set_header Host $host;

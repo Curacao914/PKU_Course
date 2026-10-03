@@ -1,4 +1,4 @@
-import { createRequestVerifier, createJobTokens } from './server/auth.mjs'
+import { assertSignedRequestEnvelope, createRequestVerifier, createJobTokens } from './server/auth.mjs'
 import http from 'node:http'
 import { createAccountStore } from './store.mjs'
 import { createJobQueue } from './jobs.mjs'
@@ -92,9 +92,14 @@ export function createControlServer({ env = process.env, store = createAccountSt
         return
       }
 
-      req.rawBody = await readBody(req)
+      const declaredLength = Number(req.headers['content-length'] || 0)
+      if (!Number.isFinite(declaredLength) || declaredLength < 0 || declaredLength > BODY_LIMIT) {
+        throw Object.assign(new Error('请求体过大'), { status: 413 })
+      }
+
       let ownerId
-      if (url.pathname === '/v1/internal/private-note') {
+      const privateNote = url.pathname === '/v1/internal/private-note'
+      if (privateNote) {
         if (req.method !== 'POST') throw Object.assign(new Error('UNAUTHORIZED'), { status: 401 })
         const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '')
         const claims = jobTokens.verify(token, {
@@ -102,6 +107,11 @@ export function createControlServer({ env = process.env, store = createAccountSt
         })
         ownerId = claims.ownerId
       } else {
+        assertSignedRequestEnvelope({ headers: req.headers })
+      }
+
+      req.rawBody = await readBody(req)
+      if (!privateNote) {
         ownerId = authenticate({ headers: req.headers, method: req.method, path: req.url, body: req.rawBody })
       }
       const profile = await store.profile(ownerId)
@@ -112,12 +122,13 @@ export function createControlServer({ env = process.env, store = createAccountSt
         const selectedKeys = new Set(pku?.selected_course_keys || [])
         const ledger = openLedger(ledgerPath)
         try {
-          const all = ledger.listTasks({ limit: Math.min(500, Number(url.searchParams.get('limit') || 300)) })
-          const visible = all.filter(task => {
-            if (profile.role === 'owner' && !task.owner_id && task.resource_class === 'owner') return true
-            if (task.owner_id !== ownerId) return false
-            return profile.role === 'owner' || selectedKeys.has(task.course_key)
-          }).map(task => ({
+          const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit') || 300)))
+          const all = profile.role === 'owner'
+            ? ledger.listTasks({ resourceClass: 'owner', limit })
+            : ledger.listTasks({ ownerId, resourceClass: 'member', limit })
+          const visible = all.filter(task =>
+            profile.role === 'owner' || selectedKeys.has(task.course_key)
+          ).map(task => ({
             id: task.id,
             replayKey: task.replay_key,
             sourceReplayKey: task.source_replay_key || task.replay_key,

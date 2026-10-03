@@ -237,9 +237,15 @@ export function parseRequireMaterials(value) {
  *
  * 筛选条件与 claimNext 的 SQL 一一对应：可领取阶段 + 退避到期 + 租约空闲，按 id 排序。
  */
-export function nextActionableTask(store, { at = new Date(), exclude = new Set(), ownerId = null, courseKeys = null } = {}) {
+export function nextActionableTask(store, {
+  at = new Date(),
+  exclude = new Set(),
+  ownerId = null,
+  resourceClass = null,
+  courseKeys = null
+} = {}) {
   const stamp = (at instanceof Date ? at : new Date(at)).toISOString()
-  return store.listTasks({ limit: 200 })
+  return store.listTasks({ ownerId, resourceClass, limit: 200 })
     .filter(task => ACTIONABLE_STAGES.includes(task.stage))
     .filter(task => ownerId === null || task.owner_id === ownerId)
     .filter(task => !courseKeys || courseKeys.has(task.course_key))
@@ -2963,8 +2969,11 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
     const asrBlocked = (() => {
       const store = openStore(config.ledgerPath)
       try {
-        const blocked = store.listTasks({ ownerId: config.account?.ownerId || null, limit: 200 })
-          .filter(task => !memberSelectedCourseKeys || memberSelectedCourseKeys.has(task.course_key))
+        const blocked = store.listTasks({
+          ownerId: config.account?.resourceClass === 'member' ? (config.account?.ownerId || null) : null,
+          resourceClass: config.account?.resourceClass || 'owner',
+          limit: 200
+        }).filter(task => !memberSelectedCourseKeys || memberSelectedCourseKeys.has(task.course_key))
           .filter(task => task.last_error && ['downloaded', 'transcribing', 'transcript_ready'].includes(task.stage))
           .map(task => ({ task, issue: classifyProviderIssue(task.last_error) }))
           .filter(item => item.issue && item.issue.provider === 'aliyun')
@@ -3059,7 +3068,8 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
           }
         } else {
           const candidate = nextActionableTask(store, {
-            ownerId: config.account?.ownerId || null,
+            ownerId: config.account?.resourceClass === 'member' ? (config.account?.ownerId || null) : null,
+            resourceClass: config.account?.resourceClass || 'owner',
             courseKeys: memberSelectedCourseKeys,
             exclude: new Set(skippedNoMaterials.map(item => item.replayKey))
           })
