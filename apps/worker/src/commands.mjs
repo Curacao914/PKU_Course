@@ -3113,8 +3113,7 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
         const probe = openStore(config.ledgerPath)
         try {
           const stamp = new Date().toISOString()
-          const ownerBusy = probe.listTasks({ limit: 500 }).some(item =>
-            item.resource_class === 'owner' &&
+          const ownerBusy = probe.listTasks({ resourceClass: 'owner', limit: 500 }).some(item =>
             item.lease_expires_at &&
             item.lease_expires_at > stamp &&
             item.claimed_by

@@ -65,7 +65,7 @@ function sandbox({ siteRole = 'public', adminRole = 'admin', venv = true } = {})
     'exit 0\n'))
   for (const name of fs.readdirSync(shims)) fs.chmodSync(path.join(shims, name), 0o755)
 
-  // 三个单元文件（site/admin 做角色检查，control 只检查单元存在）
+  // 三个单元文件：site/admin 检查角色；control 还必须声明 loopback 绑定与 cgroup 硬限制。
   const units = path.join(home, '.config', 'systemd', 'user')
   fs.mkdirSync(units, { recursive: true })
   const unit = (role, port) => [
@@ -78,7 +78,12 @@ function sandbox({ siteRole = 'public', adminRole = 'admin', venv = true } = {})
   fs.writeFileSync(path.join(units, 'course-admin.service'), unit(adminRole, 3101))
   fs.writeFileSync(path.join(units, 'course-control.service'), [
     '[Service]',
-    'EnvironmentFile=-%h/.course-worker/env',
+    'EnvironmentFile=%h/.course-worker/control-env',
+    'Environment=COURSE_CONTROL_HOST=127.0.0.1',
+    'Environment=COURSE_CONTROL_PORT=3102',
+    'KillMode=control-group',
+    'CPUQuota=80%',
+    'MemoryMax=900M',
     'ExecStart=__NODE__ apps/control/bin/serve.mjs'
   ].join('\n') + '\n')
 
@@ -304,3 +309,24 @@ test('单元没有显式声明角色：切换前就拒绝，不留目录、不�
 
   fs.rmSync(box.home, { recursive: true, force: true })
 })
+
+test('control 单元缺少 loopback/cgroup 保护：切换前拒绝；恢复真实约束后可发布', async () => {
+  const box = sandbox()
+  const controlUnit = path.join(box.home, '.config', 'systemd', 'user', 'course-control.service')
+  const original = fs.readFileSync(controlUnit, 'utf8')
+  fs.writeFileSync(controlUnit, original.replace('KillMode=control-group\n', ''))
+
+  const rejected = await run(box)
+  assert.notEqual(rejected.code, 0)
+  assert.match(rejected.stderr, /KillMode=control-group/)
+  assert.equal(currentOf(box), '', 'control 隔离约束缺失时绝不能切换')
+  assert.deepEqual(releaseDirs(box), [], '拒绝发布后不得留下 release 目录')
+
+  fs.writeFileSync(controlUnit, original)
+  const retry = await run(box)
+  assert.equal(retry.code, 0, retry.stdout + retry.stderr)
+  assert.ok(currentOf(box).includes('releases'))
+
+  fs.rmSync(box.home, { recursive: true, force: true })
+})
+

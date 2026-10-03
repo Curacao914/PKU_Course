@@ -127,13 +127,13 @@ check_roles() {
     fi
     if [ "$expected" = "control" ]; then
       grep -q '^Environment=COURSE_CONTROL_HOST=127.0.0.1$' "$unit" ||
-        fail "$name 必须显式绑定 COURSE_CONTROL_HOST=127.0.0.1"
+        fail "$name 必须显式绑定 COURSE_CONTROL_HOST=127.0.0.1；请先重跑 deploy/install-units.sh"
       grep -q '^KillMode=control-group$' "$unit" ||
-        fail "$name 必须使用 KillMode=control-group"
+        fail "$name 必须使用 KillMode=control-group；请先重跑 deploy/install-units.sh"
       grep -q '^CPUQuota=' "$unit" ||
-        fail "$name 缺少 CPUQuota cgroup 限额"
+        fail "$name 缺少 CPUQuota cgroup 限额；请先重跑 deploy/install-units.sh"
       grep -q '^MemoryMax=' "$unit" ||
-        fail "$name 缺少 MemoryMax cgroup 限额"
+        fail "$name 缺少 MemoryMax cgroup 限额；请先重跑 deploy/install-units.sh"
       log "   · $name role=control loopback+cgroup=ok 健康端口=$(service_port "$entry")"
       continue
     fi
