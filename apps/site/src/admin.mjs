@@ -1744,7 +1744,7 @@ export function createAdminHandler({
           iat: nowSeconds,
           exp: nowSeconds + COURSE_SESSION_TTL_SECONDS
         }
-        const destination = ticket.role === 'owner' ? (next === '/' ? '/admin' : next) : '/'
+        const destination = ticket.role === 'owner' ? next : '/'
         res.writeHead(302, {
           location: destination,
           'set-cookie': sessionCookie(session, ssoKey),
@@ -1761,7 +1761,23 @@ export function createAdminHandler({
         nowSeconds
       )
 
-      if (pathname === '/' || pathname === '/admin' || pathname === '/admin/') {
+      if (pathname === '/_auth/start') {
+        const next = safeCoursePath(url.searchParams.get('next'), '/')
+        const destination = session && session.role === 'owner' ? next : session ? '/' : ssoLocation(next)
+        res.writeHead(302, { location: destination, 'cache-control': 'no-store' })
+        res.end()
+        return true
+      }
+
+      if (pathname === '/_auth/session') {
+        sendJson(res, 200, {
+          authenticated: Boolean(session),
+          role: session?.role || ''
+        })
+        return true
+      }
+
+      if (pathname === '/admin' || pathname === '/admin/') {
         const host = String(req.headers.host || '').split(':')[0]
         if (host === 'cf.law-tech.dev') {
           res.writeHead(302, { location: 'https://course.law-tech.dev/', 'cache-control': 'no-store' })
@@ -1769,22 +1785,12 @@ export function createAdminHandler({
           return true
         }
         if (!session) {
-          res.writeHead(302, { location: ssoLocation(pathname === '/' ? '/' : '/admin'), 'cache-control': 'no-store' })
+          res.writeHead(302, { location: ssoLocation('/admin'), 'cache-control': 'no-store' })
           res.end()
           return true
         }
         if (session.role !== 'owner') {
-          const body = Buffer.from('<!doctype html><meta charset="utf-8"><title>课程</title><main style="font:16px system-ui;padding:48px;max-width:680px;margin:auto"><h1>课程</h1><p>当前账号的课程工作台正在接入。</p></main>')
-          res.writeHead(403, {
-            'content-type': 'text/html; charset=utf-8',
-            'cache-control': 'no-store',
-            'content-length': body.length
-          })
-          res.end(body)
-          return true
-        }
-        if (pathname === '/') {
-          res.writeHead(302, { location: '/admin', 'cache-control': 'no-store' })
+          res.writeHead(302, { location: '/', 'cache-control': 'no-store' })
           res.end()
           return true
         }

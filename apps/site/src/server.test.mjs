@@ -63,7 +63,7 @@ test('startSiteServer forwards SSO key so Course callback can establish an owner
     })
 
     assert.equal(response.status, 302)
-    assert.equal(response.headers.get('location'), '/admin')
+    assert.equal(response.headers.get('location'), '/')
     assert.match(response.headers.get('set-cookie') || '', /lawtech_course_session=/)
   } finally {
     await site.close()

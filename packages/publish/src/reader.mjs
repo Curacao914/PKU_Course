@@ -55,6 +55,7 @@ export const READER_ICONS = {
   printer: '<path d="M7 9V3.8h10V9"/><rect x="3.5" y="9" width="17" height="7.2" rx="1.6"/><path d="M7 14.2h10V20H7z"/>',
   arrowUp: '<path d="M12 19V6"/><path d="M6.5 11.5L12 6l5.5 5.5"/>',
   menu: '<path d="M4 7h16M4 12h16M4 17h16"/>',
+  manage: '<rect x="3.5" y="4" width="17" height="16" rx="3"/><path d="M7.5 9h3M7.5 13h9M7.5 17h5.5"/>',
   // 阅读设置：两根带滑块的横杆。齿轮在这个尺寸下会糊成一团，滑杆一眼就是"可调"
   sliders: '<path d="M4 8h5M15 8h5M4 16h7M17 16h3"/><circle cx="12" cy="8" r="2.2"/><circle cx="14" cy="16" r="2.2"/>',
   // 一页纸摘要：一张带折角的纸加几道横线（首页表格里"一页纸"三个字会被挤换行，所以用图标）

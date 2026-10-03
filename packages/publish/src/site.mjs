@@ -123,6 +123,17 @@ a:hover { color: var(--accent-ink); }
 .topbar nav { display: flex; gap: 18px; font-size: 14px; }
 .topbar nav a { color: var(--muted); }
 .topbar nav a:hover { color: var(--ink); }
+.course-admin-link {
+  display: none; width: 34px; height: 34px; flex: none; align-items: center; justify-content: center;
+  border-radius: 10px; color: var(--muted); border: 1px solid transparent;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
+}
+.course-admin-link.is-visible { display: inline-flex; }
+.course-admin-link:hover { color: var(--ink); background: var(--bg-soft); border-color: var(--line); }
+.course-admin-link svg {
+  width: 17px; height: 17px; stroke: currentColor; fill: none; stroke-width: 1.7;
+  stroke-linecap: round; stroke-linejoin: round;
+}
 
 .wrap { max-width: 760px; margin: 0 auto; padding: 40px 24px 96px; }
 /* 内容区的基准字号跟着阅读设置走（宽版的首页/索引/地图也用 .wrap）：里面的字号都写成
@@ -600,7 +611,7 @@ details.note-meta pre { background: var(--bg-soft); border-radius: var(--radius)
   .topbar:not(:has(#tools)) { height: auto; }
   .topbar:not(:has(#tools)) .inner {
     min-height: var(--header-h); height: auto; padding: 7px 14px 6px;
-    display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 4px 10px;
+    display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: 4px 6px;
   }
   .topbar:not(:has(#tools)) .brand {
     grid-column: 1; grid-row: 1; align-self: center;
@@ -618,6 +629,7 @@ details.note-meta pre { background: var(--bg-soft); border-radius: var(--radius)
     border-radius: 8px; white-space: nowrap;
   }
   .topbar:not(:has(#tools)) .prefmenu { grid-column: 2; grid-row: 1; align-self: center; justify-self: end; }
+  .topbar:not(:has(#tools)) .course-admin-link { grid-column: 3; grid-row: 1; align-self: center; justify-self: end; }
   .topbar .navmenu, .topbar .tools { flex: none; }
   .navmenu .nav-pop { max-width: calc(100vw - 24px); }
   .prefmenu .pref-pop { min-width: 0; width: min(170px, calc(100vw - 24px)); }
@@ -988,6 +1000,19 @@ if (blocks.length) {
  * 所以这段脚本放在**每一页**的外壳里，并且在样式之后立刻执行——先应用再绘制，
  * 否则深色用户每次翻页都要被闪一下白。
  */
+const COURSE_SESSION_SCRIPT = '<script>' + [
+  '(function () {',
+  '  var link = document.querySelector("[data-course-admin]")',
+  '  if (!link) return',
+  '  fetch("/_auth/session", { credentials: "same-origin", cache: "no-store" })',
+  '    .then(function (response) { return response.ok ? response.json() : null })',
+  '    .then(function (state) {',
+  '      if (state && state.authenticated && state.role === "owner") link.classList.add("is-visible")',
+  '    })',
+  '    .catch(function () {})',
+  '})();',
+  '</script>'].join('\n')
+
 const PREF_SCRIPT = '<script>' + [
   '(function () {',
   '  var root = document.documentElement',
@@ -1016,7 +1041,11 @@ function pageShell({ title, description, body, canonical = '', scripts = '', lay
       `<div class="nav-pop">${navLinks}</div></details>`
     : `<nav>${navLinks}</nav>` + settingsMenu()
   // 阅读页/一页纸页的这三个设置由工具栏图标排负责，不再挂第二个入口（否则一页上有两套同样的控件）
-  const shellScripts = topRight ? scripts : [scripts, PREF_MENU_SCRIPT].filter(Boolean).join('\n')
+  const shellScripts = [
+    topRight ? scripts : [scripts, PREF_MENU_SCRIPT].filter(Boolean).join('\n'),
+    COURSE_SESSION_SCRIPT
+  ].filter(Boolean).join('\n')
+  const courseAdminLink = '<a class="course-admin-link" data-course-admin href="/admin" title="进入管理" aria-label="进入管理">' + svgIcon('manage') + '</a>'
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -1036,6 +1065,7 @@ ${PREF_SCRIPT}
   <span class="spacer"></span>
   ${topRight}
   ${navHtml}
+  ${courseAdminLink}
 </div></header>
 ${layout === 'shell' ? '<div class="shell">' : layout === 'reading' ? '<div class="reading" id="reading">'
     : layout === 'wide' ? '<div class="wrap wide">'

@@ -217,6 +217,14 @@ test('the reading page keeps its tools in the top bar instead of a floating pane
   assert.ok(!home.includes('title="站点导航"'), '首页的导航不收进下拉')
 })
 
+test('public pages include a hidden owner management entry backed by Course session state', () => {
+  const html = renderHomePage([record()])
+  assert.match(html, /data-course-admin/)
+  assert.match(html, /href="\/admin"/)
+  assert.match(html, /\/_auth\/session/)
+  assert.match(html, /course-admin-link/)
+})
+
 test('every page without the reading toolbar still offers 深浅 / 底色 / 字号', () => {
   // 用户的要求：这三项设置以前只有笔记页与一页纸页能改，首页、索引、地图、文档、搜索
   // 一个入口都没有——而它们是同一批 localStorage 键，本来就该处处能改。
