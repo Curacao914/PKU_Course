@@ -26,8 +26,8 @@ Environment=COURSE_SITE_ROOT=%h/.course-worker/site
 Environment=COURSE_SITE_PORT=3100
 Environment=COURSE_SITE_HOST=127.0.0.1
 Environment=COURSE_ASSETS_DIR=%h/.course-worker/assets
-# 浏览器访问 /admin 时 302 到直连域名（管理台不在这个进程里）
-Environment=COURSE_ADMIN_ORIGIN=https://admin.law-tech.dev
+# 浏览器访问 /admin 时 302 到正式课程域名；nginx 会把 /admin 分流到管理进程。
+Environment=COURSE_ADMIN_ORIGIN=https://course.law-tech.dev
 # 角色由单元钉死，env.public 改不动它；缺失时进程会拒绝启动（不允许静默退回 all）
 Environment=COURSE_SITE_ROLE=public
 ExecStart=__NODE__ apps/site/bin/serve.mjs

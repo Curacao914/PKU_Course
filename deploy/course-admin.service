@@ -12,7 +12,7 @@
 # 不走 Cloudflare——管理台的动作最长十几分钟，会被 Cloudflare 的 100 秒上限掐断。
 [Unit]
 Description=course.law-tech.dev 管理台与 worker 触发口（完整环境，127.0.0.1:3101）
-Documentation=https://admin.law-tech.dev
+Documentation=https://course.law-tech.dev/admin
 After=network-online.target
 Wants=network-online.target
 

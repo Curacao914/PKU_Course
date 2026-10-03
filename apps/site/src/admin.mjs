@@ -1695,11 +1695,11 @@ export function createAdminHandler({
     /** @returns {boolean} 是否已处理该请求 */
     async handle(req, res, pathname, url, { adminToken } = {}) {
       if (pathname === '/admin' || pathname === '/admin/') {
-        // 控制台必须走直连域名：它触发的动作最长要跑十几分钟，走 Cloudflare 会被
-        // 100 秒上限掐断；上传几十兆课件时，直连也是唯一跑得动的路。
+        // course.law-tech.dev 是统一的课程入口；管理台长动作已改为 job + 轮询，
+        // 可以安全经 Cloudflare Tunnel。cf.law-tech.dev 只保留为兜底别名。
         const host = String(req.headers.host || '').split(':')[0]
-        if (host === 'course.law-tech.dev' || host === 'cf.law-tech.dev') {
-          res.writeHead(302, { location: 'https://admin.law-tech.dev/admin', 'cache-control': 'no-store' })
+        if (host === 'cf.law-tech.dev') {
+          res.writeHead(302, { location: 'https://course.law-tech.dev/admin', 'cache-control': 'no-store' })
           res.end()
           return true
         }
