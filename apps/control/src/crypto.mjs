@@ -13,10 +13,12 @@ function resolveKey(raw = process.env.COURSE_ACCOUNT_ENCRYPTION_KEY || '') {
   return key
 }
 
-export function encryptSecret(value, rawKey) {
+export function encryptSecret(value, rawKey, aad) {
+  if (typeof aad !== 'string' || !aad) throw new Error('AAD is required')
   const key = resolveKey(rawKey)
   const iv = crypto.randomBytes(12)
   const cipher = crypto.createCipheriv('aes-256-gcm', key, iv)
+  cipher.setAAD(Buffer.from(aad, 'utf8'))
   const ciphertext = Buffer.concat([cipher.update(String(value), 'utf8'), cipher.final()])
   const tag = cipher.getAuthTag()
   return {
@@ -26,10 +28,12 @@ export function encryptSecret(value, rawKey) {
   }
 }
 
-export function decryptSecret(record, rawKey) {
+export function decryptSecret(record, rawKey, aad) {
   if (!record?.ciphertext) return ''
+  if (typeof aad !== 'string' || !aad) throw new Error('AAD is required')
   const key = resolveKey(rawKey)
   const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(record.iv, 'base64'))
+  decipher.setAAD(Buffer.from(aad, 'utf8'))
   decipher.setAuthTag(Buffer.from(record.authTag || record.auth_tag, 'base64'))
   const plain = Buffer.concat([
     decipher.update(Buffer.from(record.ciphertext, 'base64')),
@@ -38,8 +42,9 @@ export function decryptSecret(record, rawKey) {
   return plain.toString('utf8')
 }
 
-export function encryptFields(prefix, value, rawKey) {
-  const encrypted = encryptSecret(value, rawKey)
+export function encryptFields(prefix, value, rawKey, ownerId) {
+  if (!ownerId) throw new Error('AAD owner is required')
+  const encrypted = encryptSecret(value, rawKey, `${ownerId}:pku:${prefix}`)
   return {
     [prefix + '_ciphertext']: encrypted.ciphertext,
     [prefix + '_iv']: encrypted.iv,
@@ -47,11 +52,12 @@ export function encryptFields(prefix, value, rawKey) {
   }
 }
 
-export function decryptFields(prefix, row, rawKey) {
+export function decryptFields(prefix, row, rawKey, ownerId) {
   if (!row?.[prefix + '_ciphertext']) return ''
+  if (!ownerId) throw new Error('AAD owner is required')
   return decryptSecret({
     ciphertext: row[prefix + '_ciphertext'],
     iv: row[prefix + '_iv'],
     authTag: row[prefix + '_tag']
-  }, rawKey)
+  }, rawKey, `${ownerId}:pku:${prefix}`)
 }

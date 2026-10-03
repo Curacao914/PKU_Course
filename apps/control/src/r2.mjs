@@ -20,14 +20,14 @@ function safeName(value) {
     .slice(0, 120) || 'material.bin'
 }
 
-export function createR2(env = process.env) {
-  const endpoint = env.R2_ENDPOINT
-  const bucket = env.R2_BUCKET
-  const accessKeyId = env.R2_ACCESS_KEY_ID
-  const secretAccessKey = env.R2_SECRET_ACCESS_KEY
+export function createR2(env = process.env, { client: injectedClient, sign = getSignedUrl } = {}) {
+  const endpoint = env.COURSE_MEMBER_R2_ENDPOINT
+  const bucket = env.COURSE_MEMBER_R2_BUCKET
+  const accessKeyId = env.COURSE_MEMBER_R2_ACCESS_KEY_ID
+  const secretAccessKey = env.COURSE_MEMBER_R2_SECRET_ACCESS_KEY
   if (!endpoint || !bucket || !accessKeyId || !secretAccessKey) throw new Error('R2 未配置')
 
-  const client = new S3Client({
+  const client = injectedClient || new S3Client({
     region: 'auto',
     endpoint,
     credentials: { accessKeyId, secretAccessKey }
@@ -37,6 +37,7 @@ export function createR2(env = process.env) {
     let token
     let bytes = 0
     let objects = 0
+    assertOwner(ownerId)
     const prefix = 'users/' + ownerId + '/'
     do {
       const page = await client.send(new ListObjectsV2Command({
@@ -55,7 +56,8 @@ export function createR2(env = process.env) {
 
   async function presignUpload(ownerId, fileName, mimeType, fileSize, maxBytes, quotaBytes) {
     const bytes = Number(fileSize || 0)
-    if (!Number.isFinite(bytes) || bytes <= 0) throw new Error('文件大小无效')
+    if (!Number.isSafeInteger(bytes) || bytes <= 0) throw new Error('文件大小无效')
+    if (!Number.isSafeInteger(Number(maxBytes)) || Number(maxBytes) <= 0 || !Number.isSafeInteger(Number(quotaBytes)) || Number(quotaBytes) <= 0) throw new Error('配额无效')
     if (bytes > Number(maxBytes)) throw new Error('文件超过单文件上限')
 
     const current = await usage(ownerId)
@@ -71,7 +73,7 @@ export function createR2(env = process.env) {
       ContentLength: bytes,
       Metadata: { owner: ownerId }
     })
-    const url = await getSignedUrl(client, command, { expiresIn: 15 * 60 })
+    const url = await sign(client, command, { expiresIn: 15 * 60, signableHeaders: new Set(['content-length', 'content-type']) })
     return {
       key,
       url,
@@ -84,16 +86,19 @@ export function createR2(env = process.env) {
     }
   }
 
-  async function head(key) {
+  async function head(ownerId, key) {
+    assertMaterialKey(ownerId, key)
     const result = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }))
     return { bytes: Number(result.ContentLength || 0), contentType: result.ContentType || '' }
   }
 
-  async function remove(key) {
+  async function remove(ownerId, key) {
+    assertMaterialKey(ownerId, key)
     await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }))
   }
 
-  async function download(key, destination) {
+  async function download(ownerId, key, destination) {
+    assertMaterialKey(ownerId, key)
     const result = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }))
     fs.mkdirSync(path.dirname(destination), { recursive: true })
     await pipeline(result.Body, fs.createWriteStream(destination, { mode: 0o600 }))
@@ -101,4 +106,13 @@ export function createR2(env = process.env) {
   }
 
   return { usage, presignUpload, head, remove, download }
+}
+
+function assertOwner(ownerId) {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ownerId)) throw new Error('INVALID_OWNER')
+}
+export function assertMaterialKey(ownerId, key) {
+  assertOwner(ownerId)
+  if (typeof key !== 'string' || !key.startsWith('users/' + ownerId + '/materials/') ||
+    key.split('/').some(part => !part || part === '.' || part === '..') || /[\\\x00-\x1f]/.test(key)) throw new Error('INVALID_STORAGE_KEY')
 }

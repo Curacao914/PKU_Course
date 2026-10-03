@@ -27,7 +27,7 @@ export function createAccountStore(env = process.env) {
 
   async function credentials(ownerId) {
     const rows = await credentialRows(ownerId)
-    return Object.fromEntries(rows.map(row => [row.provider, decryptSecret(row, encryptionKey)]))
+    return Object.fromEntries(rows.map(row => [row.provider, decryptSecret(row, encryptionKey, `${ownerId}:provider:${row.provider}`)]))
   }
 
   async function credentialStatus(ownerId) {
@@ -41,7 +41,7 @@ export function createAccountStore(env = process.env) {
     if (!PROVIDERS.has(provider)) throw new Error('未知凭据类型')
     const value = String(secret || '').trim()
     if (!value) throw new Error('凭据不能为空')
-    const encrypted = encryptSecret(value, encryptionKey)
+    const encrypted = encryptSecret(value, encryptionKey, `${ownerId}:provider:${provider}`)
     const { error } = await supabase.from('provider_credentials').upsert({
       owner_id: ownerId,
       provider,
@@ -73,9 +73,9 @@ export function createAccountStore(env = process.env) {
     const row = await getPkuConnection(ownerId)
     return {
       row,
-      username: decryptFields('username', row, encryptionKey),
-      password: decryptFields('password', row, encryptionKey),
-      session: decryptFields('session', row, encryptionKey)
+      username: decryptFields('username', row, encryptionKey, ownerId),
+      password: decryptFields('password', row, encryptionKey, ownerId),
+      session: decryptFields('session', row, encryptionKey, ownerId)
     }
   }
 
@@ -86,8 +86,8 @@ export function createAccountStore(env = process.env) {
     const { error } = await supabase.from('pku_connections').upsert({
       owner_id: ownerId,
       mode: 'password',
-      ...encryptFields('username', user, encryptionKey),
-      ...encryptFields('password', pass, encryptionKey),
+      ...encryptFields('username', user, encryptionKey, ownerId),
+      ...encryptFields('password', pass, encryptionKey, ownerId),
       status: 'needs_reauth',
       updated_at: new Date().toISOString()
     }, { onConflict: 'owner_id' })
@@ -97,7 +97,7 @@ export function createAccountStore(env = process.env) {
   async function savePkuSession(ownerId, session, { mode, status = 'connected', errorText = '' } = {}) {
     const patch = {
       owner_id: ownerId,
-      ...encryptFields('session', String(session || ''), encryptionKey),
+      ...encryptFields('session', String(session || ''), encryptionKey, ownerId),
       status,
       last_error: errorText,
       last_verified_at: status === 'connected' ? new Date().toISOString() : null,
@@ -126,22 +126,30 @@ export function createAccountStore(env = process.env) {
 
   async function setPkuSelection(ownerId, { selectedCourseKeys = [], autoSyncEnabled = false }) {
     const current = await getPkuConnection(ownerId)
+    const selected = validateCourseSelection(selectedCourseKeys, current?.scanned_course_keys || [])
     await markPku(ownerId, {
-      selected_course_keys: [...new Set(selectedCourseKeys.map(String).filter(Boolean))],
+      selected_course_keys: selected,
       auto_sync_enabled: Boolean(autoSyncEnabled && current?.password_ciphertext)
     })
   }
 
+  async function saveScannedCourses(ownerId, keys, {replace = true} = {}) {
+    const current = await getPkuConnection(ownerId)
+    const scanned = [...new Set([...(replace ? [] : current?.scanned_course_keys || []), ...keys])]
+    await markPku(ownerId, { scanned_course_keys: scanned,
+      selected_course_keys: (current?.selected_course_keys || []).filter(key => scanned.includes(key)) })
+  }
+
   async function resourceLimits(ownerId) {
     const user = await profile(ownerId)
-    const { data, error } = await supabase.from('user_resource_limits').select('*').eq('owner_id', ownerId).maybeSingle()
+    const { data, error } = await supabase.from('user_resource_limits').select('owner_id,storage_quota_bytes,max_file_bytes').eq('owner_id', ownerId).maybeSingle()
     if (error) throw error
     if (data) return data
     const defaults = user.role === 'owner'
-      ? { storage_quota_bytes: 1099511627776, max_active_jobs: 4, max_file_bytes: 2147483648, hls_concurrency: 6, owner_reserved: true }
-      : { storage_quota_bytes: 1073741824, max_active_jobs: 1, max_file_bytes: 268435456, hls_concurrency: 1, owner_reserved: false }
+      ? { storage_quota_bytes: 1099511627776, max_file_bytes: 2147483648 }
+      : { storage_quota_bytes: 1073741824, max_file_bytes: 268435456 }
     const { data: created, error: createError } = await supabase.from('user_resource_limits')
-      .upsert({ owner_id: ownerId, ...defaults }, { onConflict: 'owner_id' }).select('*').single()
+      .upsert({ owner_id: ownerId, ...defaults }, { onConflict: 'owner_id' }).select('owner_id,storage_quota_bytes,max_file_bytes').single()
     if (createError) throw createError
     return created
   }
@@ -200,7 +208,7 @@ export function createAccountStore(env = process.env) {
         status: 'published',
         metadata,
         updated_at: new Date().toISOString()
-      }).eq('id', existing.id).select('*').single()
+      }).eq('id', existing.id).eq('owner_id', ownerId).select('*').single()
       if (error) throw error
       await notifyEmail(ownerId, {
         eventKey: 'course-note:' + replayKey + ':' + data.updated_at,
@@ -269,7 +277,14 @@ export function createAccountStore(env = process.env) {
   return {
     profile, credentialStatus, credentials, putCredential, deleteCredential,
     getPkuConnection, pkuSecrets, putPkuPassword, savePkuSession, markPku,
-    deletePkuPassword, setPkuSelection, resourceLimits,
+    deletePkuPassword, setPkuSelection, saveScannedCourses, resourceLimits,
     notifyEmail, autoSyncOwners, savePrivateNote, createMaterial, getMaterial, markMaterial
   }
+}
+
+export function validateCourseSelection(selected, scanned) {
+  if (!Array.isArray(selected) || selected.some(key => typeof key !== 'string' || !scanned.includes(key))) {
+    throw Object.assign(new Error('只能选择当前账户已扫描的课程'), {status:400})
+  }
+  return [...new Set(selected)]
 }

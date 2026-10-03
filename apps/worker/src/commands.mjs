@@ -2189,7 +2189,7 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
     if (!fs.existsSync(notePath)) throw new Error(`找不到私有笔记：${notePath}`)
     const markdown = fs.readFileSync(notePath, 'utf8')
     const endpoint = String(env.COURSE_CONTROL_LOCAL_URL || '').replace(/\/$/, '')
-    const secret = String(env.COURSE_CONTROL_SECRET || '')
+    const secret = String(env.COURSE_JOB_TOKEN || '')
     const ownerId = String(config.account?.ownerId || '')
     if (!endpoint || !secret || !ownerId) throw new Error('普通用户私有发布的控制面配置不完整')
 
@@ -2198,6 +2198,7 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
       headers: {
         authorization: 'Bearer ' + secret,
         'x-course-owner-id': ownerId,
+        'x-course-job-id': String(env.COURSE_JOB_ID || ''),
         'content-type': 'application/json'
       },
       body: JSON.stringify({ replayKey, courseName, lessonTitle, markdown })

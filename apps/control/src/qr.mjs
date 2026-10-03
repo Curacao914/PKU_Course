@@ -68,7 +68,8 @@ export function createQrSessions({ env, store }) {
     const executablePath = env.COURSE_CHROME_PATH
     const browser = await chromium.launch({
       executablePath: executablePath || undefined,
-      headless: true
+      headless: true,
+      env: Object.fromEntries(['PATH','HOME','LANG','LC_ALL','TZ','SYSTEMROOT','WINDIR'].filter(key => typeof env[key] === 'string').map(key => [key,env[key]]))
     })
     const context = await browser.newContext({ viewport: { width: 1200, height: 900 } })
     const page = await context.newPage()

@@ -1,4 +1,4 @@
-import crypto from 'node:crypto'
+import { createRequestVerifier, createJobTokens } from './server/auth.mjs'
 import http from 'node:http'
 import { createAccountStore } from './store.mjs'
 import { createJobQueue } from './jobs.mjs'
@@ -26,29 +26,7 @@ function send(res, status, body) {
   res.end(data)
 }
 
-function sameSecret(given, expected) {
-  const a = Buffer.from(String(given || ''))
-  const b = Buffer.from(String(expected || ''))
-  return a.length === b.length && a.length > 0 && crypto.timingSafeEqual(a, b)
-}
-
-function authenticate(req, env) {
-  const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '')
-  if (!sameSecret(token, env.COURSE_CONTROL_SECRET)) {
-    const error = new Error('UNAUTHORIZED')
-    error.status = 401
-    throw error
-  }
-  const ownerId = String(req.headers['x-course-owner-id'] || '').trim()
-  if (!/^[0-9a-f-]{36}$/i.test(ownerId)) {
-    const error = new Error('OWNER_ID_REQUIRED')
-    error.status = 400
-    throw error
-  }
-  return ownerId
-}
-
-async function readJson(req) {
+async function readBody(req) {
   let size = 0
   const chunks = []
   for await (const chunk of req) {
@@ -60,8 +38,12 @@ async function readJson(req) {
     }
     chunks.push(chunk)
   }
-  if (!chunks.length) return {}
-  try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch {
+  return Buffer.concat(chunks)
+}
+
+function readJson(req) {
+  if (!req.rawBody.length) return {}
+  try { return JSON.parse(req.rawBody.toString('utf8')) } catch {
     const error = new Error('JSON 格式错误')
     error.status = 400
     throw error
@@ -86,12 +68,9 @@ function publicPku(row) {
   }
 }
 
-export function createControlServer({ env = process.env } = {}) {
-  if (!env.COURSE_CONTROL_SECRET) throw new Error('COURSE_CONTROL_SECRET 未配置')
-  const store = createAccountStore(env)
-  const r2 = createR2(env)
-  const jobs = createJobQueue({ env, store, r2 })
-  const qr = createQrSessions({ env, store })
+export function createControlServer({ env = process.env, store = createAccountStore(env), r2 = createR2(env), qr = createQrSessions({env, store}), jobTokens = createJobTokens() } = {}) {
+  const authenticate = createRequestVerifier({ key: env.COURSE_CONTROL_SIGNING_KEY })
+  const jobs = createJobQueue({ env, store, r2, jobTokens })
 
   const syncIntervalMs = Math.max(15, Number(env.COURSE_MEMBER_SYNC_INTERVAL_MINUTES || 60)) * 60 * 1000
   const enqueueAutoSync = async () => {
@@ -105,7 +84,7 @@ export function createControlServer({ env = process.env } = {}) {
   timer.unref?.()
   setTimeout(enqueueAutoSync, 15_000).unref?.()
 
-  return http.createServer(async (req, res) => {
+  const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, 'http://course-control.local')
       if (url.pathname === '/health') {
@@ -113,7 +92,18 @@ export function createControlServer({ env = process.env } = {}) {
         return
       }
 
-      const ownerId = authenticate(req, env)
+      req.rawBody = await readBody(req)
+      let ownerId
+      if (url.pathname === '/v1/internal/private-note') {
+        if (req.method !== 'POST') throw Object.assign(new Error('UNAUTHORIZED'), { status: 401 })
+        const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '')
+        const claims = jobTokens.verify(token, {
+          ownerId: req.headers['x-course-owner-id'], jobId: req.headers['x-course-job-id'], scope: 'private-note:write'
+        })
+        ownerId = claims.ownerId
+      } else {
+        ownerId = authenticate({ headers: req.headers, method: req.method, path: req.url, body: req.rawBody })
+      }
       const profile = await store.profile(ownerId)
 
       if (req.method === 'GET' && url.pathname === '/v1/tasks') {
@@ -251,20 +241,20 @@ export function createControlServer({ env = process.env } = {}) {
           return
         }
         const [head, limits, usage] = await Promise.all([
-          r2.head(key), store.resourceLimits(ownerId), r2.usage(ownerId)
+          r2.head(ownerId, key), store.resourceLimits(ownerId), r2.usage(ownerId)
         ])
         if (!isAllowedMaterial(body.fileName)) {
-          await r2.remove(key).catch(() => {})
+          await r2.remove(ownerId, key).catch(() => {})
           send(res, 400, { ok: false, error: '仅支持 PPT、PDF、Word 与 Excel 课件' })
           return
         }
         if (head.bytes > Number(limits.max_file_bytes)) {
-          await r2.remove(key).catch(() => {})
+          await r2.remove(ownerId, key).catch(() => {})
           send(res, 413, { ok: false, error: '文件超过单文件上限' })
           return
         }
         if (usage.bytes > Number(limits.storage_quota_bytes)) {
-          await r2.remove(key).catch(() => {})
+          await r2.remove(ownerId, key).catch(() => {})
           send(res, 413, { ok: false, error: '存储空间已超过限额' })
           return
         }
@@ -314,4 +304,6 @@ export function createControlServer({ env = process.env } = {}) {
       send(res, error.status || 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
     }
   })
+  server.on('close', () => { clearInterval(timer); jobs.close() })
+  return server
 }

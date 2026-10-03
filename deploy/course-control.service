@@ -7,10 +7,11 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=%h/course-runtime
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-EnvironmentFile=-%h/.course-worker/env
+EnvironmentFile=%h/.course-worker/control-env
 Environment=COURSE_CONTROL_HOST=127.0.0.1
 Environment=COURSE_CONTROL_PORT=3102
 ExecStart=__NODE__ apps/control/bin/serve.mjs
+KillMode=control-group
 Restart=on-failure
 RestartSec=3
 

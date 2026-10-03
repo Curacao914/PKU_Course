@@ -4,37 +4,44 @@ import os from 'node:os'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { DatabaseSync } from 'node:sqlite'
+import { createJobTokens } from './server/auth.mjs'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..')
 const courseBin = path.join(repoRoot, 'apps/worker/bin/course.mjs')
-const jobs = new Map()
-const queue = []
-let active = null
 
 function safeOwner(ownerId) {
-  return String(ownerId || '').replace(/[^a-zA-Z0-9_-]/g, '_')
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ownerId)) throw new Error('Invalid owner id')
+  return ownerId.toLowerCase()
 }
 
-function sanitizeMemberEnv(base, ownerId, accountRoot, credentials, pku, limits) {
-  const env = { ...base }
-  for (const key of [
-    'PKU_USERNAME', 'PKU_PASSWORD', 'PADDLEOCR_ACCESS_TOKEN', 'DASHSCOPE_API_KEY',
-    'COURSE_AI_API_KEY', 'SCHEDULE_AI_API_KEY', 'OPENAI_API_KEY',
-    'COURSE_OUTLINE_MODEL', 'COURSE_WRITER_MODEL', 'COURSE_REVIEWER_MODEL',
-    'COURSE_REVISION_MODEL', 'COURSE_FINAL_REVIEW_MODEL', 'COURSE_BRIEF_MODEL'
-  ]) env[key] = ''
+export function sanitizeMemberEnv(base, ownerId, accountRoot, credentials, pku, limits) {
+  // This is an allowlist, never a spread + denylist. NODE_OPTIONS/NODE_PATH are not safe system variables.
+  const env = {}
+  for (const key of ['PATH', 'LANG', 'LC_ALL', 'TZ', 'SYSTEMROOT', 'WINDIR']) {
+    if (typeof base[key] === 'string') env[key] = base[key]
+  }
+  env.HOME = accountRoot
+  env.TMPDIR = path.join(accountRoot, 'tmp')
+  env.COURSE_ENV_FILE = path.join(accountRoot, 'env')
+  for (const suffix of ['ENDPOINT', 'BUCKET', 'ACCESS_KEY_ID', 'SECRET_ACCESS_KEY']) {
+    if (base['COURSE_MEMBER_R2_' + suffix]) env['R2_' + suffix] = base['COURSE_MEMBER_R2_' + suffix]
+  }
 
+  for (const key of ['COURSE_CHROME_PATH', 'COURSE_PYTHON', 'COURSE_FFMPEG', 'COURSE_FFPROBE']) {
+    if (base[key]) env[key] = base[key]
+  }
   env.COURSE_ACCOUNT_OWNER_ID = ownerId
   env.COURSE_RESOURCE_CLASS = 'member'
   env.COURSE_TASK_PRIORITY = '10'
   env.COURSE_SELECTED_COURSE_KEYS = JSON.stringify(pku.row?.selected_course_keys || [])
   env.COURSE_WORKER_SCRATCH_DIR = accountRoot
-  env.COURSE_LEDGER_PATH = path.join(base.COURSE_WORKER_SCRATCH_DIR || path.join(os.homedir(), '.course-worker'), 'ledger.sqlite')
+  env.COURSE_LEDGER_PATH = base.COURSE_LEDGER_PATH || path.join(base.COURSE_WORKER_SCRATCH_DIR || path.join(os.homedir(), '.course-worker'), 'ledger.sqlite')
   env.COURSE_MATERIALS_DIR = path.join(accountRoot, 'materials')
   env.COURSE_INBOX_DIR = path.join(accountRoot, 'inbox')
   env.COURSE_BROWSER_STORAGE_STATE = path.join(accountRoot, 'pku-session.json')
   env.COURSE_KEEP_MEDIA = '0'
-  env.COURSE_DOWNLOAD_CONCURRENCY = String(Math.max(1, Math.min(1, Number(limits?.hls_concurrency || 1))))
+  env.COURSE_DOWNLOAD_CONCURRENCY = '1'
   env.COURSE_MEMBER_MIN_FREE_BYTES = String(base.COURSE_MEMBER_MIN_FREE_BYTES || 12 * 1024 * 1024 * 1024)
   env.COURSE_ASR_ALLOW_PAID = '1'
   env.COURSE_CONTROL_LOCAL_URL = base.COURSE_CONTROL_LOCAL_URL || ('http://127.0.0.1:' + String(base.COURSE_CONTROL_PORT || 3102))
@@ -84,7 +91,7 @@ function parseLastJson(text) {
   return null
 }
 
-async function prepare(ownerId, env, store) {
+export async function prepare(ownerId, env, store) {
   const [profile, credentials, pku, limits] = await Promise.all([
     store.profile(ownerId),
     store.credentials(ownerId),
@@ -92,7 +99,13 @@ async function prepare(ownerId, env, store) {
     store.resourceLimits(ownerId)
   ])
   const root = path.join(env.COURSE_MEMBER_ROOT || path.join(os.homedir(), '.course-worker', 'accounts'), safeOwner(ownerId))
-  fs.mkdirSync(root, { recursive: true })
+  fs.mkdirSync(root, { recursive: true, mode: 0o700 })
+  fs.chmodSync(root, 0o700)
+  fs.mkdirSync(path.join(root, 'tmp'), { recursive: true, mode: 0o700 })
+  // Credentials stay in the child environment. An independent empty 0600 file prevents OWNER fallback.
+  const envPath = path.join(root, 'env')
+  fs.writeFileSync(envPath, '# MEMBER environment is injected by course-control.\n', { mode: 0o600 })
+  fs.chmodSync(envPath, 0o600)
   const statePath = path.join(root, 'pku-session.json')
   if (pku.session) {
     fs.writeFileSync(statePath, pku.session, { mode: 0o600 })
@@ -117,8 +130,10 @@ async function persistSession(ownerId, prepared, store, mode) {
   }
 }
 
-async function execute(job, env, store, r2) {
+async function execute(job, env, store, r2, jobTokens) {
   const prepared = await prepare(job.ownerId, env, store)
+  prepared.childEnv.COURSE_JOB_TOKEN = jobTokens.issue({ ownerId: job.ownerId, jobId: job.id })
+  prepared.childEnv.COURSE_JOB_ID = job.id
   const selected = prepared.pku.row?.selected_course_keys || []
   const mode = prepared.pku.row?.mode || 'qr'
   const results = []
@@ -133,7 +148,7 @@ async function execute(job, env, store, r2) {
       error: ''
     })
     try {
-      await r2.download(material.storage_path, local)
+      await r2.download(job.ownerId, material.storage_path, local)
       const args = [
         'materials', '--file', local,
         '--course', String(meta.courseName || ''),
@@ -202,6 +217,10 @@ async function execute(job, env, store, r2) {
     }
   }
 
+  if (job.kind === 'discover' && results.every(result => result.code === 0)) {
+    const keys = results.flatMap(result => (result.output?.courses || []).map(course => course.courseKey)).filter(key => typeof key === 'string' && key)
+    await store.saveScannedCourses(job.ownerId, keys, { replace: !job.payload?.courseKey })
+  }
   await persistSession(job.ownerId, prepared, store, mode)
 
   if (job.kind === 'sync') {
@@ -222,52 +241,64 @@ async function execute(job, env, store, r2) {
   return { ok: true, results }
 }
 
-async function pump(env, store, r2) {
-  if (active || !queue.length) return
-  const id = queue.shift()
-  const job = jobs.get(id)
-  if (!job) return pump(env, store, r2)
-  active = id
-  job.status = 'running'
-  job.startedAt = new Date().toISOString()
+export function ownerHasActiveLease(env) {
+  const ledgerPath = env.COURSE_LEDGER_PATH || path.join(env.COURSE_WORKER_SCRATCH_DIR || path.join(os.homedir(), '.course-worker'), 'ledger.sqlite')
+  if (!fs.existsSync(ledgerPath)) return false
+  const db = new DatabaseSync(ledgerPath, { readOnly: true })
   try {
-    job.result = await execute(job, env, store, r2)
-    job.status = job.result.ok ? 'succeeded' : 'failed'
-    if (!job.result.ok) job.error = '任务没有完成'
-  } catch (error) {
-    job.status = 'failed'
-    job.error = error instanceof Error ? error.message : String(error)
-  } finally {
-    job.finishedAt = new Date().toISOString()
-    active = null
-    queueMicrotask(() => pump(env, store, r2))
-  }
+    return Boolean(db.prepare("SELECT 1 FROM tasks WHERE resource_class = 'owner' AND claimed_by <> '' AND lease_expires_at > ? LIMIT 1").get(new Date().toISOString()))
+  } finally { db.close() }
 }
 
-export function createJobQueue({ env, store, r2 }) {
-  function enqueue(ownerId, kind, payload = {}) {
-    const existing = [...jobs.values()].find(job =>
-      job.ownerId === ownerId && ['queued', 'running'].includes(job.status)
-    )
-    if (existing) return existing
-    const job = {
-      id: crypto.randomUUID(), ownerId, kind, payload, status: 'queued',
-      createdAt: new Date().toISOString(), startedAt: null, finishedAt: null, result: null, error: ''
+export function createJobQueue({ env, store, r2, jobTokens = createJobTokens(),
+  executeJob = job => execute(job, env, store, r2, jobTokens),
+  ownerIsActive = () => ownerHasActiveLease(env), retryMs = 5000 }) {
+  const jobs = new Map()
+  const queue = []
+  let active = null
+  let timer = null
+  let closed = false
+  function schedule() {
+    if (closed || timer) return
+    timer = setTimeout(() => { timer = null; void pump() }, retryMs)
+    timer.unref?.()
+  }
+  async function pump() {
+    if (closed || active || !queue.length) return
+    // Fail closed on a ledger read error. Never start a MEMBER while OWNER state is unknown.
+    try { if (ownerIsActive()) { schedule(); return } } catch { schedule(); return }
+    const job = jobs.get(queue.shift())
+    active = job.id
+    job.status = 'running'
+    job.startedAt = new Date().toISOString()
+    try {
+      job.result = await executeJob(job)
+      job.status = job.result.ok ? 'succeeded' : 'failed'
+      if (!job.result.ok) job.error = '任务没有完成'
+    } catch (error) {
+      job.status = 'failed'
+      job.error = error instanceof Error ? error.message : String(error)
+    } finally {
+      jobTokens.revoke(job.id)
+      job.finishedAt = new Date().toISOString()
+      active = null
+      queueMicrotask(pump)
     }
+  }
+  function enqueue(ownerId, kind, payload = {}) {
+    const existing = [...jobs.values()].find(job => job.ownerId === ownerId && ['queued', 'running'].includes(job.status))
+    if (existing) return existing
+    const job = { id: crypto.randomUUID(), ownerId, kind, payload, status: 'queued',
+      createdAt: new Date().toISOString(), startedAt: null, finishedAt: null, result: null, error: '' }
     jobs.set(job.id, job)
     queue.push(job.id)
-    queueMicrotask(() => pump(env, store, r2))
+    queueMicrotask(pump)
     return job
   }
-
-  function get(ownerId, id) {
-    const job = jobs.get(id)
-    return job?.ownerId === ownerId ? job : null
+  return {
+    enqueue,
+    get(ownerId, id) { const job = jobs.get(id); return job?.ownerId === ownerId ? job : null },
+    list(ownerId) { return [...jobs.values()].filter(job => job.ownerId === ownerId).slice(-20).reverse() },
+    close() { closed = true; clearTimeout(timer); if (active) jobTokens.revoke(active) }
   }
-
-  function list(ownerId) {
-    return [...jobs.values()].filter(job => job.ownerId === ownerId).slice(-20).reverse()
-  }
-
-  return { enqueue, get, list }
 }
