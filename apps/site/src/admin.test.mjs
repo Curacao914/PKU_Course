@@ -488,45 +488,19 @@ test('the balance endpoint reports provider state without blocking the status pa
   assert.equal(body.balances.length, 2)
 })
 
-test('a console password can be set, used to log in, and changed', async () => {
+test('legacy console passwords no longer authenticate browser API access', async () => {
   const { handler, scratchRoot } = fixture()
-
-  // 还没设密码时，主令牌可用而密码不可用
-  const before = await call(handler, { url: '/api/admin/status' })
-  assert.equal(before.body.auth.passwordSet, false)
-  assert.equal(before.body.auth.masterTokenSet, true)
-
-  const weak = await call(handler, { method: 'PUT', url: '/api/admin/password', body: JSON.stringify({ password: '12345678' }) })
-  assert.equal(weak.res.state.status, 400)
-  assert.match(weak.body.message, /太好猜|至少/)
 
   const set = await call(handler, { method: 'PUT', url: '/api/admin/password', body: JSON.stringify({ password: 'wo-de-mi-ma-2026' }) })
   assert.equal(set.res.state.status, 200)
-  assert.equal(set.body.changed, true)
-
-  // 明文不落盘：文件里只有 salt 与 hash
   const onDisk = fs.readFileSync(path.join(scratchRoot, 'admin-password.json'), 'utf8')
-  assert.ok(!onDisk.includes('wo-de-mi-ma-2026'), '密码明文绝不能落盘')
-  assert.match(onDisk, /"scheme": "scrypt"/)
+  assert.ok(!onDisk.includes('wo-de-mi-ma-2026'), '旧密码文件即使存在也不能保存明文')
 
-  // 用新密码登录（而不是主令牌）
   const byPassword = await call(handler, { url: '/api/admin/status' }, { token: 'wo-de-mi-ma-2026' })
-  assert.equal(byPassword.res.state.status, 200)
-  assert.equal(byPassword.body.auth.passwordSet, true)
-  assert.equal(byPassword.body.auth.masterTokenSet, true, '主令牌仍在：它是找回路径')
+  assert.equal(byPassword.res.state.status, 401, '统一登录后旧 Course 密码不得继续作为浏览器凭据')
 
-  // 清除密码后只剩主令牌
-  const cleared = await call(handler, { method: 'PUT', url: '/api/admin/password', body: JSON.stringify({ action: 'clear' }) })
-  assert.equal(cleared.body.cleared, true)
-  assert.equal((await call(handler, { url: '/api/admin/status' })).body.auth.passwordSet, false)
-
-  // 限流放在最后：它按来源 IP 计数，会连带影响同一 IP 的后续请求
-  await call(handler, { method: 'PUT', url: '/api/admin/password', body: JSON.stringify({ password: 'wo-de-mi-ma-2026' }) })
-  for (let index = 0; index < 5; index += 1) {
-    await call(handler, { url: '/api/admin/status' }, { token: 'wrong-password' })
-  }
-  const throttled = await call(handler, { url: '/api/admin/status' }, { token: 'wo-de-mi-ma-2026' })
-  assert.equal(throttled.res.state.status, 429, '错太多次之后连正确凭据也要等窗口过去')
+  const byMaster = await call(handler, { url: '/api/admin/status' }, { token: TOKEN })
+  assert.equal(byMaster.res.state.status, 200, '服务器主令牌只保留为内部应急路径')
 })
 
 test('the admin API fails closed without a configured token', async () => {
@@ -727,26 +701,14 @@ test('a failing run is reported as not ok rather than swallowed', async () => {
   assert.match(JSON.stringify(finished.result), /AUTH_EXPIRED/)
 })
 
-test('the console page is served without a token so the user can enter one', async () => {
+test('the console page redirects unauthenticated browsers to law-tech SSO', async () => {
   const { handler } = fixture()
   const req = fakeRequest({ url: '/admin' })
   const res = fakeResponse()
   const handled = await handler.handle(req, res, '/admin', new URL('http://x/admin'), { adminToken: TOKEN })
   assert.equal(handled, true)
-  assert.equal(res.state.status, 200)
-  assert.match(res.state.headers['content-type'], /text\/html/)
-  assert.match(res.state.body, /管理台/, '无令牌时也要能打开页面输入令牌')
-  // 三个区：概览 / 课程 / 设置。
-  // 「笔记」那一区并进了课程详情（用户：'这个其实可以放进课程栏目里面去'）——
-  // 逐模块重写现在在课次详情面板里，不再单开一页。
-  assert.match(res.state.body, /data-tab="overview"/)
-  assert.match(res.state.body, /data-tab="courses"/)
-  assert.match(res.state.body, /data-tab="settings"/)
-  // 页面里的按钮必须挂上事件委托认的属性（曾经写成 data-run，点了没反应）
-  const buttons = res.state.body.match(/<button[^>]*>/g) || []
-  const stray = buttons.filter(tag => /data-run=/.test(tag))
-  assert.deepEqual(stray, [], '按钮不该使用事件委托不认识的属性')
-  assert.ok(!res.state.body.includes(TOKEN), '页面里不得内嵌令牌')
+  assert.equal(res.state.status, 302)
+  assert.match(res.state.headers.location, /^https:\/\/desk\.law-tech\.dev\/api\/course\/sso\?next=/)
 })
 
 test('the todo list only asks for courseware that would still change the outcome', async () => {

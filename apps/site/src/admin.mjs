@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -33,6 +33,71 @@ const ADMIN_PREFIX = '/api/admin/'
 const AUTH_FAILURE_LIMIT = 5
 const AUTH_FAILURE_WINDOW_MS = 5 * 60 * 1000
 const DEFAULT_RUN_TIMEOUT_MS = 15 * 60 * 1000
+
+const COURSE_SESSION_COOKIE = 'lawtech_course_session'
+const COURSE_SSO_ORIGIN = 'https://desk.law-tech.dev'
+const COURSE_SESSION_TTL_SECONDS = 60 * 60
+
+function base64urlJson(value) {
+  return Buffer.from(JSON.stringify(value)).toString('base64url')
+}
+
+function signEnvelope(payload, key, scope) {
+  const body = base64urlJson(payload)
+  const sig = createHmac('sha256', key).update(scope + '.' + body).digest('base64url')
+  return body + '.' + sig
+}
+
+function verifyEnvelope(token, key, scope, nowSeconds) {
+  if (!token || !key) return null
+  const parts = String(token).split('.')
+  if (parts.length !== 2) return null
+  const body = parts[0]
+  const supplied = parts[1]
+  const expected = createHmac('sha256', key).update(scope + '.' + body).digest('base64url')
+  const a = Buffer.from(supplied)
+  const b = Buffer.from(expected)
+  if (a.length !== b.length || !timingSafeEqual(a, b)) return null
+  try {
+    const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'))
+    if (!payload || payload.v !== 1) return null
+    if (!Number.isFinite(Number(payload.exp)) || Number(payload.exp) < nowSeconds) return null
+    return payload
+  } catch {
+    return null
+  }
+}
+
+function cookieValue(req, name) {
+  const raw = String(req.headers.cookie || '')
+  for (const item of raw.split(';')) {
+    const index = item.indexOf('=')
+    if (index < 0) continue
+    if (item.slice(0, index).trim() === name) return decodeURIComponent(item.slice(index + 1).trim())
+  }
+  return ''
+}
+
+function safeCoursePath(value, fallback = '/') {
+  const text = String(value || '')
+  if (!/^\/(?!\/)/.test(text) || /[\\\u0000-\u0020\u007f]/.test(text)) return fallback
+  try {
+    const decoded = decodeURIComponent(text)
+    return /^\/(?!\/)/.test(decoded) && !/[\\\u0000-\u0020\u007f]/.test(decoded) ? text : fallback
+  } catch {
+    return fallback
+  }
+}
+
+function sessionCookie(payload, key) {
+  const token = signEnvelope(payload, key, 'course-session-v1')
+  return COURSE_SESSION_COOKIE + '=' + encodeURIComponent(token) +
+    '; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=' + COURSE_SESSION_TTL_SECONDS
+}
+
+function ssoLocation(next = '/') {
+  return COURSE_SSO_ORIGIN + '/api/course/sso?next=' + encodeURIComponent(safeCoursePath(next, '/'))
+}
 
 /**
  * 允许管理台触发的动作——**白名单 + argv 数组**，永不拼 shell 字符串。
@@ -685,7 +750,8 @@ export function createAdminHandler({
   workerEnv = {},
   runCommand = defaultRunCommand,
   spawnOcr = defaultSpawnOcr,
-  now = () => Date.now()
+  now = () => Date.now(),
+  ssoKey = ''
 } = {}) {
   const failures = new Map()
   let running = null
@@ -1120,10 +1186,7 @@ export function createAdminHandler({
     if (pathname === `${ADMIN_PREFIX}status`) {
       const snap = snapshot()
       // 鉴权方式让界面知道：是否已设密码、主令牌是否可用（后者是找回路径）
-      snap.auth = {
-        passwordSet: Boolean(readPasswordRecord(scratchRoot)),
-        masterTokenSet: Boolean(activeToken)
-      }
+      snap.auth = { provider: 'law-tech', passwordSet: Boolean(readPasswordRecord(scratchRoot)), masterTokenSet: Boolean(activeToken) }
       // 微信通道：主动推送需要用户最近和机器人有过互动，界面要把这件事说清楚
       snap.channel = channelHealth()
       snap.tags = readTags(scratchRoot)
@@ -1694,12 +1757,65 @@ export function createAdminHandler({
   return {
     /** @returns {boolean} 是否已处理该请求 */
     async handle(req, res, pathname, url, { adminToken } = {}) {
-      if (pathname === '/admin' || pathname === '/admin/') {
-        // course.law-tech.dev 是统一的课程入口；管理台长动作已改为 job + 轮询，
-        // 可以安全经 Cloudflare Tunnel。cf.law-tech.dev 只保留为兜底别名。
+      const nowSeconds = Math.floor(now() / 1000)
+
+      if (pathname === '/_auth/callback') {
+        const ticket = verifyEnvelope(url.searchParams.get('token'), ssoKey, 'course-sso-v1', nowSeconds)
+        if (!ticket || !['owner', 'member'].includes(ticket.role)) {
+          res.writeHead(302, { location: ssoLocation('/'), 'cache-control': 'no-store' })
+          res.end()
+          return true
+        }
+        const next = safeCoursePath(ticket.next, '/')
+        const session = {
+          v: 1,
+          sub: ticket.sub,
+          role: ticket.role,
+          email: ticket.email || '',
+          iat: nowSeconds,
+          exp: nowSeconds + COURSE_SESSION_TTL_SECONDS
+        }
+        const destination = ticket.role === 'owner' ? (next === '/' ? '/admin' : next) : '/'
+        res.writeHead(302, {
+          location: destination,
+          'set-cookie': sessionCookie(session, ssoKey),
+          'cache-control': 'no-store'
+        })
+        res.end()
+        return true
+      }
+
+      const session = verifyEnvelope(
+        cookieValue(req, COURSE_SESSION_COOKIE),
+        ssoKey,
+        'course-session-v1',
+        nowSeconds
+      )
+
+      if (pathname === '/' || pathname === '/admin' || pathname === '/admin/') {
         const host = String(req.headers.host || '').split(':')[0]
         if (host === 'cf.law-tech.dev') {
-          res.writeHead(302, { location: 'https://course.law-tech.dev/admin', 'cache-control': 'no-store' })
+          res.writeHead(302, { location: 'https://course.law-tech.dev/', 'cache-control': 'no-store' })
+          res.end()
+          return true
+        }
+        if (!session) {
+          res.writeHead(302, { location: ssoLocation(pathname === '/' ? '/' : '/admin'), 'cache-control': 'no-store' })
+          res.end()
+          return true
+        }
+        if (session.role !== 'owner') {
+          const body = Buffer.from('<!doctype html><meta charset="utf-8"><title>课程</title><main style="font:16px system-ui;padding:48px;max-width:680px;margin:auto"><h1>课程</h1><p>当前账号的课程工作台正在接入。</p></main>')
+          res.writeHead(403, {
+            'content-type': 'text/html; charset=utf-8',
+            'cache-control': 'no-store',
+            'content-length': body.length
+          })
+          res.end(body)
+          return true
+        }
+        if (pathname === '/') {
+          res.writeHead(302, { location: '/admin', 'cache-control': 'no-store' })
           res.end()
           return true
         }
@@ -1725,13 +1841,13 @@ export function createAdminHandler({
         sendJson(res, 429, { ok: false, error: 'too_many_attempts' })
         return true
       }
-      // 两条路都能进：自己设的密码，或环境变量里的主令牌（忘记密码时的万能钥匙）。
+
       const provided = String(req.headers['x-course-token'] || (req.headers.authorization || '').replace(/^Bearer\s+/i, '') || '')
       const byMasterToken = Boolean(activeToken) && provided === activeToken
-      const byPassword = verifyPassword(provided, readPasswordRecord(scratchRoot))
-      if (!byMasterToken && !byPassword) {
+      const byOwnerSession = session?.role === 'owner'
+      if (!byMasterToken && !byOwnerSession) {
         recordFailure(req)
-        sendJson(res, 401, { ok: false, error: 'unauthorized', hint: '用管理台密码或服务器上的主令牌（见 docs/10）' })
+        sendJson(res, 401, { ok: false, error: 'unauthorized' })
         return true
       }
 

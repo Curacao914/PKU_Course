@@ -226,7 +226,7 @@ test('坏路径编码回 400（不是 500），穿越防护仍然拒得住', asy
 test('公开进程上不存在管理台：/api/admin 明确 404，/admin 把人导向管理台域名', async () => {
   // 公开站点与管理台是两个进程：公开进程里根本没有这些路由（不是「有但不让进」）。
   const root = siteDir()
-  const site = await startSiteServer({ root, port: 0, admin: false, adminOrigin: 'https://admin.law-tech.dev' })
+  const site = await startSiteServer({ root, port: 0, admin: false, adminOrigin: 'https://course.law-tech.dev' })
   try {
     const api = await fetch(site.url + '/api/admin/status')
     assert.equal(api.status, 404)
@@ -234,7 +234,7 @@ test('公开进程上不存在管理台：/api/admin 明确 404，/admin 把人�
 
     const page = await fetch(site.url + '/admin', { redirect: 'manual' })
     assert.equal(page.status, 302)
-    assert.equal(page.headers.get('location'), 'https://admin.law-tech.dev/admin')
+    assert.equal(page.headers.get('location'), 'https://course.law-tech.dev/admin')
     assert.equal(page.headers.get('cache-control'), 'no-store')
 
     // 公开内容与 MCP 照常

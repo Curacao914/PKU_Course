@@ -116,6 +116,7 @@ export function createRequestHandler({
   // 公开进程上访问管理路径时，把浏览器导向管理台域名（API 调用则明确 404）
   adminOrigin = '',
   adminToken = '',
+  ssoKey = '',
   scratchRoot = '',
   workerPath = '',
   workerEnv = {},
@@ -169,7 +170,8 @@ export function createRequestHandler({
       ...(materialsRoot ? { materialsRoot } : {}),
       workerPath,
       workerEnv,
-      runCommand
+      runCommand,
+      ssoKey
     })
     : null
 

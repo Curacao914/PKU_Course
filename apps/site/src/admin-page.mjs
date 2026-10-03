@@ -294,9 +294,6 @@ button.item:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
           <button class="act" data-act="refresh">刷新</button>
           <a class="act" href="/" target="_blank" rel="noopener" style="padding:7px 14px;border:1px solid var(--line-2);border-radius:980px">看站点</a>
         </div>
-        <label>管理密码或备用令牌</label>
-        <input id="token" type="password" placeholder="输入后回车" autocomplete="current-password">
-        <div class="row" style="margin-top:8px"><button class="act primary" data-act="save">保存</button></div>
       </div>
     </details>
   </div>
@@ -332,7 +329,6 @@ button.item:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 <script>
 var $ = function (id) { return document.getElementById(id) }
-var KEY = 'course.admin.token'
 var OPEN_KEY = 'course.admin.open'
 var SEL_KEY = 'course.admin.sel'
 var state = {
@@ -381,18 +377,13 @@ var INTEGRATION_KINDS = [
   { key: 'case-library', label: '案例练习库' }
 ]
 
-$('token').value = localStorage.getItem(KEY) || ''
-$('token').addEventListener('keydown', function (event) {
-  if (event.key === 'Enter') { event.preventDefault(); localStorage.setItem(KEY, $('token').value.trim()); load() }
-})
-
 function esc (v) {
   return String(v == null ? '' : v).replace(/[&<>"]/g, function (c) {
     return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]
   })
 }
 function headers (json) {
-  var h = { 'x-course-token': $('token').value.trim() }
+  var h = {}
   if (json) h['content-type'] = 'application/json'
   return h
 }
@@ -475,11 +466,13 @@ async function load (options) {
   var res = await fetch('/api/admin/status', { headers: headers(false) })
   var data = await res.json().catch(function () { return {} })
   if (!res.ok) {
-    var reason = data.error === 'admin_token_unconfigured' ? '管理端尚未配置登录凭据'
-      : data.error === 'too_many_attempts' ? '尝试次数过多，请 5 分钟后再试'
-      : $('token').value.trim() ? '密码或令牌不正确' : '未登录：点右上角 ··· 输入管理密码'
-    $('tab-overview').innerHTML = card('<h2>需要登录</h2><p class="muted">' + esc(reason) + '</p>')
-    setRunState('未登录', 'bad')
+    if (res.status === 401) {
+      window.location.assign('/')
+      return false
+    }
+    var reason = data.error === 'too_many_attempts' ? '操作过于频繁，请稍后重试' : '课程服务暂不可用'
+    $('tab-overview').innerHTML = card('<h2>暂时无法加载</h2><p class="muted">' + esc(reason) + '</p>')
+    setRunState('暂不可用', 'bad')
     return false
   }
   state.status = data
@@ -501,7 +494,7 @@ async function load (options) {
 function isDirty () {
   var active = document.activeElement
   if (active && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName)) return true
-  var boxes = document.querySelectorAll('[data-request],[data-pw="next"],[data-newtag],[data-integration-text]')
+  var boxes = document.querySelectorAll('[data-request],[data-newtag],[data-integration-text]')
   for (var i = 0; i < boxes.length; i += 1) if (boxes[i].value) return true
   return Object.keys(state.configDraft).length > 0
 }
@@ -1123,8 +1116,7 @@ var SETTINGS_PANES = [
   { key: 'maintenance', label: '维护' },
   { key: 'deliveries', label: '通知记录' },
   { key: 'storage', label: '存储占用' },
-  { key: 'params', label: '运行参数' },
-  { key: 'password', label: '登录密码' }
+  { key: 'params', label: '运行参数' }
 ]
 
 function settingsPane () {
@@ -1136,7 +1128,6 @@ function settingsPane () {
 function paneMeta (key) {
   if (key === 'deliveries') return String(((state.status.ledger || {}).deliveries || []).length)
   if (key === 'storage') return state.storage ? bytes(state.storage.totalBytes) : ''
-  if (key === 'password') return (state.status.auth && state.status.auth.passwordSet) ? '已设置' : '未设置'
   return ''
 }
 
@@ -1213,9 +1204,8 @@ function renderSettings () {
   var body = pane === 'maintenance' ? maintenancePane()
     : pane === 'deliveries' ? deliveriesPane(deliveries, rows, failed)
       : pane === 'storage' ? '<h2>存储占用</h2><div id="storageBody">' + storageHtml() + '</div>'
-        : pane === 'params' ? '<h2>运行参数</h2>' + fields +
+        : '<h2>运行参数</h2>' + fields +
           '<div class="row"><button class="act primary" data-act="save-config">保存设置</button></div>'
-          : '<h2>登录密码</h2>' + passwordPanel()
 
   $('tab-settings').innerHTML = '<div class="split">' +
     '<div class="col" id="settingsRail"><div class="colhead"><span>设置</span></div>' + rail + '</div>' +
@@ -1237,13 +1227,6 @@ function storageHtml () {
   var disk = state.storage.disk
   return rows + (disk ? '<p class="small muted" style="margin-top:12px">磁盘：已用 ' + bytes(disk.totalBytes - disk.freeBytes) + ' / 共 ' + bytes(disk.totalBytes) + '，可用 ' + bytes(disk.freeBytes) + '</p>' : '') +
     '<div class="row" style="margin-top:10px"><button class="act quiet" data-act="storage-load">重新计算</button></div>'
-}
-function passwordPanel () {
-  var auth = (state.status && state.status.auth) || {}
-  return (auth.masterTokenSet ? '' : '<p class="small" style="color:var(--danger)">未配置备用登录方式；忘记密码后需要在服务器端重设。</p>') +
-    '<div class="field"><label>新密码（至少 8 位）</label><input data-pw="next" type="password" autocomplete="new-password" placeholder="新密码"></div>' +
-    '<div class="row"><button class="act primary" data-act="save-password">保存新密码</button>' +
-    '<button class="act" data-act="clear-password">清除密码</button></div>'
 }
 
 /* ── 动作 ── */
@@ -1630,39 +1613,12 @@ async function saveConfig (btn) {
   load()
 }
 
-async function savePassword (clear, btn) {
-  var next = document.querySelector('[data-pw="next"]')
-  var body = clear ? { action: 'clear' } : { password: next && next.value }
-  if (!clear && (!body.password || body.password.length < 8)) { toast('密码至少 8 位', 'error'); return }
-  if (clear && !window.confirm('清除密码后只能用服务器上的主令牌登录，确定？')) return
-  var restore = busyButton(btn, '处理中…')
-  var done = false
-  try {
-    var res = await fetch('/api/admin/password', { method: 'PUT', headers: headers(true), body: JSON.stringify(body) })
-    var data = await res.json().catch(function () { return {} })
-    out(JSON.stringify(data, null, 2))
-    if (data.ok) { done = true; toast(clear ? '已清除密码' : '密码已更新', 'ok') } else toast('没成功：' + (data.message || data.error), 'error')
-    if (res.ok && !clear) { $('token').value = body.password; localStorage.setItem(KEY, body.password) }
-  } catch (error) { toast('请求失败：' + error, 'error') } finally { restore() }
-  if (done && clear) {
-    var stillOk = await load()
-    if (!stillOk) { try { localStorage.removeItem(KEY) } catch (e) {}; toast('已清除密码，现在需要用主令牌登录', 'error') }
-    return
-  }
-  load()
-}
 
 function handleAct (act, btn) {
   var menu = $('menu')
   if (menu && menu.open) menu.open = false
   var key = btn.dataset.key || ''
   var value = btn.dataset.value || ''
-  if (act === 'save') {
-    var token = $('token').value.trim()
-    localStorage.setItem(KEY, token)
-    if (!token) { toast('先填密码或主令牌', 'error'); return }
-    return load().then(function (ok) { if (ok) toast('已登录', 'ok') })
-  }
   if (act === 'refresh') return load().then(function (ok) { if (ok) toast('已刷新', 'ok') })
   if (act === 'refresh-balance') { refreshBalance(); toast('正在查余额…', 'info'); return }
   if (act === 'rail-toggle') { state.sel.rail = !state.sel.rail; saveSel(); renderCourses(); return }
@@ -1740,8 +1696,6 @@ function handleAct (act, btn) {
     return doAction('prune', { apply: true }, btn)
   }
   if (act === 'save-config') return saveConfig(btn)
-  if (act === 'save-password') return savePassword(false, btn)
-  if (act === 'clear-password') return savePassword(true, btn)
   toast('这个按钮还没有接上处理逻辑：' + act, 'error')
 }
 
@@ -1909,7 +1863,6 @@ document.addEventListener('keydown', function (event) {
     run(function () { return reviseWith(target.dataset.request, '', document.querySelector('[data-act="revise-first"][data-key="' + target.dataset.request + '"]')) })
     return
   }
-  if (target.dataset.pw === 'next') { event.preventDefault(); run(function () { return savePassword(false, document.querySelector('[data-act="save-password"]')) }) }
 })
 
 load()
