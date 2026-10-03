@@ -1,0 +1,40 @@
+# course.law-tech.dev 的**管理台 + worker 触发口**（user systemd，127.0.0.1:3101）。
+#
+# 它与 course-site.service 是**两个进程、两份环境**（Phase 5.1 的成果）：
+#   公开进程：只有站点目录这类公开配置，挂掉也只影响读；
+#   管理进程：完整环境（PKU / 百炼 / R2 / 管理令牌 / 账本写入 / 能触发 worker）。
+# 于是"公开接口被攻破"与"管理凭据泄露"不再是同一件事。
+#
+# 为什么角色必须是 admin：serve.mjs 只有 admin（或 all）才挂管理台与 worker 路由。
+# 单元里显式写死角色，缺失时进程拒绝启动——静默退回 all 会把管理台挂到公开端口上。
+#
+# 只监听回环：对外是 nginx 直连（admin.law-tech.dev 走 A 记录直连本机 443），
+# 不走 Cloudflare——管理台的动作最长十几分钟，会被 Cloudflare 的 100 秒上限掐断。
+[Unit]
+Description=course.law-tech.dev 管理台与 worker 触发口（完整环境，127.0.0.1:3101）
+Documentation=https://admin.law-tech.dev
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/course-runtime
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# 完整环境（0600）。公开进程读的是 env.public，两者不要互相复制。
+EnvironmentFile=-%h/.course-worker/env
+Environment=COURSE_SITE_ROOT=%h/.course-worker/site
+Environment=COURSE_SITE_PORT=3101
+Environment=COURSE_SITE_HOST=127.0.0.1
+Environment=COURSE_ASSETS_DIR=%h/.course-worker/assets
+Environment=COURSE_MATERIALS_DIR=%h/.course-worker/materials
+Environment=COURSE_SITE_ROLE=admin
+ExecStart=/usr/local/bin/node apps/site/bin/serve.mjs
+Restart=on-failure
+RestartSec=5
+# 这里**不加** NoNewPrivileges：管理台要拉起 Chromium（Playwright）下载视频，
+# 加了会让它的沙箱起不来（要加必须在机器上实测过再写进来）。
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

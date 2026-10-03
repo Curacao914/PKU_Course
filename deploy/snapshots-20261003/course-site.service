@@ -1,0 +1,45 @@
+# course.law-tech.dev 的**公开**站点服务（user systemd）。
+#
+# 为什么这个文件必须在仓库里：以前它只存在于服务器上，重装/换机/接手时只能靠记忆复原，
+# 而"公开进程里到底有没有机密"恰恰是由单元里的**角色**与**环境文件**决定的。
+# 现在仓库是唯一来源：改单元 → deploy/install-units.sh → 重启。装法见 deploy/README.md。
+#
+# 三条要点：
+#   1. COURSE_SITE_ROLE=public 必须**显式**写在单元里，而且放在 EnvironmentFile **之后**
+#      （systemd 里后写的生效），这样 env.public 也改不动角色。
+#   2. 环境文件是 env.public（只有站点目录这类公开配置），**不是** env——那里面有
+#      PKU / 百炼 / R2 / 管理令牌。公开进程读到那些东西，拆分就白做了。
+#   3. 路径写成 %h/course-runtime（发布符号链接），部署新版本不用改单元。
+[Unit]
+Description=course.law-tech.dev 公开站点（只读站点目录，127.0.0.1:3100）
+Documentation=https://course.law-tech.dev
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/course-runtime
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# 公开环境（可能不存在：- 前缀表示"没有也照常启动"，但那样就得靠下面的默认值）
+EnvironmentFile=-%h/.course-worker/env.public
+Environment=COURSE_SITE_ROOT=%h/.course-worker/site
+Environment=COURSE_SITE_PORT=3100
+Environment=COURSE_SITE_HOST=127.0.0.1
+Environment=COURSE_ASSETS_DIR=%h/.course-worker/assets
+# 浏览器访问 /admin 时 302 到直连域名（管理台不在这个进程里）
+Environment=COURSE_ADMIN_ORIGIN=https://admin.law-tech.dev
+# 角色由单元钉死，env.public 改不动它；缺失时进程会拒绝启动（不允许静默退回 all）
+Environment=COURSE_SITE_ROLE=public
+ExecStart=/usr/local/bin/node apps/site/bin/serve.mjs
+Restart=on-failure
+RestartSec=5
+# 公开进程只读站点目录、不写任何文件、不拉子进程（不跑 Chromium），所以这两条是安全的。
+# 更紧的 ProtectSystem/ProtectHome 会影响其它路径的读取（例如 assets 目录），
+# 要加先在机器上验证一遍再写进来。
+NoNewPrivileges=yes
+PrivateTmp=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

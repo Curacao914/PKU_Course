@@ -1,0 +1,6 @@
+stamp=20261002-214930
+digest=47f1a21e60b1895f
+lockHash=94085ea9a9904e7d
+source=/home/ubuntu/course-staging
+service=course-site.service role=public port=3100 health=ok
+service=course-admin.service role=admin port=3101 health=ok
