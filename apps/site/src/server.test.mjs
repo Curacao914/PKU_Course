@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHmac } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -27,6 +28,48 @@ function siteDir() {
   fs.writeFileSync(path.join(dir, 'library.json'), JSON.stringify([record], null, 2))
   return dir
 }
+
+test('startSiteServer forwards SSO key so Course callback can establish an owner session', async () => {
+  const root = siteDir()
+  const ssoKey = 'course-sso-test-key-32-bytes-minimum'
+  const site = await startSiteServer({
+    root,
+    port: 0,
+    adminToken: 'secret-token',
+    ssoKey,
+    scratchRoot: root
+  })
+
+  try {
+    const now = Math.floor(Date.now() / 1000)
+    const payload = {
+      v: 1,
+      sub: 'owner-profile-id',
+      role: 'owner',
+      email: 'owner@example.test',
+      iat: now,
+      exp: now + 60,
+      nonce: 'test-nonce',
+      next: '/'
+    }
+    const body = Buffer.from(JSON.stringify(payload)).toString('base64url')
+    const signature = createHmac('sha256', ssoKey)
+      .update('course-sso-v1.' + body)
+      .digest('base64url')
+    const token = body + '.' + signature
+
+    const response = await fetch(site.url + '/_auth/callback?token=' + encodeURIComponent(token), {
+      redirect: 'manual'
+    })
+
+    assert.equal(response.status, 302)
+    assert.equal(response.headers.get('location'), '/admin')
+    assert.match(response.headers.get('set-cookie') || '', /lawtech_course_session=/)
+  } finally {
+    await site.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
 
 test('third-party assets are served from outside the site directory', async () => {
   const root = siteDir()

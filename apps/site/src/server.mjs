@@ -631,7 +631,7 @@ export function startSiteServer({
   root, port = 3100, host = '127.0.0.1', adminToken = '',
   // 角色相关的三项必须透传下去：否则"公开进程"照样会挂上管理台（实测踩到：以为设了
   // admin:false，结果 /api/admin 仍然按"未配置令牌"回 503，而不是根本不存在的 404）。
-  admin = true, adminOrigin = '',
+  admin = true, adminOrigin = '', ssoKey = '',
   mcp = true, mcpOrigins = [], mcpHosts = [],
   // 公开接口共用的预算（/api/search 与 /mcp 同一本账）：整块透传，避免只改了一半
   rateLimit = undefined, maxConcurrent = undefined, requestTimeoutMs = undefined, maxQueryChars = undefined,
@@ -641,7 +641,7 @@ export function startSiteServer({
   scratchRoot = '', workerPath = '', workerEnv = {}, assetsDir = '', materialsRoot = '', runCommand
 } = {}) {
   const server = createSiteServer({
-    root, adminToken, admin, adminOrigin, mcp, mcpOrigins, mcpHosts, siteOrigin,
+    root, adminToken, admin, adminOrigin, ssoKey, mcp, mcpOrigins, mcpHosts, siteOrigin,
     ...(rateLimit ? { rateLimit } : {}),
     ...(maxConcurrent ? { maxConcurrent } : {}),
     ...(requestTimeoutMs ? { requestTimeoutMs } : {}),
