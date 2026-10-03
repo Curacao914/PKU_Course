@@ -173,6 +173,8 @@ pre{background:var(--sunken);border-radius:var(--r-md);padding:14px;overflow:aut
 .board.rail-hidden #rail .rail{display:none}
 .colhead{display:flex;align-items:center;gap:6px;padding:6px 12px 8px;color:var(--ink-3);font-size:12px;letter-spacing:.04em}
 .colhead .spacer{flex:1}
+.colhead .icon-btn{width:26px;height:26px;margin:-3px 0;color:var(--ink-3)}
+.colhead .icon-btn:hover{color:var(--ink);background:var(--sunken)}
 .item{display:flex;align-items:center;gap:8px;padding:7px 12px;cursor:pointer;font-size:14px;min-width:0}
 .item:hover{background:var(--sunken)}
 .item[aria-selected=true]{background:var(--accent-soft);color:var(--accent-ink);font-weight:500}
@@ -253,10 +255,6 @@ pre{background:var(--sunken);border-radius:var(--r-md);padding:14px;overflow:aut
 button.item{width:100%;border:0;background:none;font:inherit;text-align:left;color:inherit}
 button.item:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
 
-.content-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.25fr);gap:16px}
-.release-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:8px;align-items:center;padding:7px 0;border-bottom:1px solid var(--line)}
-.release-name{font-family:var(--mono);font-size:12px;min-width:0;overflow-wrap:anywhere}
-.release-meta{white-space:nowrap}
 .integration-lessons{padding:8px 10px;border:1px solid var(--line);border-radius:10px;max-height:220px;overflow:auto}
 .integration-choice{display:flex;align-items:center;gap:9px;min-height:34px;margin:1px 0;color:var(--ink-2);font-size:13.5px;cursor:pointer}
 .integration-choice:hover{color:var(--ink);background:var(--sunken);border-radius:8px;padding-left:6px;margin-left:-6px}
@@ -267,7 +265,6 @@ button.item:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
   .board .col{max-height:none;border-right:0;border-bottom:1px solid var(--line)}
   .split{grid-template-columns:1fr}
   .split .col{max-height:none;border-right:0;border-bottom:1px solid var(--line)}
-  .content-grid{grid-template-columns:1fr}
   .maintenance-group{flex-direction:column}
   .maintenance-actions{justify-content:flex-start}
 }
@@ -278,9 +275,6 @@ button.item:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
   .card{padding:18px 16px;border-radius:16px}
   .grid.three{grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
   .grid.three .stat{font-size:26px}
-  .release-row{grid-template-columns:auto minmax(0,1fr)}
-  .release-meta{grid-column:2;white-space:normal;font-size:12.5px}
-  .content-grid .card{overflow:hidden}
   header.top .wrap{padding-left:16px;padding-right:16px}
   .brand em{display:none}
 }
@@ -435,10 +429,11 @@ function bytes (value) {
 }
 function icon (name) {
   var paths = {
-    sortAsc: '<path d="M5 7h8M5 12h6M5 17h4"/><path d="M18 18V6M15 9l3-3 3 3"/>',
-    sortDesc: '<path d="M5 7h8M5 12h6M5 17h4"/><path d="M18 6v12M15 15l3 3 3-3"/>',
+    sortAsc: '<path d="M7 8h7M7 12h5M7 16h3"/><path d="M18 18V6M15.5 8.5 18 6l2.5 2.5"/>',
+    sortDesc: '<path d="M7 8h7M7 12h5M7 16h3"/><path d="M18 6v12M15.5 15.5 18 18l2.5-2.5"/>',
     chevron: '<path d="M9 6l6 6-6 6"/>',
-    rail: '<rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M9.5 5v14"/>',
+    railOpen: '<rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M9.5 5v14M14.5 9l3 3-3 3"/>',
+    railClose: '<rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M9.5 5v14M17.5 9l-3 3 3 3"/>',
     up: '<path d="M12 19V5M6 11l6-6 6 6"/>',
     file: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>',
     // 图片版课件用得上：一张"图里带字"的图标
@@ -814,7 +809,9 @@ function renderCourses () {
     })
   }
   var rail = '<div class="col" id="rail">' +
-    '<div class="colhead">筛选<span class="spacer"></span></div><div class="rail">' + railItems.join('') + '</div></div>'
+    '<div class="colhead"><span>筛选</span><span class="spacer"></span>' +
+    '<button class="icon-btn" data-act="rail-toggle" title="收起筛选" aria-label="收起筛选">' + icon('railClose') + '</button></div>' +
+    '<div class="rail">' + railItems.join('') + '</div></div>'
 
   // 中一：课程
   var courseItems = shown.map(function (item) {
@@ -825,7 +822,8 @@ function renderCourses () {
       '<span class="meta">' + (state.sel.stage ? item.lessons.filter(matchesStageFilter).length : (item.published + '/' + item.lessons.length)) + '</span></div>'
   }).join('')
   var courses = '<div class="col" id="courses">' +
-    '<div class="colhead"><button class="icon-btn" data-act="rail-toggle" title="显示或隐藏筛选" aria-label="显示或隐藏筛选">' + icon('rail') + '</button>' +
+    '<div class="colhead">' +
+    (!state.sel.rail ? '<button class="icon-btn" data-act="rail-toggle" title="展开筛选" aria-label="展开筛选">' + icon('railOpen') + '</button>' : '') +
     '<span>课程 · ' + shown.length + '</span></div>' +
     (state.sel.stage ? '<div class="view-filter"><span class="pill">' + esc(stageLabel(state.sel.stage)) + '</span>' +
       '<button class="icon-btn" data-act="clear-stage" title="清除状态筛选" aria-label="清除状态筛选">' + icon('close') + '</button></div>' : '') +
@@ -846,7 +844,7 @@ function renderCourses () {
   }
   var lessons = '<div class="col" id="lessons">' +
     '<div class="colhead"><span>课次</span><span class="spacer"></span>' +
-    (state.sel.course ? '<button class="icon-btn" data-act="sort-toggle" title="' + (state.sel.sort === 'asc' ? '较早课次在前' : '较新课次在前') + '" aria-label="切换课次排序">' + icon(state.sel.sort === 'asc' ? 'sortAsc' : 'sortDesc') + '</button>' : '') +
+    (state.sel.course ? '<button class="icon-btn" data-act="sort-toggle" title="' + (state.sel.sort === 'asc' ? '当前：最早在前；点按改为最新在前' : '当前：最新在前；点按改为最早在前') + '" aria-label="' + (state.sel.sort === 'asc' ? '最早课次在前' : '最新课次在前') + '">' + icon(state.sel.sort === 'asc' ? 'sortAsc' : 'sortDesc') + '</button>' : '') +
     '</div>' + lessonItems + '</div>'
 
   // 右：详情
