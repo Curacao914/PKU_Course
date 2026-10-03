@@ -603,14 +603,15 @@ test('最近任务：状态保留，但实现边界不塞进前端', async () =>
 })
 
 test('管理台只呈现产品概念，不把原型和实现说明端给用户', () => {
-  assert.match(ADMIN_HTML, /站点版本/)
-  assert.match(ADMIN_HTML, /长期章节/)
-  assert.match(ADMIN_HTML, />处理队列</)
-  assert.match(ADMIN_HTML, />刷新课程</)
-  assert.match(ADMIN_HTML, />发送通知</)
-  assert.match(ADMIN_HTML, />系统检查</)
-  assert.match(ADMIN_HTML, />查看可清理项</)
-  assert.match(ADMIN_HTML, />清理原件</)
+  assert.match(ADMIN_HTML, /高级维护/)
+  assert.match(ADMIN_HTML, /公开站点/)
+  assert.match(ADMIN_HTML, /专题整合/)
+  assert.match(ADMIN_HTML, />继续处理待办</)
+  assert.match(ADMIN_HTML, />扫描录播</)
+  assert.match(ADMIN_HTML, />发送待发通知</)
+  assert.match(ADMIN_HTML, />运行检查</)
+  assert.match(ADMIN_HTML, />检查可清理内容</)
+  assert.match(ADMIN_HTML, />清理可清理原件</)
   assert.match(ADMIN_HTML, /'course-note': '课程笔记'/)
   assert.match(ADMIN_HTML, /sent: '已发送'/)
 
