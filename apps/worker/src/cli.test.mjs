@@ -1026,12 +1026,14 @@ test('--regenerate-derived：按当前正文重做派生物、写回文件，下
   assert.deepEqual(parse(output.at(-1)).brief, { applied: true, reason: 'ok' })
   assert.deepEqual(model.calls, [], '对得上的派生物不再重新生成')
 
-  // 本来就没有一页纸的课次：--regenerate-derived 不会凭空生成一份（不发多出来的模型调用）
+  // 历史课次本来没有一页纸：发布链会补生成一次，并在这一轮直接挂上。
   fs.rmSync(onepagePath)
+  model.calls.length = 0
   assert.equal(await runCli(args, deps), 0)
   const missing = parse(output.at(-1))
-  assert.deepEqual(missing.onepage, { applied: false, reason: 'missing' })
-  assert.deepEqual(model.calls, [], '不存在就是不存在，不自动生成')
+  assert.deepEqual(missing.onepage, { applied: true, reason: 'generated' })
+  assert.deepEqual(model.calls, ['onepage'], '缺失的一页纸只补生成一次')
+  assert.ok(fs.existsSync(onepagePath), '补生成的一页纸要写回源目录，下一次发布直接复用')
 })
 
 /**
