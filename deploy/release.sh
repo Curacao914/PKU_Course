@@ -126,14 +126,26 @@ check_roles() {
       fail "找不到单元 ${name}（~/.config/systemd/user 与 /etc/systemd/system 里都没有它）。请先跑 deploy/install-units.sh；确实要跳过就设 COURSE_ROLE_CHECK=warn"
     fi
     if [ "$expected" = "control" ]; then
-      grep -q '^Environment=COURSE_CONTROL_HOST=127.0.0.1$' "$unit" ||
+      if ! grep -q '^Environment=COURSE_CONTROL_HOST=127.0.0.1$' "$unit"; then
+        discard_target
+        record_failure roles "$name 缺少 COURSE_CONTROL_HOST=127.0.0.1"
         fail "$name 必须显式绑定 COURSE_CONTROL_HOST=127.0.0.1；请先重跑 deploy/install-units.sh"
-      grep -q '^KillMode=control-group$' "$unit" ||
+      fi
+      if ! grep -q '^KillMode=control-group$' "$unit"; then
+        discard_target
+        record_failure roles "$name 缺少 KillMode=control-group"
         fail "$name 必须使用 KillMode=control-group；请先重跑 deploy/install-units.sh"
-      grep -q '^CPUQuota=' "$unit" ||
+      fi
+      if ! grep -q '^CPUQuota=' "$unit"; then
+        discard_target
+        record_failure roles "$name 缺少 CPUQuota cgroup 限额"
         fail "$name 缺少 CPUQuota cgroup 限额；请先重跑 deploy/install-units.sh"
-      grep -q '^MemoryMax=' "$unit" ||
+      fi
+      if ! grep -q '^MemoryMax=' "$unit"; then
+        discard_target
+        record_failure roles "$name 缺少 MemoryMax cgroup 限额"
         fail "$name 缺少 MemoryMax cgroup 限额；请先重跑 deploy/install-units.sh"
+      fi
       log "   · $name role=control loopback+cgroup=ok 健康端口=$(service_port "$entry")"
       continue
     fi
