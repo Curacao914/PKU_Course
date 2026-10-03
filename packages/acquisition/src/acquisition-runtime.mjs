@@ -625,6 +625,8 @@ export function createValidatedAcquisitionRuntime(input = {}) {
   let context = null
   let portalPage = null
   let profileLock = null
+  let browserProcess = null
+  const storageStatePath = String(input.storageStatePath || '').trim()
 
   async function ensureBrowser() {
     if (context) return { context, page: portalPage }
@@ -647,13 +649,29 @@ export function createValidatedAcquisitionRuntime(input = {}) {
       if (stale.cleared && stale.removed?.length) {
         input.log?.(`清理陈旧的浏览器 profile 锁：${stale.removed.join(', ')}`)
       }
-      context = await chromium.launchPersistentContext(profileDir, {
+      const browserOptions = {
         executablePath,
         headless: input.headless ?? process.env.COURSE_HEADLESS !== '0',
-        acceptDownloads: false,
-        viewport: process.env.COURSE_HEADLESS === '0' ? null : { width: 1440, height: 900 },
         args: process.env.COURSE_HEADLESS === '0' ? ['--start-maximized'] : []
-      })
+      }
+      if (storageStatePath) {
+        browserProcess = await chromium.launch(browserOptions)
+        let storageState
+        if (fs.existsSync(storageStatePath)) {
+          try { storageState = JSON.parse(fs.readFileSync(storageStatePath, 'utf8')) } catch {}
+        }
+        context = await browserProcess.newContext({
+          acceptDownloads: false,
+          viewport: process.env.COURSE_HEADLESS === '0' ? null : { width: 1440, height: 900 },
+          ...(storageState ? { storageState } : {})
+        })
+      } else {
+        context = await chromium.launchPersistentContext(profileDir, {
+          ...browserOptions,
+          acceptDownloads: false,
+          viewport: process.env.COURSE_HEADLESS === '0' ? null : { width: 1440, height: 900 }
+        })
+      }
     } catch (error) {
       lock.release()
       throw error
@@ -732,6 +750,10 @@ export function createValidatedAcquisitionRuntime(input = {}) {
       })
     }
 
+    if (storageStatePath) {
+      fs.mkdirSync(path.dirname(storageStatePath), { recursive: true })
+      await browser.context.storageState({ path: storageStatePath })
+    }
     const result = {
       loginMode: login.mode,
       courses: safeCourses
@@ -743,6 +765,7 @@ export function createValidatedAcquisitionRuntime(input = {}) {
   async function download(task, runtime = {}) {
     const limits = resolveAcquisitionLimits()
     const replayKeyValue = String(task.replay_key || '')
+    const sourceReplayKeyValue = String(task.source_replay_key || task.runtime?.sourceReplayKey || task.replay_key || '')
     const courseKeyValue = String(task.course_key || '')
     if (!replayKeyValue || !courseKeyValue) throw new Error('任务缺少 replay_key 或 course_key')
     const log = message => runtime.log?.(redactText(String(message)))
@@ -780,7 +803,7 @@ export function createValidatedAcquisitionRuntime(input = {}) {
     }
 
     const recordings = await scanCourse(portalPage, course)
-    const recording = recordings.find(item => item.replayKey === replayKeyValue)
+    const recording = recordings.find(item => item.replayKey === sourceReplayKeyValue)
     if (!recording?.watchHref) {
       const error = new Error('当前课堂实录列表无法定位目标回放')
       error.code = 'COURSE_REPLAY_NOT_FOUND'
@@ -874,6 +897,10 @@ export function createValidatedAcquisitionRuntime(input = {}) {
       createdAt: new Date().toISOString()
     })
 
+    if (storageStatePath) {
+      fs.mkdirSync(path.dirname(storageStatePath), { recursive: true })
+      await browser.context.storageState({ path: storageStatePath })
+    }
     return {
       artifacts: { mediaScratchKey: path.relative(scratchRoot, outputFile), mediaChecksum: checksum },
       runtime: {
@@ -898,6 +925,8 @@ export function createValidatedAcquisitionRuntime(input = {}) {
     } catch {
       // 已经关掉或已崩溃都无所谓，下面照样放锁
     }
+    try { await browserProcess?.close() } catch {}
+    browserProcess = null
     profileLock?.release()
     profileLock = null
   }

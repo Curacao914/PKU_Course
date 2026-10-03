@@ -10,6 +10,7 @@
 ├── /home/ubuntu/.course-worker/     worker 状态：env(0600)、env.public、browser-profile、replays/
 ├── course-site.service              公开站点（role=public，127.0.0.1:3100，无任何机密）
 ├── course-admin.service             管理台 + worker 触发口（role=admin，127.0.0.1:3101，完整环境）
+├── course-control.service           多用户控制面（127.0.0.1:3102，HMAC + 短时 job token + 加密账户凭据）
 ├── course-cycle.timer               定时闭环（扫描 → 推进 → 通知）
 ├── openclaw-gateway.service         已存在，不动
 ├── law-tech-cloudflared.service     已存在，不动（复用其隧道接入 course.law-tech.dev）
@@ -23,20 +24,25 @@
 ssh ubuntu@124.222.111.108
 cp /home/ubuntu/course-runtime/deploy/course.env.example ~/.course-worker/env
 chmod 600 ~/.course-worker/env
-vim ~/.course-worker/env                # 填 PKU_*、DASHSCOPE_API_KEY、R2_*、COURSE_CHROME_PATH
+vim ~/.course-worker/env                # 填 PKU_*、DASHSCOPE_API_KEY、R2_*、OWNER worker 所需配置
 node /home/ubuntu/course-runtime/apps/worker/bin/course.mjs doctor
+
+# 让 law-tech.dev 浏览器能直传 R2（只需首次或来源域名变化时执行）
+set -a; source ~/.course-worker/env; set +a
+node /home/ubuntu/course-runtime/deploy/configure-r2-cors.mjs
 ```
 
 `doctor` 只报告每个凭据是 `set` 还是 `missing`，永远不会回显取值。
 
-## 两个服务与它们的单元（仓库是唯一来源）
+## 三个服务与它们的单元（仓库是唯一来源）
 
-生产上跑**两个进程、两份环境**：
+生产上跑**三个进程、三份独立服务环境（另有各 MEMBER 的独立 env）**：
 
 | 服务 | 角色 | 监听 | 环境文件 | 里面有什么 |
 |---|---|---|---|---|
 | `course-site.service` | `public` | `127.0.0.1:3100` | `~/.course-worker/env.public` | 只有站点目录这类公开配置，**没有任何机密** |
 | `course-admin.service` | `admin` | `127.0.0.1:3101` | `~/.course-worker/env`（0600） | PKU / 百炼 / R2 / 管理令牌 / 账本 / 能触发 worker |
+| `course-control.service` | `control` | `127.0.0.1:3102` | `~/.course-worker/control-env`（0600） | 仅 deploy/control-env.example 列出的变量；HMAC 入口 |
 
 这样"公开接口被攻破"与"管理凭据泄露"不再是同一件事。三条硬约束：
 
@@ -53,7 +59,7 @@ node /home/ubuntu/course-runtime/apps/worker/bin/course.mjs doctor
 ```bash
 ssh ubuntu@124.222.111.108
 cd ~/course-runtime
-deploy/install-units.sh                 # 装/更新两个单元 + daemon-reload（不重启服务）
+deploy/install-units.sh                 # 装/更新三个单元 + daemon-reload（不重启服务）
 deploy/install-units.sh --restart       # 顺带 enable --now 并做健康检查
 deploy/install-units.sh --dry-run       # 只看它打算做什么
 ```
@@ -62,9 +68,9 @@ deploy/install-units.sh --dry-run       # 只看它打算做什么
 `.bak-<时间戳>`；缺失时从 `deploy/env.public.example` 生成一份 `env.public`（**绝不覆盖**
 已有配置）；最后 `daemon-reload`。单元里没有显式角色时它会直接拒绝安装。
 
-nginx 反代见 `deploy/nginx-course.conf.example`（两个 server 块：`course.` → 3100，
-`admin.` → 3101）。仓库不直接写 `/etc`：先 `cp`，再 `diff`，确认后
-`nginx -t && systemctl reload nginx`。
+nginx 反代见 `deploy/nginx-course.conf.example`：`course.` 默认 → 3100，`admin.` → 3101；
+`course.law-tech.dev/_control/` 单独 → 3102，并由 control 自己再校验 60 秒时间窗的 HMAC 签名与 nonce 防重放。仓库不直接写 `/etc`：
+先 `cp`，再 `diff`，确认后 `nginx -t && systemctl reload nginx`。
 
 ## 发布（deploy/release.sh）
 
@@ -85,14 +91,14 @@ ssh ubuntu@124.222.111.108 'bash ~/course-staging/deploy/release.sh --rollback' 
 
 七步，每一步都对应一种"发不出去就别发"的情形：
 
-1. **先检查两个单元的角色**（site=public、admin=admin）：角色不对就在拷贝之前停手，
+1. **先检查三个单元**（site=public、admin=admin、control=独立控制面）：角色/单元不对就在拷贝之前停手，
    不必等切换之后才发现服务起不来。
 2. 拷贝到新 release；依赖按锁文件哈希从依赖仓**硬链接**进来——命中就不装，装一次多个
    release 共享（workspace 的相对符号链接只有在 release 目录里才解析得对，所以是硬链接
    而不是把依赖仓软链过来）。
 3. 在 release 目录里跑全部测试（含 `tools/*.test.mjs`）；不通过就删掉这个目录、什么都不切换。
 4. 切换符号链接：先建 `course-runtime.new`，再 `mv -T` rename——原子，不存在"链接指向空"的瞬间。
-5. 重启**两个**服务并各做一次 `/healthz`；任一失败就自动 `--rollback` 回上一个成功版本。
+5. 重启**三个**服务；site/admin 检查 `/healthz`，control 检查 `/health`。任一失败就自动 `--rollback` 回上一个成功版本。
 6. 全部通过才写 `.history` 与 `.release-meta`（stamp / 目录指纹 digest / lockHash /
    每个服务的 role 与 health 结果）。
 7. 清理：保留最近 `KEEP` 个 release（默认 3），并删掉没有任何 release 引用的依赖仓。
@@ -560,10 +566,32 @@ cf.law-tech.dev      → Cloudflare（橙云）+ 隧道               ← 兜底
 
 ## 待建（后续步骤）
 
-- **同机同用户的两个服务之间仍有文件权限上的边界**：公开进程以同一个 `ubuntu` 用户运行，
+- **同机同用户的三个服务之间仍有文件权限上的边界**：公开进程以同一个 `ubuntu` 用户运行，
   理论上能读 `~/.course-worker/env`。彻底隔离需要独立的系统用户（`ProtectHome`/`ReadOnlyPaths`
   只能挡住文件系统布局的一部分，挡不住"同一个用户"这件事本身），且要配好 `COURSE_*` 环境
   与目录属主；在没做之前，公开进程里"没有机密"靠的是它**不加载**那份环境，而不是读不到。
 - 微信出站消除会话窗口依赖（等 Control UI 批准设备）。
 - `COURSE_ADMIN_TOKEN`：管理接口目前未配令牌，因此一律拒绝访问。接入管理台时一并配置。
 - 磁盘下限检查：空闲低于设定值时拒绝开始下载（旧系统用 `COURSE_WORKER_MIN_FREE_BYTES`，默认 5GiB）。
+
+
+## 多用户修复配置（本 PR 不部署）
+
+OWNER 继续使用 `~/.course-worker/env`；control 使用 `control-env`，MEMBER 使用
+`accounts/<owner-id>/env`（控制面每轮创建空文件，0600，目录 0700）。子进程环境从白名单构造，
+凭据来自该用户加密记录。禁止将 OWNER env 复制给 control 或 MEMBER。
+`COURSE_MEMBER_R2_*` 必须配置独立 MEMBER 桶的受限 token，不得填 OWNER 桶 token。
+该 token 仅限 MEMBER 暂存桶；它不是每用户的 S3 IAM 身份，应用层仍强制 owner namespace。
+
+law-tech 与 control 的 `COURSE_CONTROL_SIGNING_KEY` 相同，至少 32 字节。
+签名正文为 timestamp(ms)、nonce(16 random bytes hex)、method、原始 `/v1/` path+query、ownerId、
+SHA256(raw body)，以换行连接。代理必须原样保留 path/query/body，nginx 去掉 `/_control` 前缀。
+MEMBER 不持有 signing key；只拿绑定 owner/job/private-note:write 的 1 小时 token，
+任务结束即撤销，control 重启全部失效；过期写回失败，任务可重新执行。
+Cloudflare Access 可作为外围附加验证，law-tech 预留 service token 头；不假设 Vercel 固定出口 IP。
+
+MEMBER 全局并发固定为 1，下载并发固定为 1。`max_active_jobs`、`owner_reserved`、
+`hls_concurrency` 已弃用，不参与调度且不再从 API 返回。OWNER 活跃租约阻止下一 MEMBER job 启动，
+现有 worker 的阶段边界让位保持。CPU/IO/内存由 control cgroup 硬限制。
+任务及扫码状态仍在内存。`KillMode=control-group` 保证 control 重启杀掉所有 MEMBER 后代，
+正在执行的任务中断、历史消失；恢复后由用户重新执行，不能当作持久队列。

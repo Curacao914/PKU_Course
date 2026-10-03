@@ -13,8 +13,8 @@
 #   ~/releases/course/.history         发布成功的历史（回滚按它取"上一个"）
 #   ~/releases/course/.history-failed  失败记录（只给人看；回滚绝不采用）
 #
-# **两个服务一起发布**：course-site.service（public，3100）与 course-admin.service（admin，3101）。
-# 只重启一个的话另一个还在跑旧代码，"发布完成"就成了半句话。
+# **三个服务一起发布**：course-site.service（public，3100）、course-admin.service（admin，3101）
+# 与 course-control.service（control，3102）。只重启一部分会留下跨版本接口。
 #
 # 用法（在服务器上）：
 #   deploy/release.sh [来源目录]        默认 ~/course-staging
@@ -27,11 +27,14 @@ RELEASES="${HOME_DIR}/releases/course"
 CURRENT="${HOME_DIR}/course-runtime"
 DEPS="${HOME_DIR}/deps/course"
 KEEP="${KEEP:-3}"
-# 服务清单：名字:期望角色:健康端口。
-# 角色写在这里是有意的：单元里漏写 COURSE_SITE_ROLE 时，serve.mjs 在 systemd 下会拒绝启动
-# （不允许静默退回 all —— 那会把管理台挂到公开端口上）。与其等切换后起不来再回滚，
-# 不如在切换**之前**就拦住。名单与 deploy/course-site.service、course-admin.service 一致。
-SERVICES=("course-site.service:public:3100" "course-admin.service:admin:3101")
+# 服务清单：名字:期望角色:健康端口:健康路径。
+# site/admin 的角色写在这里是有意的：单元里漏写 COURSE_SITE_ROLE 时，serve.mjs 会拒绝启动。
+# control 是独立进程，不使用 COURSE_SITE_ROLE，但同样跟随 release 原子切换并做健康检查。
+SERVICES=(
+  "course-site.service:public:3100:/healthz"
+  "course-admin.service:admin:3101:/healthz"
+  "course-control.service:control:3102:/health"
+)
 UNIT_DIRS=("${HOME_DIR}/.config/systemd/user" "/etc/systemd/system")
 
 log() { printf '%s\n' "$*"; }
@@ -40,6 +43,7 @@ fail() { printf '发布失败：%s\n' "$*" >&2; exit 1; }
 service_name() { printf '%s' "${1%%:*}"; }
 service_role() { printf '%s' "$(printf '%s' "$1" | cut -d: -f2)"; }
 service_port() { printf '%s' "$(printf '%s' "$1" | cut -d: -f3)"; }
+service_health() { printf '%s' "$(printf '%s' "$1" | cut -d: -f4)"; }
 
 # sha256sum 是 GNU 的；BSD/macOS 上是 shasum -a 256。发布脚本只跑在 Linux 上，
 # 但"能在本地跑一遍"对测试很有用（deploy 的仿真测试就是这么做的）。
@@ -79,11 +83,11 @@ record_failure() {
   printf '%s stage=%s reason=%s\n' "$(date +%Y-%m-%dT%H:%M:%S)" "$1" "$2" >> "${RELEASES}/.history-failed"
 }
 
-# 两个服务的健康检查：全部通过才算成功，返回空串；否则返回第一个失败的 URL。
+# 全部服务的健康检查：全部通过才算成功，返回空串；否则返回第一个失败的 URL。
 health_check() {
   local entry url
   for entry in "${SERVICES[@]}"; do
-    url="http://127.0.0.1:$(service_port "$entry")/healthz"
+    url="http://127.0.0.1:$(service_port "$entry")$(service_health "$entry")"
     if ! curl -fsS --max-time 10 "$url" >/dev/null; then printf '%s' "$url"; return 1; fi
   done
   printf '%s' ""
@@ -120,6 +124,30 @@ check_roles() {
       discard_target
       record_failure roles "$name 找不到单元文件"
       fail "找不到单元 ${name}（~/.config/systemd/user 与 /etc/systemd/system 里都没有它）。请先跑 deploy/install-units.sh；确实要跳过就设 COURSE_ROLE_CHECK=warn"
+    fi
+    if [ "$expected" = "control" ]; then
+      if ! grep -q '^Environment=COURSE_CONTROL_HOST=127.0.0.1$' "$unit"; then
+        discard_target
+        record_failure roles "$name 缺少 COURSE_CONTROL_HOST=127.0.0.1"
+        fail "$name 必须显式绑定 COURSE_CONTROL_HOST=127.0.0.1；请先重跑 deploy/install-units.sh"
+      fi
+      if ! grep -q '^KillMode=control-group$' "$unit"; then
+        discard_target
+        record_failure roles "$name 缺少 KillMode=control-group"
+        fail "$name 必须使用 KillMode=control-group；请先重跑 deploy/install-units.sh"
+      fi
+      if ! grep -q '^CPUQuota=' "$unit"; then
+        discard_target
+        record_failure roles "$name 缺少 CPUQuota cgroup 限额"
+        fail "$name 缺少 CPUQuota cgroup 限额；请先重跑 deploy/install-units.sh"
+      fi
+      if ! grep -q '^MemoryMax=' "$unit"; then
+        discard_target
+        record_failure roles "$name 缺少 MemoryMax cgroup 限额"
+        fail "$name 缺少 MemoryMax cgroup 限额；请先重跑 deploy/install-units.sh"
+      fi
+      log "   · $name role=control loopback+cgroup=ok 健康端口=$(service_port "$entry")"
+      continue
     fi
     found="$(grep -o 'COURSE_SITE_ROLE=[a-z]*' "$unit" | head -1 | cut -d= -f2 || true)"
     if [ "$found" != "$expected" ]; then
@@ -245,7 +273,7 @@ fi
 # Node 24 的汇总行是 "ℹ pass N / fail N"（旧版是 "# pass N"），两种都认
 grep -E "^(ℹ|#) (pass|fail)" "$TEST_LOG" | tail -2 | sed 's/^/   /' || true
 
-log "④ 切换前检查两个单元的角色声明"
+log "④ 切换前检查三个服务单元"
 check_roles
 
 log "⑤ 切换符号链接（先建临时链接再 rename，原子）"
@@ -258,7 +286,7 @@ if [ -e "$CURRENT" ] && [ ! -L "$CURRENT" ]; then
 fi
 atomic_link "$TARGET" "$CURRENT"
 
-log "⑥ 重启两个服务并做健康检查（两个都过才算发布成功）"
+log "⑥ 重启三个服务并做健康检查（三个都过才算发布成功）"
 restart_all
 sleep 2
 if bad="$(health_check)"; then

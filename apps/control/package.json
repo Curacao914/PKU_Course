@@ -1,0 +1,17 @@
+{
+  "name": "@course/control",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "law-tech.dev 多用户 Course 控制面",
+  "bin": {
+    "course-control": "./bin/serve.mjs"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1145.0",
+    "@aws-sdk/s3-request-presigner": "^3.1145.0",
+    "@supabase/supabase-js": "2.117.2",
+    "playwright-core": "^1.49.0",
+    "@course/store": "*"
+  }
+}

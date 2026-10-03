@@ -58,6 +58,12 @@ CREATE TABLE IF NOT EXISTS tasks (
   title            TEXT    NOT NULL DEFAULT '',
   starts_at_text   TEXT    NOT NULL DEFAULT '',
   teacher          TEXT    NOT NULL DEFAULT '',
+  owner_id         TEXT    NOT NULL DEFAULT '',
+  source_replay_key TEXT   NOT NULL DEFAULT '',
+  course_id        TEXT    NOT NULL DEFAULT '',
+  course_session_id TEXT   NOT NULL DEFAULT '',
+  priority         INTEGER NOT NULL DEFAULT 100,
+  resource_class   TEXT    NOT NULL DEFAULT 'owner',
   stage            TEXT    NOT NULL DEFAULT 'discovered',
   attempts         INTEGER NOT NULL DEFAULT 0,
   artifacts        TEXT    NOT NULL DEFAULT '{}',
@@ -143,6 +149,22 @@ export const MIGRATIONS = [
     up (db) {
       const columns = db.prepare('PRAGMA table_info(deliveries)').all().map(column => column.name)
       if (!columns.includes('claim_token')) db.exec("ALTER TABLE deliveries ADD COLUMN claim_token TEXT NOT NULL DEFAULT ''")
+    }
+  },
+  {
+    version: 3,
+    name: 'tasks.multiuser_scope（多用户归属与优先级）',
+    up (db) {
+      const columns = db.prepare('PRAGMA table_info(tasks)').all().map(column => column.name)
+      const add = (name, sql) => { if (!columns.includes(name)) db.exec(sql) }
+      add('owner_id', "ALTER TABLE tasks ADD COLUMN owner_id TEXT NOT NULL DEFAULT ''")
+      add('source_replay_key', "ALTER TABLE tasks ADD COLUMN source_replay_key TEXT NOT NULL DEFAULT ''")
+      add('course_id', "ALTER TABLE tasks ADD COLUMN course_id TEXT NOT NULL DEFAULT ''")
+      add('course_session_id', "ALTER TABLE tasks ADD COLUMN course_session_id TEXT NOT NULL DEFAULT ''")
+      add('priority', "ALTER TABLE tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 100")
+      add('resource_class', "ALTER TABLE tasks ADD COLUMN resource_class TEXT NOT NULL DEFAULT 'owner'")
+      db.exec("UPDATE tasks SET source_replay_key = replay_key WHERE source_replay_key = ''")
+      db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_owner_stage ON tasks (owner_id, stage, priority DESC, id)')
     }
   }
 ]

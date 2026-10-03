@@ -63,5 +63,11 @@ export function applyEnvFile(env, filePath = DEFAULT_ENV_FILE) {
 
 /** 解析实际使用的配置文件路径：显式参数 > COURSE_ENV_FILE > 默认位置。 */
 export function resolveEnvFile(env = process.env, explicit = '') {
+  if (env.COURSE_RESOURCE_CLASS === 'member') {
+    const expected = path.join(String(env.COURSE_WORKER_SCRATCH_DIR || ''), 'env')
+    if (!env.COURSE_WORKER_SCRATCH_DIR || !env.COURSE_ENV_FILE || path.resolve(env.COURSE_ENV_FILE) !== path.resolve(expected) || (explicit && path.resolve(explicit) !== path.resolve(expected))) {
+      throw new Error('MEMBER requires its own COURSE_ENV_FILE')
+    }
+  }
   return path.resolve(explicit || env.COURSE_ENV_FILE || DEFAULT_ENV_FILE)
 }

@@ -237,13 +237,21 @@ export function parseRequireMaterials(value) {
  *
  * 筛选条件与 claimNext 的 SQL 一一对应：可领取阶段 + 退避到期 + 租约空闲，按 id 排序。
  */
-export function nextActionableTask(store, { at = new Date(), exclude = new Set() } = {}) {
+export function nextActionableTask(store, {
+  at = new Date(),
+  exclude = new Set(),
+  ownerId = null,
+  resourceClass = null,
+  courseKeys = null
+} = {}) {
   const stamp = (at instanceof Date ? at : new Date(at)).toISOString()
-  return store.listTasks({ limit: 200 })
+  return store.listTasks({ ownerId, resourceClass, limit: 200 })
     .filter(task => ACTIONABLE_STAGES.includes(task.stage))
+    .filter(task => ownerId === null || task.owner_id === ownerId)
+    .filter(task => !courseKeys || courseKeys.has(task.course_key))
     .filter(task => !task.next_attempt_at || task.next_attempt_at <= stamp)
     .filter(task => !task.lease_expires_at || task.lease_expires_at <= stamp)
-    .sort((left, right) => Number(left.id) - Number(right.id))
+    .sort((left, right) => Number(right.priority || 0) - Number(left.priority || 0) || Number(left.id) - Number(right.id))
     .find(task => !exclude.has(task.replay_key)) || null
 }
 
@@ -451,7 +459,13 @@ export function createCommands(context) {
         replayKey: recording.replayKey
       }))
     )
-    const recorded = withLedger(store => store.discoverReplays(flattened))
+    const recorded = options.flags?.has('no-record')
+      ? { inserted: 0, existing: 0, created: [] }
+      : withLedger(store => store.discoverReplays(flattened, {
+          ownerId: config.account?.ownerId || '',
+          priority: config.account?.priority ?? 100,
+          resourceClass: config.account?.resourceClass || 'owner'
+        }))
 
     // 发现新课就提醒一件具体的事：这一节还没有课件。
     // 教学网上没有课件，课件只在用户手里，而它对笔记质量影响很大（术语对齐、结构对照、
@@ -459,7 +473,7 @@ export function createCommands(context) {
     const created = (recorded.created || []).filter(() => !options.options['no-materials-notice'])
     const missingMaterials = created.filter(item =>
       listMaterials({ root: config.materialsRoot, course: item.courseName, lesson: item.title }).length === 0)
-    if (created.length) {
+    if (created.length && config.account?.resourceClass !== 'member') {
       const store = openStore(config.ledgerPath)
       try {
         // 一条短消息：发现了什么、要不要你动手、去哪儿动手。
@@ -2166,7 +2180,60 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
     const state = inspectSiteRoot(siteRoot)
     return state.kind === 'missing' || (state.kind === 'symlink' && state.managed)
   }
+  async function publishPrivate(options) {
+    if (options.flags?.has('rebuild') || options.flags?.has('rollback-site') || options.flags?.has('migrate-site-root')) {
+      throw new Error('普通用户不能执行站点级发布操作')
+    }
+    const replayKey = requireOption(options.options, 'replay-key', 'publish')
+    const from = path.resolve(requireOption(options.options, 'from', 'publish'))
+    const summaryPath = path.join(from, 'notes-run-summary.json')
+    if (!fs.existsSync(summaryPath)) throw new Error('找不到 notes-run-summary.json')
+    const summary = JSON.parse(fs.readFileSync(summaryPath, 'utf8'))
+    const lessonTitle = String(summary.lesson || options.options.lesson || '')
+    const courseName = String(summary.course || options.options.course || '')
+    const notePath = path.join(from, `${safeFileName(lessonTitle)}.md`)
+    if (!fs.existsSync(notePath)) throw new Error(`找不到私有笔记：${notePath}`)
+    const markdown = fs.readFileSync(notePath, 'utf8')
+    const endpoint = String(env.COURSE_CONTROL_LOCAL_URL || '').replace(/\/$/, '')
+    const secret = String(env.COURSE_JOB_TOKEN || '')
+    const ownerId = String(config.account?.ownerId || '')
+    if (!endpoint || !secret || !ownerId) throw new Error('普通用户私有发布的控制面配置不完整')
+
+    const response = await injectedFetch(endpoint + '/v1/internal/private-note', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer ' + secret,
+        'x-course-owner-id': ownerId,
+        'x-course-job-id': String(env.COURSE_JOB_ID || ''),
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify({ replayKey, courseName, lessonTitle, markdown })
+    })
+    const result = await response.json().catch(() => ({}))
+    if (!response.ok || result.ok === false) {
+      throw new Error(result.error || `私有笔记入库失败（HTTP ${response.status}）`)
+    }
+
+    const store = openStore(config.ledgerPath)
+    try {
+      const task = store.getTask(replayKey)
+      if (task && !['published', 'completed'].includes(task.stage)) {
+        store.reportStage({
+          id: task.id,
+          stage: 'published',
+          message: '已保存到个人工作台',
+          data: { artifacts: { privateNoteId: result.note?.id || '' } }
+        })
+      }
+    } finally {
+      store.close()
+    }
+    emit({ replayKey, private: true, note: result.note || null }, options)
+    return 0
+  }
+
   async function publish(options) {
+    if (config.account?.resourceClass === 'member') return publishPrivate(options)
     const siteRoot = path.resolve(options.options.out || path.join(config.scratchRoot, 'site'))
     const libraryForRebuild = path.join(siteRoot, 'library.json')
 
@@ -2893,12 +2960,20 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
       needsAttention: [], asrBlocked: null
     }
 
+    const memberSelectedCourseKeys = config.account?.resourceClass === 'member'
+      ? new Set(config.account?.selectedCourseKeys || [])
+      : null
+
     // 转录通道是否因付费/凭据问题停摆：用它拦住后续下载（转录本身仍会重试）。
     // 转录跑不动时继续下载只会把盘塞满，而盘满影响的是整机。
     const asrBlocked = (() => {
       const store = openStore(config.ledgerPath)
       try {
-        const blocked = store.listTasks({ limit: 200 })
+        const blocked = store.listTasks({
+          ownerId: config.account?.resourceClass === 'member' ? (config.account?.ownerId || null) : null,
+          resourceClass: config.account?.resourceClass || 'owner',
+          limit: 200
+        }).filter(task => !memberSelectedCourseKeys || memberSelectedCourseKeys.has(task.course_key))
           .filter(task => task.last_error && ['downloaded', 'transcribing', 'transcript_ready'].includes(task.stage))
           .map(task => ({ task, issue: classifyProviderIssue(task.last_error) }))
           .filter(item => item.issue && item.issue.provider === 'aliyun')
@@ -2929,7 +3004,7 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
 
     // 1. 扫描并登记（幂等）；磁盘不足时跳过，避免登记完却下不动。
     // 只传 course：discover 的 --out 是"目录清单文件"，与 publish 的站点目录同名不同义。
-    if (space.ok) {
+    if (space.ok && config.account?.resourceClass !== 'member') {
       try {
         await discover({
           ...quiet,
@@ -2993,6 +3068,9 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
           }
         } else {
           const candidate = nextActionableTask(store, {
+            ownerId: config.account?.resourceClass === 'member' ? (config.account?.ownerId || null) : null,
+            resourceClass: config.account?.resourceClass || 'owner',
+            courseKeys: memberSelectedCourseKeys,
             exclude: new Set(skippedNoMaterials.map(item => item.replayKey))
           })
           if (!candidate) break
@@ -3031,6 +3109,30 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
         store.close()
       }
       if (!task) break
+      if (config.account?.resourceClass === 'member') {
+        const probe = openStore(config.ledgerPath)
+        try {
+          const stamp = new Date().toISOString()
+          const ownerBusy = probe.listTasks({ resourceClass: 'owner', limit: 500 }).some(item =>
+            item.lease_expires_at &&
+            item.lease_expires_at > stamp &&
+            item.claimed_by
+          )
+          if (ownerBusy) {
+            // MEMBER 只借用空闲资源：OWNER 一旦在跑，本轮先把已经领取的任务释放回原阶段。
+            probe.reportStage({
+              id: task.id,
+              stage: task.stage,
+              message: 'OWNER 正在运行，普通用户任务主动让位',
+              nextAttemptAt: new Date(Date.now() + 60_000).toISOString()
+            })
+            summary.tasks.push({ replayKey: task.replay_key, stage: task.stage, action: 'yield', ok: true })
+            break
+          }
+        } finally {
+          probe.close()
+        }
+      }
       // 只有真正领到任务才算用掉一格配额：因缺课件被拦下的课次不占额度，
       // 这一轮该跑的其它课次照样能跑。
       index += 1
@@ -3151,6 +3253,14 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
     // 缺课件被拦下的课次：账本原样不动，但摘要里要留下痕迹——
     // 管理台的运行历史据此能回答"这一轮为什么没动那几节"。
     summary.materials.skipped = skippedNoMaterials
+
+    if (config.account?.resourceClass === 'member') {
+      summary.notification = { skipped: 'member_private_notifications' }
+      summary.finishedAt = new Date().toISOString()
+      state.lastCycle = summary
+      emit(summary, options)
+      return summary.tasks.some(item => item.ok === false) || summary.errors.length ? 1 : 0
+    }
 
     /**
      * 3. 投递已排队的通知（发之前先看一眼微信会话）。
@@ -4089,9 +4199,11 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
         result = await runtime.download(
           {
             replay_key: replayKey,
+            source_replay_key: task?.source_replay_key || task?.runtime?.sourceReplayKey || replayKey,
             course_key: courseKey,
-            course_name: options.options.course || '',
-            title: options.options.title || ''
+            course_name: options.options.course || task?.course_name || '',
+            title: options.options.title || task?.title || '',
+            runtime: task?.runtime || {}
           },
           { log: message => stderr(String(message)) }
         )

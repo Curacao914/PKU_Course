@@ -53,14 +53,18 @@ export function openLedger(databasePath = ':memory:', options = {}) {
   const statements = {
     insertTask: db.prepare(`
       INSERT INTO tasks (replay_key, course_key, course_name, title, starts_at_text, teacher,
+                         owner_id, source_replay_key, course_id, course_session_id, priority, resource_class,
                          stage, artifacts, runtime, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'discovered', ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'discovered', ?, ?, ?, ?)
       ON CONFLICT (replay_key) DO UPDATE SET
         -- 空值只补不覆盖：一次只带了部分字段的重复登记，不得把已存的标题/教师清空
         course_name = COALESCE(NULLIF(excluded.course_name, ''), tasks.course_name),
         title = COALESCE(NULLIF(excluded.title, ''), tasks.title),
         starts_at_text = COALESCE(NULLIF(excluded.starts_at_text, ''), tasks.starts_at_text),
         teacher = COALESCE(NULLIF(excluded.teacher, ''), tasks.teacher),
+        course_id = COALESCE(NULLIF(excluded.course_id, ''), tasks.course_id),
+        course_session_id = COALESCE(NULLIF(excluded.course_session_id, ''), tasks.course_session_id),
+        priority = MAX(tasks.priority, excluded.priority),
         updated_at = excluded.updated_at
     `),
     findByReplayKey: db.prepare('SELECT * FROM tasks WHERE replay_key = ?'),
@@ -69,7 +73,7 @@ export function openLedger(databasePath = ':memory:', options = {}) {
       WHERE stage IN (SELECT value FROM json_each(?))
         AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
         AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
-      ORDER BY id
+      ORDER BY priority DESC, id
       LIMIT 1
     `),
     claim: db.prepare(`
@@ -104,7 +108,14 @@ export function openLedger(databasePath = ':memory:', options = {}) {
     `),
     insertEvent: db.prepare('INSERT INTO task_events (task_id, at, stage, message, data) VALUES (?, ?, ?, ?, ?)'),
     listEvents: db.prepare('SELECT * FROM task_events WHERE task_id = ? ORDER BY id'),
-    listTasks: db.prepare('SELECT * FROM tasks WHERE (? IS NULL OR stage = ?) ORDER BY id LIMIT ?'),
+    listTasks: db.prepare(`
+      SELECT * FROM tasks
+      WHERE (? IS NULL OR stage = ?)
+        AND (? IS NULL OR owner_id = ?)
+        AND (? IS NULL OR resource_class = ?)
+      ORDER BY priority DESC, id
+      LIMIT ?
+    `),
     insertDelivery: db.prepare(`
       INSERT INTO deliveries (dedupe_key, purpose, body_text, object_url, status, scheduled_for, created_at, updated_at)
       VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)
@@ -186,17 +197,27 @@ export function openLedger(databasePath = ':memory:', options = {}) {
      * 幂等登记回放。已存在的 replay_key 只刷新展示字段，绝不重置阶段与重试计数——
      * 这正是旧系统靠 (owner_id, replay_key) 唯一约束达成的语义。
      */
-    discoverReplays(replays = [], { now } = {}) {
+    discoverReplays(replays = [], {
+      now,
+      ownerId = '',
+      priority = ownerId ? 10 : 100,
+      resourceClass = ownerId ? 'member' : 'owner',
+      courseId = '',
+      courseSessionId = ''
+    } = {}) {
       const at = nowIso(now)
+      const owner = String(ownerId || '').trim()
       return transaction(() => {
         let inserted = 0
         let existing = 0
         // 新增了哪几条也要报出来：发现新课要提醒用户上传课件，光有计数不够用。
         const created = []
         for (const replay of replays) {
-          const replayKey = String(replay.replay_key || replay.replayKey || '').trim()
-          const courseKey = String(replay.course_key || replay.courseKey || '').trim()
-          if (!replayKey || !courseKey) throw new Error('登记回放需要 replay_key 与 course_key')
+          const sourceReplayKey = String(replay.source_replay_key || replay.sourceReplayKey || replay.replay_key || replay.replayKey || '').trim()
+          const sourceCourseKey = String(replay.course_key || replay.courseKey || '').trim()
+          if (!sourceReplayKey || !sourceCourseKey) throw new Error('登记回放需要 replay_key 与 course_key')
+          const replayKey = owner ? owner + '::' + sourceReplayKey : sourceReplayKey
+          const courseKey = sourceCourseKey
           const before = statements.findByReplayKey.get(replayKey)
           if (before) existing += 1
           else {
@@ -214,8 +235,14 @@ export function openLedger(databasePath = ':memory:', options = {}) {
             String(replay.title || ''),
             String(replay.starts_at_text || replay.startsAtText || ''),
             String(replay.teacher || ''),
+            owner,
+            sourceReplayKey,
+            String(replay.course_id || replay.courseId || courseId || ''),
+            String(replay.course_session_id || replay.courseSessionId || courseSessionId || ''),
+            Number(replay.priority ?? priority),
+            String(replay.resource_class || replay.resourceClass || resourceClass || 'member'),
             JSON.stringify(replay.artifacts || {}),
-            JSON.stringify(replay.runtime || {}),
+            JSON.stringify({ ...(replay.runtime || {}), sourceReplayKey }),
             at,
             at
           )
@@ -228,8 +255,10 @@ export function openLedger(databasePath = ':memory:', options = {}) {
       return hydrate(statements.findByReplayKey.get(String(replayKey)))
     },
 
-    listTasks({ stage = null, limit = 100 } = {}) {
-      return statements.listTasks.all(stage, stage, limit).map(hydrate)
+    listTasks({ stage = null, ownerId = null, resourceClass = null, limit = 100 } = {}) {
+      return statements.listTasks
+        .all(stage, stage, ownerId, ownerId, resourceClass, resourceClass, limit)
+        .map(hydrate)
     },
 
     /**

@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url'
  *   systemctl / curl / npm / node / sleep  全部是假命令（记录调用 + 可注入失败）
  *   HOME 指向临时目录，真机上什么都没有动
  * 于是这些情形都能在本地反复验证：
- *   · 干净目录首次发布（依赖进独立依赖仓、两个服务都重启、健康检查全过）；
+ *   · 干净目录首次发布（依赖进独立依赖仓、三个服务都重启、健康检查全过）；
  *   · 同一个锁文件再发一次 → 复用依赖仓，不再装依赖；
  *   · 锁文件变了 → 依赖仓按哈希新增，旧的仍然留着；
  *   · 测试没过 / 单元角色写错 → 切换前就停，不留垃圾目录、不动当前版本；
@@ -30,7 +30,7 @@ const RELEASE = path.join(REPO, 'deploy', 'release.sh')
 
 const shimScript = (name, body) => '#!/bin/sh\n' + body
 
-/** 造一台"假服务器"：独立的 HOME、PATH 上的 shim、两个单元文件、一个 staging 目录。 */
+/** 造一台"假服务器"：独立的 HOME、PATH 上的 shim、三个单元文件、一个 staging 目录。 */
 function sandbox({ siteRole = 'public', adminRole = 'admin', venv = true } = {}) {
   // realpath 一下：macOS 上 /var 是指向 /private/var 的符号链接，
   // 不统一的话 realpathSync 的结果与手工拼出来的路径对不上（断言会假失败）
@@ -65,7 +65,7 @@ function sandbox({ siteRole = 'public', adminRole = 'admin', venv = true } = {})
     'exit 0\n'))
   for (const name of fs.readdirSync(shims)) fs.chmodSync(path.join(shims, name), 0o755)
 
-  // 两个单元文件（角色检查读的就是它们）
+  // 三个单元文件：site/admin 检查角色；control 还必须声明 loopback 绑定与 cgroup 硬限制。
   const units = path.join(home, '.config', 'systemd', 'user')
   fs.mkdirSync(units, { recursive: true })
   const unit = (role, port) => [
@@ -76,6 +76,16 @@ function sandbox({ siteRole = 'public', adminRole = 'admin', venv = true } = {})
   ].join('\n') + '\n'
   fs.writeFileSync(path.join(units, 'course-site.service'), unit(siteRole, 3100))
   fs.writeFileSync(path.join(units, 'course-admin.service'), unit(adminRole, 3101))
+  fs.writeFileSync(path.join(units, 'course-control.service'), [
+    '[Service]',
+    'EnvironmentFile=%h/.course-worker/control-env',
+    'Environment=COURSE_CONTROL_HOST=127.0.0.1',
+    'Environment=COURSE_CONTROL_PORT=3102',
+    'KillMode=control-group',
+    'CPUQuota=80%',
+    'MemoryMax=900M',
+    'ExecStart=__NODE__ apps/control/bin/serve.mjs'
+  ].join('\n') + '\n')
 
   if (venv) fs.mkdirSync(path.join(home, 'venvs', 'course'), { recursive: true })
 
@@ -136,7 +146,7 @@ const releaseDirs = (sandbox) => {
   return fs.existsSync(dir) ? fs.readdirSync(dir).filter(name => !name.startsWith('.')).sort() : []
 }
 
-test('干净目录首次发布：依赖进独立依赖仓、两个服务都重启并检查健康、成功历史写一条', async () => {
+test('干净目录首次发布：依赖进独立依赖仓、三个服务都重启并检查健康、成功历史写一条', async () => {
   const box = sandbox()
   const result = await run(box)
   assert.equal(result.code, 0, result.stdout + result.stderr)
@@ -166,14 +176,17 @@ test('干净目录首次发布：依赖进独立依赖仓、两个服务都重�
   assert.match(meta, /^digest=[0-9a-f]{16}$/m)
   assert.match(meta, /service=course-site.service role=public port=3100 health=ok/)
   assert.match(meta, /service=course-admin.service role=admin port=3101 health=ok/)
+  assert.match(meta, /service=course-control.service role=control port=3102 health=ok/)
 
-  // 两个服务都被重启、两个端口都被检查
+  // 三个服务都被重启、三个端口都被检查
   const log = readLog(box)
   assert.match(log, /systemctl --user restart course-site.service/)
   assert.match(log, /systemctl --user restart course-admin.service/)
+  assert.match(log, /systemctl --user restart course-control.service/)
   // 用 includes 而不是正则：路径里的斜杠会把正则字面量提前收尾
   assert.ok(log.includes('127.0.0.1:3100/healthz'), '公开服务要检查健康')
   assert.ok(log.includes('127.0.0.1:3101/healthz'), '管理服务要检查健康')
+  assert.ok(log.includes('127.0.0.1:3102/health'), '控制面要检查健康')
   assert.equal((log.match(/^npm ci/gm) || []).length, 1, '第一次发布要装一次依赖')
 
   fs.rmSync(box.home, { recursive: true, force: true })
@@ -296,3 +309,24 @@ test('单元没有显式声明角色：切换前就拒绝，不留目录、不�
 
   fs.rmSync(box.home, { recursive: true, force: true })
 })
+
+test('control 单元缺少 loopback/cgroup 保护：切换前拒绝；恢复真实约束后可发布', async () => {
+  const box = sandbox()
+  const controlUnit = path.join(box.home, '.config', 'systemd', 'user', 'course-control.service')
+  const original = fs.readFileSync(controlUnit, 'utf8')
+  fs.writeFileSync(controlUnit, original.replace('KillMode=control-group\n', ''))
+
+  const rejected = await run(box)
+  assert.notEqual(rejected.code, 0)
+  assert.match(rejected.stderr, /KillMode=control-group/)
+  assert.equal(currentOf(box), '', 'control 隔离约束缺失时绝不能切换')
+  assert.deepEqual(releaseDirs(box), [], '拒绝发布后不得留下 release 目录')
+
+  fs.writeFileSync(controlUnit, original)
+  const retry = await run(box)
+  assert.equal(retry.code, 0, retry.stdout + retry.stderr)
+  assert.ok(currentOf(box).includes('releases'))
+
+  fs.rmSync(box.home, { recursive: true, force: true })
+})
+

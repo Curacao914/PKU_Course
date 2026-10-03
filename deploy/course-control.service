@@ -1,0 +1,35 @@
+[Unit]
+Description=Course multi-user control plane（低优先级 MEMBER 队列，127.0.0.1:3102）
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/course-runtime
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=%h/.course-worker/control-env
+Environment=COURSE_CONTROL_HOST=127.0.0.1
+Environment=COURSE_CONTROL_PORT=3102
+ExecStart=__NODE__ apps/control/bin/serve.mjs
+KillMode=control-group
+Restart=on-failure
+RestartSec=3
+
+# MEMBER jobs and their Chrome/ffmpeg/Node children all stay inside this cgroup.
+# OWNER worker and site/admin are separate units, so their resource budget is not borrowed here.
+Nice=10
+CPUWeight=20
+CPUQuota=80%
+IOWeight=20
+MemoryHigh=700M
+MemoryMax=900M
+MemorySwapMax=256M
+TasksMax=256
+
+# 不启用 NoNewPrivileges：这个进程需要拉起 Chromium；与 course-admin 的原因相同。
+PrivateTmp=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

@@ -50,6 +50,7 @@ function defaultAcquire({ log, config } = {}) {
         executablePath: config?.chromePath || undefined,
         scratchRoot: config?.scratchRoot,
         profileDir: config?.profileDir,
+        storageStatePath: config?.storageStatePath || undefined,
         headless: config?.headless,
         username: config?.sources?.PKU_USERNAME || undefined,
         password: config?.sources?.PKU_PASSWORD || undefined

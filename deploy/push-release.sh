@@ -7,9 +7,9 @@
 #   deploy/push-release.sh --sync-only     # 只同步到 ~/course-staging，不发布
 #   deploy/push-release.sh user@host       # 换主机
 #
-# 为什么要有 --sync-only：单元文件（deploy/*.service）必须先装到
-# ~/.config/systemd/user 才能在发布时通过角色校验（release.sh 会拒绝"角色没写"的单元）。
-# 改单元的流程是：--sync-only → install-units.sh --restart → 正常发布。
+# 正常发布会先从 staging 安装/更新 systemd 单元（只 daemon-reload，不提前重启），
+# 再跑 release.sh。这样首次新增服务也不会出现“release 要求单元已存在、但单元又在新 release 里”
+# 的鸡生蛋问题。--sync-only 仍保留给人工检查。
 #
 # 只推代码（apps/packages/tools/docs/deploy + 根目录的 package.json / package-lock.json），
 # 不含 node_modules 与 .git；真正的切换、测试、回滚都在服务器侧的 deploy/release.sh 里做。
@@ -49,11 +49,11 @@ if [ "$SYNC_ONLY" = 1 ]; then
   exit 0
 fi
 
-echo "② 在服务器上发布（测试不过就不切换）"
+echo "② 先从 staging 安装/更新 systemd 单元（只 daemon-reload，不提前重启）"
+ssh "$HOST" "cd ~ && bash \"$STAGING/deploy/install-units.sh\""
+
+echo "③ 在服务器上发布（测试不过就不切换；切换后统一重启三个服务）"
 ssh "$HOST" "cd ~ && bash \"$STAGING/deploy/release.sh\" \"$STAGING\""
 
-echo "③ 完成。"
+echo "④ 完成。"
 echo "   回滚：ssh $HOST 'bash ~/course-staging/deploy/release.sh --rollback'"
-# 单元文件也要跟着更新，否则新版本可能跑在与单元不一致的角色/端口上。
-# install-units.sh 是幂等的：没变化就只打印一行。
-echo "   若 deploy/*.service 有改动：ssh $HOST 'bash ~/course-runtime/deploy/install-units.sh --restart'"

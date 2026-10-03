@@ -15,7 +15,7 @@ set -euo pipefail
 UNITS_DIR="${HOME}/.config/systemd/user"
 ENV_DIR="${HOME}/.course-worker"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-UNITS=(course-site.service course-admin.service)
+UNITS=(course-site.service course-admin.service course-control.service)
 NODE_BIN="${COURSE_NODE_BIN:-$(command -v node || true)}"
 DRY_RUN=0
 RESTART=0
@@ -47,12 +47,16 @@ for unit in "${UNITS[@]}"; do
   src="$ROOT/deploy/$unit"
   dst="$UNITS_DIR/$unit"
   [ -f "$src" ] || { echo "缺单元文件：$src" >&2; exit 1; }
-  # 角色必须显式写在单元里：静默退回 all 会把管理台挂到公开进程上、并加载全部机密
-  if ! grep -q '^Environment=COURSE_SITE_ROLE=' "$src"; then
-    printf '单元 %s 没有显式声明 COURSE_SITE_ROLE（不允许静默退回 all）\n' "$unit" >&2
-    exit 1
+  # site/admin 必须显式写角色；control 是独立进程，不走 COURSE_SITE_ROLE。
+  if [ "$unit" = "course-control.service" ]; then
+    role="control"
+  else
+    if ! grep -q '^Environment=COURSE_SITE_ROLE=' "$src"; then
+      printf '单元 %s 没有显式声明 COURSE_SITE_ROLE（不允许静默退回 all）\n' "$unit" >&2
+      exit 1
+    fi
+    role="$(grep -o 'COURSE_SITE_ROLE=[a-z]*' "$src" | head -1 | cut -d= -f2)"
   fi
-  role="$(grep -o 'COURSE_SITE_ROLE=[a-z]*' "$src" | head -1 | cut -d= -f2)"
   tmp="$(mktemp)"
   sed "s|__NODE__|$NODE_BIN|g" "$src" > "$tmp"
   if [ -f "$dst" ] && cmp -s "$tmp" "$dst"; then
@@ -85,11 +89,13 @@ run systemctl --user daemon-reload
 if [ "$RESTART" = 1 ]; then
   run systemctl --user enable --now "${UNITS[@]}"
   sleep 2
-  for port in 3100 3101; do
-    if curl -fsS --max-time 5 "http://127.0.0.1:$port/healthz" >/dev/null 2>&1; then
+  for port in 3100 3101 3102; do
+    health="/healthz"
+    [ "$port" = 3102 ] && health="/health"
+    if curl -fsS --max-time 5 "http://127.0.0.1:$port$health" >/dev/null 2>&1; then
       printf '· :%s 健康\n' "$port"
     else
-      printf '· :%s 健康检查没过（journalctl --user -u course-site.service 看日志）\n' "$port" >&2
+      printf '· :%s 健康检查没过（journalctl --user -u course-site.service / course-control.service 看日志）\n' "$port" >&2
     fi
   done
 fi
