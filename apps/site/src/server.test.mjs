@@ -61,7 +61,7 @@ test('resolveInsideRoot refuses paths that escape the site root', () => {
 
 test('the site server serves the index, note pages and the notes api', async () => {
   const root = siteDir()
-  const site = await startSiteServer({ root, port: 0 })
+  const site = await startSiteServer({ root, port: 0, admin: false })
   try {
     const health = await fetch(`${site.url}/healthz`)
     assert.equal(health.status, 200)
@@ -97,7 +97,7 @@ test('the site server serves the index, note pages and the notes api', async () 
 
 test('站内搜索走服务端：与 MCP 同一套检索，结果带小节与片段', async () => {
   const root = siteDir()
-  const site = await startSiteServer({ root, port: 0 })
+  const site = await startSiteServer({ root, port: 0, admin: false })
   try {
     // 正文里才有、元数据里没有的词：能搜到才说明真的查了正文
     const body = await fetch(`${site.url}/api/search?q=${encodeURIComponent('共同行为')}`)
@@ -134,7 +134,7 @@ test('站内搜索走服务端：与 MCP 同一套检索，结果带小节与片
 
 test('课程筛选：/api/search 能收窄到一门课，锚点与页面链接指向同一小节', async () => {
   const root = siteDir()
-  const site = await startSiteServer({ root, port: 0 })
+  const site = await startSiteServer({ root, port: 0, admin: false })
   try {
     const scoped = await (await fetch(`${site.url}/api/search?q=${encodeURIComponent('共同行为')}&course=${encodeURIComponent('刑法分论')}`)).json()
     assert.equal(scoped.ok, true)
@@ -159,7 +159,7 @@ test('课程筛选：/api/search 能收窄到一门课，锚点与页面链接�
 test('旧的平铺 md 链接 302 到规范路径；库里没有的不猜', async () => {
   // 路径规则改版前是 /md/<课次>.md，收藏与转发里还留着老地址。
   const root = siteDir()
-  const site = await startSiteServer({ root, port: 0 })
+  const site = await startSiteServer({ root, port: 0, admin: false })
   try {
     const old = await fetch(`${site.url}/md/第10-12节.md`, { redirect: 'manual' })
     assert.equal(old.status, 302)
@@ -209,7 +209,7 @@ test('每个响应都带安全头：CSP 只允许本站与内联，框架禁止�
 
 test('坏路径编码回 400（不是 500），穿越防护仍然拒得住', async () => {
   const root = siteDir()
-  const site = await startSiteServer({ root, port: 0 })
+  const site = await startSiteServer({ root, port: 0, admin: false })
   try {
     // 未完成的百分号编码：decodeURIComponent 会抛，绝不能让它逃逸成 500
     const malformed = await fetch(site.url + '/%E5%95', { redirect: 'manual' })
@@ -279,7 +279,7 @@ test('admin endpoints require the configured token', async () => {
 test('a broken index is reported as unavailable rather than an empty site', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'course-site-'))
   fs.writeFileSync(path.join(root, 'notes.json'), '{ broken')
-  const site = await startSiteServer({ root, port: 0 })
+  const site = await startSiteServer({ root, port: 0, admin: false })
   try {
     assert.equal((await fetch(`${site.url}/healthz`)).status, 503)
     assert.equal((await fetch(`${site.url}/api/notes`)).status, 503)
@@ -427,7 +427,7 @@ test('查询长度预算两个入口一致：/api/search 回 400，MCP 回可改
 test('时间预算：慢检索回 504 并归还名额（连发两次是 504 而不是 503）', async () => {
   const root = budgetSiteDir()
   // 先证明这份库正常能搜：否则 504 说不清是"预算"还是"库坏了"
-  const normal = await startSiteServer({ root, port: 0 })
+  const normal = await startSiteServer({ root, port: 0, admin: false })
   try {
     const ok = await fetch(`${normal.url}/api/search?q=${encodeURIComponent('共同行为')}&limit=3`)
     assert.equal(ok.status, 200)
@@ -438,7 +438,7 @@ test('时间预算：慢检索回 504 并归还名额（连发两次是 504 而�
 
   // 1ms 预算 + 1 个并发名额：慢检索必然超时；第二次如果还是 504（而不是 503 busy），
   // 就说明第一次虽然超时了，名额确实已经归还——这正是"异常路径不漏槽位"的验收点。
-  const site = await startSiteServer({ root, port: 0, requestTimeoutMs: 1, maxConcurrent: 1 })
+  const site = await startSiteServer({ root, port: 0, admin: false, requestTimeoutMs: 1, maxConcurrent: 1 })
   try {
     const first = await fetch(`${site.url}/api/search?q=${encodeURIComponent('共同行为')}`)
     assert.equal(first.status, 504)
