@@ -550,6 +550,15 @@ function jobSubject (job) {
   var meta = (job && job.meta) || {}
   return [meta.course, meta.lesson, meta.module].filter(Boolean).join(' · ')
 }
+function jobStageText (job) {
+  if (!job || job.status !== 'running' || !['cycle', 'retry'].includes(job.action)) return ''
+  var key = job.meta && job.meta.replayKey
+  if (!key) return ''
+  var task = taskByKey(key)
+  if (!task) return ''
+  var label = STAGE_TEXT[String(task.stage || '')] || String(task.stage || '')
+  return label ? '当前：' + label : ''
+}
 function renderRunState () {
   var status = state.status || {}
   var running = status.running
@@ -601,7 +610,9 @@ function renderRecentJobs () {
         var cls = job.status === 'done' ? 'ok' : job.status === 'failed' ? 'bad' : 'warn'
         var statusText = job.status === 'done' ? '完成' : job.status === 'failed' ? '失败' : job.status === 'running' ? '进行中' : '排队中'
         var subject = jobSubject(job)
-        var detail = subject || (job.status === 'queued' && job.queuePosition ? '队列第 ' + job.queuePosition + ' 项' : '')
+        var stage = jobStageText(job)
+        var detail = [subject, stage].filter(Boolean).join(' · ') ||
+          (job.status === 'queued' && job.queuePosition ? '队列第 ' + job.queuePosition + ' 项' : '')
         var time = job.status === 'queued' ? (job.queuePosition ? '第 ' + job.queuePosition + ' 项' : '') : elapsedText(job.startedAt, job.finishedAt)
         return '<button type="button" class="task-row task-button" data-act="job-output" data-id="' + esc(job.id) + '">' +
           '<span class="pill ' + cls + '"><span class="dot"></span>' + statusText + '</span>' +
