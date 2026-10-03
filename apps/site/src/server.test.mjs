@@ -182,7 +182,7 @@ test('每个响应都带安全头：CSP 只允许本站与内联，框架禁止�
   // 站点全站零依赖、阅读脚本是内联的（没有构建步骤），所以 CSP 里的 'unsafe-inline' 是刻意的；
   // 但它仍然挡住"从外部域加载脚本"这条最常见的注入路径。
   const root = siteDir()
-  const site = await startSiteServer({ root, port: 0 })
+  const site = await startSiteServer({ root, port: 0, admin: false })
   try {
     for (const path of ['/', '/notes/刑法分论/第10-12节.html', '/md/刑法分论/第10-12节.md']) {
       const response = await fetch(site.url + path)
