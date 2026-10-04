@@ -543,7 +543,7 @@ export function createRequestHandler({
         sendJson(res, 404, { ok: false, error: 'private_content', message: '课程内容只在登录后的个人空间中提供' }, { 'cache-control': 'no-store' })
         return
       }
-      res.writeHead(302, { location: '/admin', 'cache-control': 'private, no-store' })
+      res.writeHead(302, { location: '/', 'cache-control': 'private, no-store' })
       res.end()
       return
     }

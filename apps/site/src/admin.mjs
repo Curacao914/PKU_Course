@@ -2281,6 +2281,25 @@ export function createAdminHandler({
         return handleAccountApi(req, res, pathname, url, session)
       }
 
+      // 私有模式下，course 根目录就是当前账号的课程阅读/操作空间。
+      // OWNER 的完整运维后台只留在 /admin，避免“打开课程站 = 进入管理后台”。
+      if (pathname === '/') {
+        if (!session) {
+          res.writeHead(302, { location: ssoLocation('/'), 'cache-control': 'no-store' })
+          res.end()
+          return true
+        }
+        const body = Buffer.from(MEMBER_ADMIN_HTML)
+        res.writeHead(200, {
+          'content-type': 'text/html; charset=utf-8',
+          'cache-control': 'private, no-store',
+          'x-content-type-options': 'nosniff',
+          'content-length': body.length
+        })
+        res.end(body)
+        return true
+      }
+
       if (pathname === '/admin' || pathname === '/admin/') {
         const host = String(req.headers.host || '').split(':')[0]
         if (host === 'cf.law-tech.dev') {
@@ -2293,7 +2312,12 @@ export function createAdminHandler({
           res.end()
           return true
         }
-        const body = Buffer.from(session.role === 'owner' ? ADMIN_HTML : MEMBER_ADMIN_HTML)
+        if (session.role !== 'owner') {
+          res.writeHead(302, { location: '/', 'cache-control': 'private, no-store' })
+          res.end()
+          return true
+        }
+        const body = Buffer.from(ADMIN_HTML)
         res.writeHead(200, {
           'content-type': 'text/html; charset=utf-8',
           'cache-control': 'no-store',
