@@ -986,7 +986,7 @@ test('the home page lays every course out as a horizontal strip of lessons', () 
   assert.match(html, /<section class="band" data-course="刑法分论">/)
   assert.match(html, /<table class="lesson-table">/)
   assert.match(html, /<th>课次<\/th><th>关键词<\/th>/, '表格第一列课次、第二列关键词')
-  assert.match(html, /<td class="lesson-title"><a href="notes\/刑法分论\/第10-12节-共犯与罪数\.html">/)
+  assert.match(html, /<td class="lesson-title"><a href="\/notes\/刑法分论\/第10-12节-共犯与罪数\.html">/)
   assert.ok(!html.includes('class="card"'), '大卡片换成了表格')
   assert.ok(!html.includes('个概念'), '卡片上那串"几个概念几条法条"不再显示')
   assert.ok(!html.includes('共 3 篇'), '顶部那行统计不需要')
@@ -1092,8 +1092,8 @@ test('重新发布一节旧课：课程顺序、上一讲下一讲、最新一�
   writeSite({ records: [earlier, later], outputDir: dir })
   const older = fs.readFileSync(path.join(dir, 'notes/刑法分论/2026-09-07第5-6节.html'), 'utf8')
   const newer = fs.readFileSync(path.join(dir, 'notes/刑法分论/2026-09-20第2-4节.html'), 'utf8')
-  assert.match(older, /<span>下一讲<\/span><a href="notes\/刑法分论\/2026-09-20第2-4节\.html">/, '重新发布不改下一讲')
-  assert.match(newer, /<span>上一讲<\/span><a href="notes\/刑法分论\/2026-09-07第5-6节\.html">/, '上一讲同样按上课日期定')
+  assert.match(older, /<span>下一讲<\/span><a href="\/notes\/刑法分论\/2026-09-20第2-4节\.html">/, '重新发布不改下一讲（根绝对链接，从笔记页点得回得去）')
+  assert.match(newer, /<span>上一讲<\/span><a href="\/notes\/刑法分论\/2026-09-07第5-6节\.html">/, '上一讲同样按上课日期定')
   assert.ok(!/<span>上一讲<\/span>/.test(older), '第一节没有上一讲')
   // 左栏课次表按上课日期从早到晚
   const rail = newer.match(/<ol class="lessons">([\s\S]*?)<\/ol>/)[1]
@@ -1182,3 +1182,58 @@ test('笔记页 meta 写课次日期；有了一页纸之后笔记页下载的�
   const onepageHref = onepagePage.match(/<a href="([^"]+)" download title="下载 Markdown"/)[1]
   assert.equal(decodeURIComponent(onepageHref), '/' + onePageMarkdownPath(built), '一页纸页面下载的是一页纸')
 })
+
+/**
+ * 站内链接必须是根绝对路径。
+ *
+ * 这条不是风格洁癖：同一份渲染结果会出现在不同深度的地址上——首页在 /，课程入口在
+ * /courses/<课程>/，笔记页在 /notes/<课程>/<课次>.html。相对链接（少了开头那个斜杠）
+ * 只有恰好待在根目录时才碰巧能用：在笔记页点"下一讲"会变成
+ * /notes/课程/notes/课程/课次.html，在课程入口点课次会变成 /courses/课程/notes/…，
+ * 两边都 404。这类错误不报错、页面照样渲染，只能靠把链接摆在一起比。
+ */
+test('每一页的站内链接都是根绝对路径（相对链接在深层地址上必然断）', () => {
+  const first = record({ onepage: { title: '共犯成立的条件', markdown: '## 一、成立条件\n\n- 共同故意', chars: 12 } })
+  const second = record({ lessonTitle: '第13节 罪数与竞合' })
+  const topic = {
+    id: 'topic-links',
+    course: first.courseName,
+    title: '共犯专题',
+    summary: '把两节串起来。',
+    lessons: [first.slug, second.slug],
+    nodes: [{
+      id: 'n1',
+      title: '成立条件',
+      relation: 'hierarchy',
+      sourceRefs: [{ slug: first.slug, sectionId: first.headings[0].id, title: first.headings[0].text }],
+      children: []
+    }]
+  }
+  const pages = {
+    '首页': renderIndexPage([first, second], { siteOrigin: 'https://course.law-tech.dev', topics: [topic] }),
+    '单课程入口': renderIndexPage([first, second], { siteOrigin: 'https://course.law-tech.dev/courses/刑法分论/' }),
+    '笔记页': renderNotePage(first, { siteOrigin: 'https://course.law-tech.dev', courseLessons: [first, second], neighbours: { previous: second, next: second } }),
+    '一页纸': renderOnepagePageHtml(first, { siteOrigin: 'https://course.law-tech.dev', courseLessons: [first, second] }),
+    '专题页': renderTopicPage(topic, { siteOrigin: 'https://course.law-tech.dev', notes: [first] }),
+    '知识地图': renderKnowledgeMapPage({ notes: [first], topics: [topic], siteOrigin: 'https://course.law-tech.dev' }),
+    '概念索引': renderTermIndexPage({ title: '概念索引', kind: 'concepts', notes: [first], siteOrigin: 'https://course.law-tech.dev' }),
+    '搜索页': renderSearchPage({ siteOrigin: 'https://course.law-tech.dev', courses: [{ name: first.courseName, count: 2 }] })
+  }
+  for (const [name, html] of Object.entries(pages)) {
+    // 只看服务端渲染出来的链接：页面内联脚本里拼的 href 是运行时才成形的
+    const markup = html.replace(/<script[\s\S]*?<\/script>/g, '')
+    const hrefs = [...markup.matchAll(/<a [^>]*href="([^"]*)"/g)].map(match => match[1])
+    assert.ok(hrefs.length, name + ' 应当有链接可查')
+    for (const href of hrefs) {
+      if (!href || href.startsWith('#') || href.startsWith('http') || href.startsWith('mailto:') || href.startsWith('data:')) continue
+      assert.ok(href.startsWith('/'), name + ' 里出现相对链接：' + href)
+    }
+  }
+
+  // 具体两处曾经断掉的链接："下一讲"与课程入口里的课次行
+  const note = pages['笔记页']
+  assert.ok(note.includes('href="/' + second.slug + '.html"'), '上一讲/下一讲要能真的跳到那一节')
+  const course = pages['单课程入口']
+  assert.ok(course.includes('href="/' + first.slug + '.html"'), '单课程入口里的课次行要指到笔记页')
+})
+

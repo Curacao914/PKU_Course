@@ -1413,8 +1413,10 @@ export function renderNotePage(record, { siteOrigin = '', neighbours = {}, cours
   ].filter(Boolean).join(' · ')
 
   const railExtra = [
-    neighbours.previous ? `<div class="prevnext"><span>上一讲</span><a href="${escapeHtml(neighbours.previous.slug)}.html">${escapeHtml(neighbours.previous.lessonTitle)}</a></div>` : '',
-    neighbours.next ? `<div class="prevnext"><span>下一讲</span><a href="${escapeHtml(neighbours.next.slug)}.html">${escapeHtml(neighbours.next.lessonTitle)}</a></div>` : ''
+    // 站内链接一律根绝对：这一页自己的地址是 /notes/课程/课次.html，
+    // 少了开头那个斜杠就会解析成 /notes/课程/notes/课程/课次.html（点击 → 404 → 回首页）。
+    neighbours.previous ? `<div class="prevnext"><span>上一讲</span><a href="/${escapeHtml(neighbours.previous.slug)}.html">${escapeHtml(neighbours.previous.lessonTitle)}</a></div>` : '',
+    neighbours.next ? `<div class="prevnext"><span>下一讲</span><a href="/${escapeHtml(neighbours.next.slug)}.html">${escapeHtml(neighbours.next.lessonTitle)}</a></div>` : ''
     // 字号 / 深浅 / 底色已经在顶栏工具栏里，这里不再重复一份
   ].filter(Boolean).join('')
 
@@ -2434,7 +2436,9 @@ export function renderIndexPage(records, { siteOrigin = '', topics = [] } = {}) 
 
   const rowOf = record => [
     '<tr>',
-    `<td class="lesson-title"><a href="${escapeHtml(record.slug)}.html">${escapeHtml(record.lessonTitle)}</a>` +
+    // 根绝对：同一份表格既用在 /（首页），也用在 /courses/<课程>/（单课程入口），
+    // 相对链接在后者会解析成 /courses/课程/notes/课程/课次.html。
+    `<td class="lesson-title"><a href="/${escapeHtml(record.slug)}.html">${escapeHtml(record.lessonTitle)}</a>` +
       `${record.onepage ? ` <a class="onepage-link" href="/${escapeHtml(onepageSlug(record.slug))}.html" title="一页纸摘要" aria-label="一页纸摘要">${svgIcon('sheet')}</a>` : ''}</td>`,
     `<td class="lesson-keywords">${record.theme ? `<span class="lesson-theme">${escapeHtml(record.theme)}</span>` : ''}${(record.keywords || []).map(term => `<span class="kw">${escapeHtml(term)}</span>`).join('')}</td>`,
     record.readMinutes ? `<td class="lesson-meta">约 ${record.readMinutes} 分钟</td>` : '<td class="lesson-meta"></td>',
