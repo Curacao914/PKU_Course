@@ -47,6 +47,7 @@ h2{font-size:19px;letter-spacing:-.015em;margin:0 0 10px}
 .grid{display:grid;gap:16px}
 .grid.two{grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
 .grid.three{grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}
+.grid.four{grid-template-columns:repeat(4,minmax(0,1fr))}
 .stat{font-size:30px;font-weight:600;letter-spacing:-.03em;line-height:1.1}
 .stat small{display:block;font-size:13px;font-weight:400;color:var(--ink-3);letter-spacing:0;margin-top:4px}
 .todo{display:flex;align-items:center;gap:12px;padding:12px 0;border-top:1px solid var(--line)}
@@ -73,9 +74,20 @@ h2{font-size:19px;letter-spacing:-.015em;margin:0 0 10px}
 .icon-btn.danger:hover{background:var(--danger-soft);color:var(--danger)}
 .icon-btn:focus-visible{outline:2px solid var(--accent-soft);outline-offset:1px}
 .icon-btn svg.i{width:17px;height:17px}
-.metric-button{border:0;background:transparent;color:inherit;text-align:left;padding:4px 6px;border-radius:10px;cursor:pointer;min-width:0}
+.metric-button{border:0;background:transparent;color:inherit;text-align:left;padding:8px 10px;border-radius:10px;cursor:pointer;min-width:0}
 .metric-button:hover{background:var(--sunken)}
+.metric-button[aria-pressed=true]{background:var(--sunken)}
 .metric-button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.status-expand{margin-top:12px;padding-top:10px;border-top:1px solid var(--line)}
+.status-expand-head{display:flex;align-items:center;justify-content:space-between;gap:10px;color:var(--ink-2);font-size:13px}
+.status-expand-head span{color:var(--ink-3)}
+.status-list{margin-top:4px}
+.status-item{display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px solid var(--line)}
+.status-item:first-child{border-top:0}
+.status-copy{flex:1;min-width:0}
+.status-copy b{display:block;font-size:13.5px;font-weight:550;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.status-copy span{display:block;margin-top:1px;font-size:12px;color:var(--ink-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@media(max-width:720px){.grid.four{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .view-filter{display:flex;align-items:center;gap:6px;padding:4px 12px 8px}
 .run-console{max-height:320px;overflow:auto;overscroll-behavior:contain;padding:4px 2px 2px}
 .run-section{padding:8px 0;border-bottom:1px solid var(--line)}

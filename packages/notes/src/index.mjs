@@ -139,6 +139,35 @@ export {
 } from './integration.mjs'
 
 export {
+  checkTopicSources,
+  normalizeSourceRef,
+  normalizeSourceRefs,
+  normalizeTopicArtifact,
+  sourceRefHref,
+  topicSourceStats
+} from './topic.mjs'
+
+export {
+  TOPIC_ARTIFACT_SCHEMA,
+  TOPIC_PLAN_SCHEMA,
+  buildTopicArtifactSource,
+  buildTopicPlanningSource,
+  generateTopicArtifact,
+  normalizeTopicPlan,
+  planCourseTopics
+} from './topic-generation.mjs'
+
+export {
+  emptyTopicManifest,
+  normalizeTopicDefinition,
+  normalizeTopicManifest,
+  removeTopicDefinition,
+  replaceCourseTopics,
+  selectConfiguredTopics,
+  upsertTopicDefinition
+} from './topic-manifest.mjs'
+
+export {
   emptyIntegrationManifest,
   normalizeIntegrationDefinition,
   normalizeIntegrationManifest,

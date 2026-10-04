@@ -182,14 +182,14 @@ export const TOOL_DEFINITIONS = [
     name: 'fetch',
     title: '取文档（OpenAI 标准）',
     description:
-      'OpenAI 标准取文档接口：输入 search 返回的 id，返回 { id, title, text, url, metadata }。' +
-      'id 也支持 "slug#小节标题" 的形式，只取那一节——比整篇更省上下文。',
+      'OpenAI 标准取文档接口：输入 search 返回的笔记 id，或 get_course 返回的专题 fetchId，返回 { id, title, text, url, metadata }。' +
+      '笔记 id 支持 "slug#小节标题" 只取一节；专题 id 形如 "topic:<id>"，读取专题 Markdown。',
     annotations: READ_ONLY,
     inputSchema: {
       type: 'object',
       additionalProperties: false,
       properties: {
-        id: { type: 'string', minLength: 1, description: '来自 search 的 results[].id（笔记 slug，或 slug#小节）' }
+        id: { type: 'string', minLength: 1, description: '来自 search 的笔记 id（slug 或 slug#小节），或 get_course 的 topics[].fetchId（topic:<id>）' }
       },
       required: ['id']
     },

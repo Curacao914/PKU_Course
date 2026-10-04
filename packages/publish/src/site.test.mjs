@@ -14,6 +14,9 @@ import {
   renderIndexPage,
   renderKnowledgeMapPage,
   renderOnepagePageHtml,
+  renderTopicMarkdown,
+  renderTopicPage,
+  topicSlug,
   refreshRecord,
   renderFeed,
   renderNotePage,
@@ -217,12 +220,12 @@ test('the reading page keeps its tools in the top bar instead of a floating pane
   assert.ok(!home.includes('title="站点导航"'), '首页的导航不收进下拉')
 })
 
-test('public pages include a hidden owner management entry backed by Course session state', () => {
+test('public pages always expose the management entry; /admin owns authentication', () => {
   const html = renderIndexPage([record()])
   assert.match(html, /data-course-admin/)
   assert.match(html, /href="\/admin"/)
-  assert.match(html, /\/_auth\/session/)
-  assert.match(html, /course-admin-link/)
+  assert.match(html, /\.course-admin-link\s*\{[\s\S]{0,160}?display:\s*inline-flex/, '入口本身必须常驻，不能等会话探测后才显示')
+  assert.doesNotMatch(html, /\/_auth\/session/, '公开页面不为决定图标显隐额外探测登录态')
 })
 
 test('every page without the reading toolbar still offers 深浅 / 底色 / 字号', () => {
@@ -335,6 +338,7 @@ test('writeSite lays out the whole site and can be regenerated from scratch', ()
     'cases/index.html',
     'map/index.html',
     'search/index.html',
+    'topics.json',
     'llms.txt',
     'feed.xml'
   ].sort())
@@ -444,6 +448,94 @@ test('rebuilding from the publish library refreshes derived fields instead of re
   assert.match(notePage, /href="#一-共犯的成立条件"/, '目录要按正文重算出来')
   const concepts = fs.readFileSync(path.join(dir2, 'concepts/index.html'), 'utf8')
   assert.match(concepts, /#一-共犯的成立条件"/, '索引锚点也要重算')
+})
+
+
+test('专题整合：课程页入口、三视图、原文节点与机器可读产物共用同一结构', () => {
+  const note = record({
+    onepage: { title: '共犯一页纸', markdown: '## 成立条件\\n\\n共同故意与共同行为。', chars: 18 }
+  })
+  const section = note.sections.find(item => item.title === '知识连接') || note.sections[0]
+  const topic = {
+    kind: 'course-topic',
+    version: 1,
+    id: '刑法分论::共犯体系',
+    course: '刑法分论',
+    title: '共犯体系',
+    summary: '把成立条件与后续罪名分析放在同一框架里。',
+    generatedAt: '2026-10-04T00:00:00.000Z',
+    lessons: [{ slug: note.slug, lessonTitle: note.lessonTitle, checksum: note.checksum }],
+    nodes: [{
+      id: 'n1',
+      title: '成立与后续分析',
+      relation: 'hierarchy',
+      sourceRefs: [],
+      children: [{
+        id: 'n1-1',
+        title: '知识连接',
+        relation: 'sequence',
+        note: '成立判断之后进入后续罪名分析。',
+        sourceRefs: [{ slug: note.slug, sectionId: section.id, title: section.title }],
+        children: []
+      }]
+    }]
+  }
+
+  const page = renderTopicPage(topic, { siteOrigin: 'https://course.law-tech.dev', notes: [note] })
+  assert.ok(page.includes('>框架</button>'))
+  assert.ok(page.includes('>提纲</button>'))
+  assert.ok(page.includes('>自测</button>'))
+  assert.match(page, /data-relation="sequence"/)
+  assert.ok(page.includes(note.slug + '.html#'), '专题节点要能跳回原笔记小节')
+  assert.match(page, /回忆 · 顺序/)
+
+  const markdown = renderTopicMarkdown(topic, { notes: [note] })
+  assert.match(markdown, /## 知识框架/)
+  assert.ok(markdown.includes('[原文](/notes/'))
+
+  const home = renderIndexPage([note], { topics: [topic] })
+  const topicAt = home.indexOf('专题整合')
+  const onepageAt = home.indexOf('一页纸摘要')
+  assert.ok(topicAt >= 0 && onepageAt >= 0 && topicAt < onepageAt, '专题整合入口要排在一页纸之前')
+  assert.ok(home.includes('/' + topicSlug(topic) + '.html'))
+
+  const map = renderKnowledgeMapPage({ notes: [note], topics: [topic] })
+  assert.match(map, /原笔记节点/)
+  assert.match(map, /专题/)
+  assert.ok(map.includes(note.slug + '.html#'))
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-topic-site-'))
+  const site = writeSite({ records: [note], topics: [topic], outputDir: dir, siteOrigin: 'https://course.law-tech.dev' })
+  const slug = topicSlug(topic)
+  assert.ok(site.written.includes(slug + '.html'))
+  assert.ok(site.written.includes(slug + '.md'))
+  assert.ok(site.written.includes(slug + '.json'))
+  assert.ok(site.written.includes('topics.json'))
+  const topicIndex = JSON.parse(fs.readFileSync(path.join(dir, 'topics.json'), 'utf8'))
+  assert.equal(topicIndex.topics[0].title, '共犯体系')
+  const llms = fs.readFileSync(path.join(dir, 'llms.txt'), 'utf8')
+  assert.match(llms, /专题整合（1 个）/)
+  assert.match(llms, /共犯体系/)
+})
+
+test('过期专题不会继续出现在阅读站', () => {
+  const note = record()
+  const staleTopic = {
+    kind: 'course-topic',
+    version: 1,
+    id: 'stale',
+    course: note.courseName,
+    title: '旧专题',
+    lessons: [{ slug: note.slug, checksum: 'old-checksum' }],
+    nodes: [{ id: 'x', title: '旧节点', relation: 'hierarchy', sourceRefs: [], children: [] }]
+  }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-topic-stale-'))
+  const site = writeSite({ records: [note], topics: [staleTopic], outputDir: dir })
+  assert.ok(!site.written.includes(topicSlug(staleTopic) + '.html'))
+  const index = fs.readFileSync(path.join(dir, 'index.html'), 'utf8')
+  assert.doesNotMatch(index, /旧专题/)
+  const topicIndex = JSON.parse(fs.readFileSync(path.join(dir, 'topics.json'), 'utf8'))
+  assert.deepEqual(topicIndex.topics, [])
 })
 
 test('the knowledge map groups lessons and their shared concepts', () => {
@@ -583,6 +675,8 @@ test('the one-page view is an A4 sheet that cannot overflow', () => {
   assert.match(html, /<article class="sheet" id="sheet" data-mode="read">/)
   assert.match(html, /<button type="button" data-sheet-mode="read" aria-pressed="true">阅读模式<\/button>/)
   assert.match(html, /<button type="button" data-sheet-mode="a4" aria-pressed="false">A4 预览<\/button>/)
+  assert.match(html, /<div class="onepage-actions">[\s\S]*?<nav class="lesson-dock"[\s\S]*?<div class="sheet-tools"/,
+    '课次入口与阅读/A4 开关应属于同一工具行，而不是上下错位的两排')
   assert.match(html, /id="sheetBody"/)
   // 阅读模式：正文 17px 基准且**直接引用全局字号**（拖滑块即时生效，没有"监听字号"这一层可以漏）
   assert.match(html, /.sheet\[data-mode="read"\] \.sheet-body \{ font-size: calc\(17px \* var\(--font-scale\)\)/)

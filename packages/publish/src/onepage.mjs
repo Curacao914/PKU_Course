@@ -47,13 +47,14 @@ export function renderOnepagePage(record = {}, { siteOrigin = '', courseLessons 
     rail || `<div class="rail-title">${escapeHtml(record.courseName || '')}</div>`,
     '</aside>',
     '<div class="sheet-wrap" id="sheetWrap" data-sheet-mode="read">',
-    // 与笔记页同一位置的三个入口：在这一页也能原路回正文、回到自己的标记
+    '<div class="onepage-actions">',
+    // 本课次入口与显示方式属于同一层控制，宽屏放在同一行，窄屏自然换行。
     lessonDock(record, { current: 'onepage' }),
-    // 显示方式开关：默认阅读模式，纸张模式是一次明确的点击（并记住选择）
     '<div class="sheet-tools" id="sheetTools" role="group" aria-label="一页纸显示方式">',
     '<button type="button" data-sheet-mode="read" aria-pressed="true">阅读模式</button>',
     '<button type="button" data-sheet-mode="a4" aria-pressed="false">A4 预览</button>',
     '<span class="sheet-state" id="sheetState" aria-live="polite"></span>',
+    '</div>',
     '</div>',
     '<article class="sheet" id="sheet" data-mode="read">',
     `<h1 class="sheet-title">${escapeHtml(sheetTitle)}</h1>`,
@@ -313,7 +314,11 @@ export const ONEPAGE_CSS = `
 .onepage-chars { color: var(--muted); font-size: 11.5px; margin-left: 6px; }
 .sheet-wrap { min-width: 0; }
 
-/* 显示方式开关：两个按钮 + 一行状态，不做成大按钮工具栏 */
+/* 两组控制在同一工具行：左边是原笔记/一页纸/我的标记，右边是阅读模式/A4 预览。 */
+.onepage-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px;
+  max-width: 210mm; margin: 0 auto 12px; }
+.onepage-actions .lesson-dock { margin: 0; }
+.onepage-actions .sheet-tools { max-width: none; margin: 0; }
 /* ── 来源映射：块的包装 + "看原文" ── */
 .sheet-body .ob { margin: 0; }
 .sheet-body .ob-source { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 8px;

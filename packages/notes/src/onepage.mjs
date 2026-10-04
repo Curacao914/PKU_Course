@@ -164,6 +164,7 @@ export async function generateOnepage({
 } = {}) {
   let budgetNote = ''
   let lastError = null
+  let sourceMapRetried = false
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     const result = await callModel({
       config: modelConfig,
@@ -178,7 +179,16 @@ export async function generateOnepage({
       })
     })
     try {
-      return { ...validateOnepage(result.parsed), trace: result.trace, attempts: attempt + 1 }
+      const validated = validateOnepage(result.parsed)
+      // 有可用小节时，sourceMap 是一页纸“看原文”的必要组成。模型偶尔会把它整段漏掉：
+      // 内容本身合格也先额外提醒并重试一次；若下一次仍为空，则保留一页纸正文，交给
+      // sourcemap 补全链路处理，避免为了映射失败把整份一页纸一起丢掉。
+      if (sections.length && !validated.sourceMap.length && !sourceMapRetried && attempt < retries) {
+        sourceMapRetried = true
+        budgetNote = '上一版一页纸正文已合格，但 sourceMap 为空。正文可以沿用同样的压缩程度；这一次必须为主要内容块补 sourceMap，并且 sections[].id 只能从给定小节清单逐字选择。'
+        continue
+      }
+      return { ...validated, trace: result.trace, attempts: attempt + 1 }
     } catch (error) {
       lastError = error
       const chars = String(result.parsed?.markdown || '').replace(/\s/g, '').length

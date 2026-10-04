@@ -49,7 +49,7 @@ ${ADMIN_CSS}</style>
     <button role="tab" data-tab="overview" aria-selected="true">概览</button>
     <button role="tab" data-tab="courses" aria-selected="false">课程</button>
     <button role="tab" data-tab="content" aria-selected="false">专题</button>
-    <button role="tab" data-tab="settings" aria-selected="false">设置</button>
+    <button role="tab" data-tab="settings" aria-selected="false">账户设置</button>
   </nav>
   <section id="tab-overview"></section>
   <section id="tab-courses" hidden></section>
@@ -78,9 +78,10 @@ var OPEN_KEY = 'course.admin.open'
 var SEL_KEY = 'course.admin.sel'
 var state = {
   status: null, balance: null, config: null, storage: null, content: null,
-  tab: 'overview', busy: false, requests: {}, uploads: {}, open: {},
+  tab: 'overview', busy: false, requests: {}, uploads: {}, open: {}, overviewStage: '',
+  account: null,
   contentDraft: { id: '', course: '', topic: '', lessons: [], enabled: true },
-  sel: { tag: '', year: 'all', stage: '', course: '', lesson: '', sort: 'desc', rail: false, pane: 'maintenance' },
+  sel: { tag: '', year: 'all', stage: '', course: '', lesson: '', sort: 'desc', rail: false, pane: 'account' },
   preview: null,
   // 没保存的运行参数改动：20 秒轮询重绘与分栏切换都不该把它抹掉
   configDraft: {}
@@ -101,7 +102,8 @@ var LABELS = {
   retry: '重试', 'refresh-note': '更新笔记',
   revise: '重写笔记', 'notify-retry': '重发通知',
   'rebuild-content': '重建公开站点', 'rollback-content': '回滚上一版本',
-  'rebuild-integration': '更新专题', 'rebuild-integrations': '更新全部专题',
+  'rebuild-integration': '更新旧章级整合', 'rebuild-integrations': '更新旧章级整合',
+  'generate-topics': '生成专题', 'rebuild-topic': '更新专题', 'rebuild-topics': '更新全部专题',
   'ocr-material': '补识别'
 }
 var MODULE_TEXT = { approved: '已通过', draft: '草稿', reviewing: '审查中', revising: '重写中', pending: '待写', failed: '失败' }
@@ -232,6 +234,12 @@ async function load (options) {
   }
   if (!state.config) {
     try { state.config = await (await fetch('/api/admin/config', { headers: headers(false) })).json() } catch (e) {}
+  }
+  if (!state.account) {
+    try {
+      var accountRes = await fetch('/api/account/status', { headers: headers(false) })
+      state.account = accountRes.ok ? await accountRes.json() : { ok: false }
+    } catch (e) { state.account = { ok: false } }
   }
   if (options.quiet && isDirty()) { renderRunState(); return true }
   render()
@@ -387,47 +395,72 @@ function renderOverview () {
   var s = state.status
   var t = s.todos || {}
   var all = tasks()
-  var counts = { published: 0, active: 0, queued: 0 }
+  var attentionKeys = {}
+  var todoNotes = {}
+  function markAttention (item, note) {
+    var key = String(item && item.replayKey || '')
+    if (!key) return
+    attentionKeys[key] = true
+    if (!todoNotes[key]) todoNotes[key] = note
+  }
+  ;(t.stuck || []).forEach(function (item) { markAttention(item, '需要处理') })
+  ;(t.missingMaterials || []).forEach(function (item) { markAttention(item, '缺少课件') })
   all.forEach(function (task) {
-    var group = stageGroup(task)
+    var stage = String(task.stage || '')
+    if ((stage === 'published' || stage === 'completed') && (!task.quality || !task.quality.complete)) {
+      var missing = task.quality && task.quality.missing ? task.quality.missing.join('、') : '完整性状态'
+      markAttention(task, '待补齐：' + missing)
+    }
+  })
+
+  function overviewGroup (task) {
+    return attentionKeys[String(task && task.replayKey || '')] ? 'attention' : stageGroup(task)
+  }
+
+  var counts = { published: 0, active: 0, attention: 0, queued: 0 }
+  all.forEach(function (task) {
+    var group = overviewGroup(task)
     if (counts[group] != null) counts[group] += 1
   })
-  var todos = []
-  ;(t.stuck || []).forEach(function (item) {
-    todos.push({ title: item.courseName + ' · ' + item.title, note: '需要处理', label: '查看', tab: 'courses', course: item.courseName, lesson: item.replayKey })
-  })
-  ;(t.missingMaterials || []).forEach(function (item) {
-    todos.push({ title: item.courseName + ' · ' + item.title, note: '缺少课件', label: '上传', tab: 'courses', course: item.courseName, lesson: item.replayKey })
-  })
-  all.filter(function (task) {
-    var stage = String(task.stage || '')
-    return (stage === 'published' || stage === 'completed') && (!task.quality || !task.quality.complete)
-  }).forEach(function (task) {
-    var missing = task.quality && task.quality.missing ? task.quality.missing.join('、') : '完整性状态'
-    todos.push({ title: task.courseName + ' · ' + task.title, note: '待补齐：' + missing, label: '查看', tab: 'courses', course: task.courseName, lesson: task.replayKey })
-  })
-  if (s.channel && s.channel.ok === false) todos.push({ title: '通知通道不可用', note: '', label: '查看', tab: 'overview' })
-  if (t.failedDeliveries) todos.push({ title: t.failedDeliveries + ' 条通知发送失败', note: '', label: '查看', tab: 'settings' })
 
-  var hero = todos.length
-    ? '<h1>' + todos.length + ' 件待处理</h1>' + todos.map(function (item) {
-      return '<div class="todo"><div class="t"><b>' + esc(item.title) + '</b>' +
-        (item.note ? '<span>' + esc(item.note) + '</span>' : '') + '</div>' +
-        '<button class="act" data-go="' + item.tab + '"' +
-        (item.course ? ' data-course="' + esc(item.course) + '"' : '') +
-        (item.lesson ? ' data-lesson="' + esc(item.lesson) + '"' : '') + '>' + esc(item.label) + '</button></div>'
-    }).join('')
-    : '<h1>无待办</h1><div class="empty-ok"><span class="pill ok"><span class="dot"></span>一切正常</span></div>'
+  var selected = state.overviewStage || ''
+  var stageItems = selected ? all.filter(function (task) { return overviewGroup(task) === selected }) : []
+  var stagePanel = selected
+    ? '<div class="status-expand"><div class="status-expand-head"><strong>' + esc(stageLabel(selected)) + '</strong><span>' + stageItems.length + ' 项</span></div>' +
+      (stageItems.length ? '<div class="status-list">' + stageItems.map(function (task) {
+        var key = String(task.replayKey || '')
+        var view = taskStatus(task)
+        var note = todoNotes[key] || view.note || view.text
+        return '<div class="status-item"><div class="status-copy"><b>' + esc(task.courseName + ' · ' + task.title) + '</b>' +
+          '<span>' + esc(note) + '</span></div>' +
+          '<button class="act quiet" data-go="courses" data-course="' + esc(task.courseName) + '" data-lesson="' + esc(key) + '">查看</button></div>'
+      }).join('') + '</div>' : '<div class="small muted" style="padding-top:8px">暂无项目</div>') +
+      '</div>'
+    : ''
+
+  var statusCard = card(
+    '<div class="grid four">' +
+      '<button class="metric-button stat" data-act="view-stage" data-value="published" aria-pressed="' + (selected === 'published') + '">' + counts.published + '<small>已发布</small></button>' +
+      '<button class="metric-button stat" data-act="view-stage" data-value="active" aria-pressed="' + (selected === 'active') + '">' + counts.active + '<small>进行中</small></button>' +
+      '<button class="metric-button stat" data-act="view-stage" data-value="attention" aria-pressed="' + (selected === 'attention') + '">' + counts.attention + '<small>待处理</small></button>' +
+      '<button class="metric-button stat" data-act="view-stage" data-value="queued" aria-pressed="' + (selected === 'queued') + '">' + counts.queued + '<small>排队中</small></button>' +
+    '</div>' + stagePanel
+  )
+
+  var alerts = []
+  if (s.channel && s.channel.ok === false) alerts.push({ title: '通知通道不可用', tab: 'overview' })
+  if (t.failedDeliveries) alerts.push({ title: t.failedDeliveries + ' 条通知发送失败', tab: 'settings' })
+  var alertCard = alerts.length
+    ? card('<h2>其他提醒</h2>' + alerts.map(function (item) {
+      return '<div class="todo"><div class="t"><b>' + esc(item.title) + '</b></div>' +
+        '<button class="act quiet" data-go="' + item.tab + '">查看</button></div>'
+    }).join(''))
+    : ''
 
   var spend = s.spend || { asrCny: 0, notesCny: 0, totalCny: 0 }
   var pricing = s.pricing || {}
   $('tab-overview').innerHTML =
-    card(hero) +
-    card('<div class="grid three">' +
-      '<button class="metric-button stat" data-act="view-stage" data-value="published">' + counts.published + '<small>已发布</small></button>' +
-      '<button class="metric-button stat" data-act="view-stage" data-value="active">' + counts.active + '<small>进行中</small></button>' +
-      '<button class="metric-button stat" data-act="view-stage" data-value="queued">' + counts.queued + '<small>排队中</small></button>' +
-      '</div>') +
+    statusCard + alertCard +
     '<div class="grid two">' +
       card('<h2>花费</h2><div class="stat">' + money(spend.totalCny) + '<small>转写 ' + money(spend.asrCny) + ' + 笔记 ' + money(spend.notesCny) + '</small></div>' +
         '<div class="row" style="margin-top:14px;align-items:flex-start">' + balancesHtml() + '</div>' +
@@ -725,20 +758,78 @@ function previewHtml (task) {
     '</div>'
 }
 
-/**
- * 整合材料：这些类型**都还没接线**，所以只列出来、标"规划中"，不给可点的按钮——
- * 让用户先点一个看起来能用的按钮，再收到"还没做"的报错，是把未完成当成已完成报给使用者。
- *
- * 仓库里已有的原型是另一件事：「course integrate」按章做确定性抽取（结构 + 出处 +
- * 待核继承，不调用模型），控制台还没接上它。所以单独一块写清它的真实范围。
- */
+/** 课程管理右栏：课程标签与这门课自己的专题整合放在一起，不再跳到另一页才能维护。 */
 function integrationHtml () {
   var course = state.sel.course
   var list = tasks().filter(function (item) { return item.courseName === course })
   var published = list.filter(function (item) { return stageGroup(item) === 'published' }).length
   return '<h2>' + esc(course) + '</h2><p class="sub">' + list.length + ' 节 · 已发布 ' + published + '</p>' +
     '<div class="block"><h3>课程标签</h3>' + courseTagHtml(course) + '</div>' +
-    '<div class="block"><button class="act" data-go="content">管理专题整合</button></div>'
+    courseIntegrationHtml(course)
+}
+
+function integrationRowsHtml (items, showCourse) {
+  return (items || []).map(function (item) {
+    var stale = item.staleLessons && item.staleLessons.length
+      ? '<div class="tiny" style="color:var(--warn);margin-top:5px">变化课次：' + esc(item.staleLessons.join('、')) + '</div>'
+      : (item.definitionChanged ? '<div class="tiny" style="color:var(--warn);margin-top:5px">专题范围已调整</div>' : '')
+    return '<div class="block" style="margin:0">' +
+      '<div class="row" style="align-items:center">' +
+        contentStatusPill(item.status) +
+        '<strong>' + esc(item.title || item.topic) + '</strong>' +
+        (showCourse ? '<span class="small muted">' + esc(item.course) + ' · ' + item.lessons.length + ' 节</span>' : '<span class="small muted">' + item.lessons.length + ' 节</span>') +
+        '<span class="spacer"></span>' +
+        '<button class="act quiet" data-act="edit-integration" data-id="' + esc(item.id) + '">调整</button>' +
+        '<button class="act" data-act="rebuild-topic" data-id="' + esc(item.id) + '">更新</button>' +
+        '<button class="act danger" data-act="delete-integration" data-id="' + esc(item.id) + '">删除</button>' +
+      '</div>' +
+      '<div class="small" style="margin-top:7px">' + esc((item.lessons || []).map(topicLessonLabel).join(' / ')) + '</div>' +
+      stale +
+      '<div class="tiny muted" style="margin-top:5px">' +
+        (item.generatedAt ? '更新 ' + esc(releaseTime(item.generatedAt)) : '尚未生成') +
+      '</div></div>'
+  }).join('')
+}
+
+function integrationFormHtml (course) {
+  if (state.tab === 'courses' && (!state.contentDraft.course || state.contentDraft.course !== course)) resetIntegrationDraft(course)
+  var draft = state.contentDraft
+  var lessons = contentCourseMap()[course] || []
+  var lessonChecks = lessons.map(function (lesson) {
+    var checked = (draft.lessons || []).includes(lesson.slug)
+    return '<label class="integration-choice"><input type="checkbox" data-integration-lesson="' + esc(lesson.slug) + '"' +
+      (checked ? ' checked' : '') + '><span>' + esc(lesson.title) + '</span></label>'
+  }).join('')
+  return '<div class="block"><div class="row"><h3 style="margin:0">' + (draft.id ? '编辑专题' : '新建专题') + '</h3>' +
+    '<span class="spacer"></span>' + (draft.id ? '<span class="tiny muted">' + esc(draft.id) + '</span>' : '') + '</div>' +
+    '<div class="field"><label>专题名称</label><input data-integration-text="topic" value="' + esc(draft.topic || '') + '" placeholder="例如：罪刑均衡与以刑制罪"></div>' +
+    '<div class="field"><label>包含课次</label><div class="integration-lessons">' +
+      (lessonChecks || '<span class="small muted">这门课还没有课次</span>') + '</div></div>' +
+    '<label class="integration-enabled"><input type="checkbox" data-integration-enabled' +
+      (draft.enabled !== false ? ' checked' : '') + '><span>启用专题</span></label>' +
+    '<div class="row"><button class="act primary" data-act="save-integration">保存专题</button>' +
+      '<button class="act" data-act="new-integration">清空</button></div>' +
+    '</div>'
+}
+
+function courseIntegrationHtml (course) {
+  var data = state.content || {}
+  if (!data.ok) return '<div class="block"><h3>专题整合</h3><span class="small muted">暂时读不到专题状态</span></div>'
+  var items = (((data.topics || {}).items || []).filter(function (item) { return item.course === course }))
+  var pending = items.filter(function (item) { return item.status !== 'fresh' }).length
+  var summary = items.length
+    ? items.length + ' 个专题' + (pending ? ' · ' + pending + ' 待更新' : ' · 已更新')
+    : '暂无专题'
+  var open = state.open.courseIntegration ? ' open' : ''
+  var primary = items.length
+    ? '<button class="act quiet" data-act="rebuild-topics" data-course="' + esc(course) + '">更新全部</button>'
+    : '<button class="act primary" data-act="generate-topics" data-course="' + esc(course) + '">生成专题</button>'
+  return '<details class="d course-integrations" data-fold="courseIntegration"' + open + '>' +
+    '<summary><span class="ttl">专题整合</span><span class="muted small">' + esc(summary) + '</span></summary>' +
+    '<div class="body"><div class="row" style="margin-bottom:10px"><span class="spacer"></span>' + primary + '</div>' +
+    '<div style="display:grid;gap:10px;margin-bottom:12px">' +
+      (integrationRowsHtml(items, false) || '<p class="small muted">还没有专题</p>') +
+    '</div>' + (items.length ? integrationFormHtml(course) : '') + '</div></details>'
 }
 
 function courseTagHtml (course) {
@@ -755,15 +846,24 @@ function contentCourseMap () {
   var map = {}
   tasks().forEach(function (task) {
     var course = String(task.courseName || '').trim()
-    var lesson = String(task.title || '').trim()
-    if (!course || !lesson) return
+    var title = String(task.title || '').trim()
+    var slug = String(task.artifacts && task.artifacts.slug || '').trim()
+    if (!course || !title || !slug) return
     if (!map[course]) map[course] = []
-    if (!map[course].includes(lesson)) map[course].push(lesson)
+    if (!map[course].some(function (item) { return item.slug === slug })) map[course].push({ slug: slug, title: title })
   })
   Object.keys(map).forEach(function (course) {
-    map[course].sort(function (a, b) { return a.localeCompare(b, 'zh-CN', { numeric: true }) })
+    map[course].sort(function (a, b) { return a.title.localeCompare(b.title, 'zh-CN', { numeric: true }) })
   })
   return map
+}
+
+function topicLessonLabel (value) {
+  var wanted = String(value || '')
+  var task = tasks().find(function (item) {
+    return String(item.artifacts && item.artifacts.slug || '') === wanted || String(item.title || '') === wanted
+  })
+  return task ? String(task.title || wanted) : wanted
 }
 
 function resetIntegrationDraft (course) {
@@ -792,27 +892,8 @@ function renderContent () {
     return
   }
 
-  var items = ((data.integrations || {}).items || [])
-  var integrationRows = items.map(function (item) {
-    var stale = item.staleLessons && item.staleLessons.length
-      ? '<div class="tiny" style="color:var(--warn);margin-top:5px">变化课次：' + esc(item.staleLessons.join('、')) + '</div>'
-      : ''
-    return '<div class="block" style="margin:0">' +
-      '<div class="row" style="align-items:center">' +
-        contentStatusPill(item.status) +
-        '<strong>' + esc(item.topic) + '</strong>' +
-        '<span class="small muted">' + esc(item.course) + ' · ' + item.lessons.length + ' 节</span>' +
-        '<span class="spacer"></span>' +
-        '<button class="act quiet" data-act="edit-integration" data-id="' + esc(item.id) + '">编辑</button>' +
-        '<button class="act" data-act="rebuild-integration" data-id="' + esc(item.id) + '">更新</button>' +
-        '<button class="act danger" data-act="delete-integration" data-id="' + esc(item.id) + '">删除</button>' +
-      '</div>' +
-      '<div class="small" style="margin-top:7px">' + esc(item.lessons.join(' / ')) + '</div>' +
-      stale +
-      '<div class="tiny muted" style="margin-top:5px">' +
-        (item.generatedAt ? '更新 ' + esc(releaseTime(item.generatedAt)) : '尚未生成') +
-      '</div></div>'
-  }).join('')
+  var items = ((data.topics || {}).items || [])
+  var integrationRows = integrationRowsHtml(items, true)
 
   var courseMap = contentCourseMap()
   if (!state.contentDraft.course || !courseMap[state.contentDraft.course]) resetIntegrationDraft()
@@ -821,9 +902,9 @@ function renderContent () {
     return '<option value="' + esc(course) + '"' + (draft.course === course ? ' selected' : '') + '>' + esc(course) + '</option>'
   }).join('')
   var lessonChecks = (courseMap[draft.course] || []).map(function (lesson) {
-    var checked = (draft.lessons || []).includes(lesson)
-    return '<label class="integration-choice"><input type="checkbox" data-integration-lesson="' + esc(lesson) + '"' +
-      (checked ? ' checked' : '') + '><span>' + esc(lesson) + '</span></label>'
+    var checked = (draft.lessons || []).includes(lesson.slug)
+    return '<label class="integration-choice"><input type="checkbox" data-integration-lesson="' + esc(lesson.slug) + '"' +
+      (checked ? ' checked' : '') + '><span>' + esc(lesson.title) + '</span></label>'
   }).join('')
 
   var form = '<div class="block"><div class="row"><h3 style="margin:0">' + (draft.id ? '编辑专题' : '新建专题') + '</h3>' +
@@ -833,21 +914,25 @@ function renderContent () {
     '<div class="field"><label>包含课次</label><div class="integration-lessons">' +
       (lessonChecks || '<span class="small muted">这门课还没有课次</span>') + '</div></div>' +
     '<label class="integration-enabled"><input type="checkbox" data-integration-enabled' +
-      (draft.enabled !== false ? ' checked' : '') + '><span>随所选课次更新</span></label>' +
+      (draft.enabled !== false ? ' checked' : '') + '><span>启用专题</span></label>' +
     '<div class="row"><button class="act primary" data-act="save-integration">保存专题</button>' +
       '<button class="act" data-act="new-integration">清空</button></div>' +
     '</div>'
 
   var integrationsCard = card(
-    '<div class="row"><div><h2 style="margin:0">专题整合</h2>' +
-      '<p class="sub" style="margin-top:5px">把同一课程的多节课组织成持续更新的专题笔记。</p></div><span class="spacer"></span>' +
-      '<button class="act" data-act="rebuild-integrations"' + (items.length ? '' : ' disabled') + '>更新全部</button></div>' +
+    '<div class="row"><h2 style="margin:0">专题整合</h2><span class="spacer"></span>' +
+      '<button class="act" data-act="rebuild-topics"' + (items.length ? '' : ' disabled') + '>更新全部</button></div>' +
     '<div style="display:grid;gap:10px;margin:12px 0">' +
       (integrationRows || '<p class="small muted">还没有专题</p>') +
     '</div>' + form
   )
 
   box.innerHTML = integrationsCard
+}
+
+function renderIntegrationViews () {
+  if (state.tab === 'courses') renderCourses()
+  else renderContent()
 }
 
 async function saveIntegration (btn) {
@@ -859,19 +944,19 @@ async function saveIntegration (btn) {
   try {
     var definition = {
       course: draft.course,
-      topic: String(draft.topic || '').trim(),
+      title: String(draft.topic || '').trim(),
       lessons: draft.lessons.slice(),
       enabled: draft.enabled !== false
     }
     if (draft.id) definition.id = draft.id
-    var res = await fetch('/api/admin/integrations', {
+    var res = await fetch('/api/admin/topics', {
       method: 'PUT', headers: headers(true), body: JSON.stringify({ definition: definition })
     })
     var data = await res.json().catch(function () { return {} })
     if (!res.ok || !data.ok) throw new Error(data.message || data.error || '保存失败')
     state.content = data.content
     resetIntegrationDraft(draft.course)
-    renderContent()
+    renderIntegrationViews()
     toast('专题已保存', 'ok')
   } catch (error) {
     toast('保存失败：' + error, 'error')
@@ -882,12 +967,12 @@ async function deleteIntegration (id, btn) {
   if (!window.confirm('删除这个专题及其已生成的整合文件？单课笔记不会受影响。')) return
   var restore = busyButton(btn, '删除中…')
   try {
-    var res = await fetch('/api/admin/integrations?id=' + encodeURIComponent(id), { method: 'DELETE', headers: headers(false) })
+    var res = await fetch('/api/admin/topics?id=' + encodeURIComponent(id), { method: 'DELETE', headers: headers(false) })
     var data = await res.json().catch(function () { return {} })
     if (!res.ok || !data.ok) throw new Error(data.message || data.error || '删除失败')
     state.content = data.content
-    if (state.contentDraft.id === id) resetIntegrationDraft()
-    renderContent()
+    if (state.contentDraft.id === id) resetIntegrationDraft(state.tab === 'courses' ? state.sel.course : undefined)
+    renderIntegrationViews()
     toast('专题已删除', 'ok')
   } catch (error) {
     toast('删除失败：' + error, 'error')
@@ -895,23 +980,24 @@ async function deleteIntegration (id, btn) {
 }
 
 function editIntegration (id) {
-  var items = (((state.content || {}).integrations || {}).items || [])
+  var items = (((state.content || {}).topics || {}).items || [])
   var item = items.find(function (entry) { return entry.id === id })
   if (!item) { toast('找不到这个专题', 'error'); return }
   state.contentDraft = {
     id: item.id,
     course: item.course,
-    topic: item.topic,
+    topic: item.title || item.topic,
     lessons: (item.lessons || []).slice(),
     enabled: item.enabled !== false
   }
-  renderContent()
+  renderIntegrationViews()
   var input = document.querySelector('[data-integration-text="topic"]')
   if (input) input.focus()
 }
 
 /* ── 设置：与课程区一样的分栏（左类别、右内容），不再用竖排展开 ── */
 var SETTINGS_PANES = [
+  { key: 'account', label: '账户' },
   { key: 'maintenance', label: '维护' },
   { key: 'deliveries', label: '通知记录' },
   { key: 'storage', label: '存储占用' },
@@ -921,7 +1007,7 @@ var SETTINGS_PANES = [
 
 function settingsPane () {
   var key = state.sel.pane
-  return SETTINGS_PANES.some(function (item) { return item.key === key }) ? key : 'maintenance'
+  return SETTINGS_PANES.some(function (item) { return item.key === key }) ? key : 'account'
 }
 
 /** 分类右端只放数据：条目数、占用、密码设了没——不放解释。 */
@@ -929,6 +1015,106 @@ function paneMeta (key) {
   if (key === 'deliveries') return String(((state.status.ledger || {}).deliveries || []).length)
   if (key === 'storage') return state.storage ? bytes(state.storage.totalBytes) : ''
   return ''
+}
+
+
+function accountPane () {
+  var data = state.account || {}
+  if (!data.ok) return '<h2>账户</h2><p class="small muted">账户服务暂不可用</p>'
+  var profile = data.profile || {}
+  var credentials = data.credentials || {}
+  function credentialRow (provider, label) {
+    var item = credentials[provider] || {}
+    return '<div class="field"><label>' + esc(label) + '</label><div class="row">' +
+      '<input type="password" data-account-secret="' + esc(provider) + '" placeholder="' +
+      esc(item.configured ? ('已配置 · 尾号 ' + (item.last4 || '')) : '输入新密钥') + '">' +
+      '<button class="act primary" data-act="save-account-secret" data-provider="' + esc(provider) + '">保存</button>' +
+      (item.configured ? '<button class="act danger" data-act="delete-account-secret" data-provider="' + esc(provider) + '">删除</button>' : '') +
+      '</div></div>'
+  }
+  return '<h2>账户</h2>' +
+    '<div class="field"><label>登录邮箱</label><input value="' + esc(profile.email || '') + '" readonly></div>' +
+    '<div class="field"><label>通知邮箱</label><div class="row"><input id="ownerNotifyEmail" value="' + esc(profile.notificationEmail || profile.email || '') + '" placeholder="留空则使用登录邮箱"><button class="act primary" data-act="save-notify-email">保存</button></div></div>' +
+    credentialRow('deepseek', 'DeepSeek API') +
+    credentialRow('dashscope', '阿里云 API') +
+    credentialRow('ocr', 'OCR API') +
+    '<div class="field"><label>MCP</label><div class="row"><button class="act" data-act="create-mcp-token">生成 30 天访问令牌</button></div><div id="ownerMcpToken"></div></div>' +
+    '<div class="row pane-actions"><button class="act" data-act="import-owner-library">同步现有笔记到个人空间</button></div>'
+}
+
+async function saveNotifyEmail (btn) {
+  var input = $('ownerNotifyEmail')
+  var restore = busyButton(btn, '保存中…')
+  try {
+    var res = await fetch('/api/account/notification-email', {
+      method: 'PUT', headers: headers(true), body: JSON.stringify({ email: String(input && input.value || '').trim() })
+    })
+    var data = await res.json().catch(function () { return {} })
+    if (!res.ok || !data.ok) throw new Error(data.message || data.error || '保存失败')
+    state.account = null
+    await load()
+    toast('通知邮箱已保存', 'ok')
+  } catch (error) { toast('保存失败：' + error.message, 'error') } finally { restore() }
+}
+
+async function saveAccountSecret (provider, btn) {
+  var input = document.querySelector('[data-account-secret="' + provider + '"]')
+  var secret = String(input && input.value || '').trim()
+  if (!secret) { toast('请先输入密钥', 'error'); return }
+  var restore = busyButton(btn, '保存中…')
+  try {
+    var res = await fetch('/api/account/credential', {
+      method: 'PUT', headers: headers(true), body: JSON.stringify({ provider: provider, secret: secret })
+    })
+    var data = await res.json().catch(function () { return {} })
+    if (!res.ok || !data.ok) throw new Error(data.message || data.error || '保存失败')
+    if (input) input.value = ''
+    state.account = null
+    await load()
+    toast('账户凭据已保存', 'ok')
+  } catch (error) { toast('保存失败：' + error.message, 'error') } finally { restore() }
+}
+
+async function deleteAccountSecret (provider, btn) {
+  if (!window.confirm('删除这项账户凭据？')) return
+  var restore = busyButton(btn, '删除中…')
+  try {
+    var res = await fetch('/api/account/credential?provider=' + encodeURIComponent(provider), {
+      method: 'DELETE', headers: headers(false)
+    })
+    var data = await res.json().catch(function () { return {} })
+    if (!res.ok || !data.ok) throw new Error(data.message || data.error || '删除失败')
+    state.account = null
+    await load()
+    toast('账户凭据已删除', 'ok')
+  } catch (error) { toast('删除失败：' + error.message, 'error') } finally { restore() }
+}
+
+
+async function createMcpToken (btn) {
+  var restore = busyButton(btn, '生成中…')
+  try {
+    var res = await fetch('/api/account/mcp-token', { method: 'POST', headers: headers(true), body: '{}' })
+    var data = await res.json().catch(function () { return {} })
+    if (!res.ok || !data.ok) throw new Error(data.message || data.error || '生成失败')
+    var box = $('ownerMcpToken')
+    if (box) box.innerHTML =
+      '<div class="field" style="margin-top:10px"><label>MCP 地址</label><input value="' + esc(location.origin + '/mcp') + '" readonly></div>' +
+      '<div class="field"><label>Bearer Token</label><textarea rows="4" readonly>' + esc(data.token || '') + '</textarea></div>' +
+      '<p class="tiny muted">令牌只读取当前账号课程内容，30 天后失效；请勿转发。</p>'
+    toast('MCP 访问令牌已生成', 'ok')
+  } catch (error) { toast('生成失败：' + error.message, 'error') } finally { restore() }
+}
+
+async function importOwnerLibrary (btn) {
+  if (!window.confirm('把当前 OWNER 的既有课程笔记与专题复制进账号私有空间？公开站点不会在这一步删除或改动。')) return
+  var restore = busyButton(btn, '同步中…')
+  try {
+    var res = await fetch('/api/account/import-owner-library', { method: 'POST', headers: headers(true), body: '{}' })
+    var data = await res.json().catch(function () { return {} })
+    if (!res.ok || !data.ok) throw new Error(data.message || data.error || '同步失败')
+    toast('已同步：' + data.imported.notes + ' 篇笔记、' + data.imported.topics + ' 个专题', 'ok')
+  } catch (error) { toast('同步失败：' + error.message, 'error') } finally { restore() }
 }
 
 function maintenancePane () {
@@ -1022,15 +1208,16 @@ function renderSettings () {
       '<span class="name">' + esc(item.label) + '</span>' +
       '<span class="meta">' + esc(paneMeta(item.key)) + '</span></button>'
   }).join('')
-  var body = pane === 'maintenance' ? maintenancePane()
-    : pane === 'deliveries' ? deliveriesPane(deliveries, rows, failed)
+  var body = pane === 'account' ? accountPane()
+    : pane === 'maintenance' ? maintenancePane()
+      : pane === 'deliveries' ? deliveriesPane(deliveries, rows, failed)
       : pane === 'storage' ? '<h2>存储占用</h2><div id="storageBody">' + storageHtml() + '</div>'
         : pane === 'advanced' ? advancedPane()
           : '<h2>运行参数</h2>' + fields +
             '<div class="row"><button class="act primary" data-act="save-config">保存设置</button></div>'
 
   $('tab-settings').innerHTML = '<div class="split">' +
-    '<div class="col" id="settingsRail"><div class="colhead"><span>设置</span></div>' + rail + '</div>' +
+    '<div class="col" id="settingsRail"><div class="colhead"><span>账户设置</span></div>' + rail + '</div>' +
     '<div class="col" id="settingsDetail" data-pane="' + esc(pane) + '"><div class="pane">' + body + '</div></div></div>'
 }
 
@@ -1459,8 +1646,9 @@ function handleAct (act, btn) {
   if (act === 'filter-all') { state.sel.tag = ''; state.sel.year = 'all'; saveSel(); renderCourses(); return }
   if (act === 'filter-year') { state.sel.year = state.sel.year === value ? 'all' : value; state.sel.tag = ''; saveSel(); renderCourses(); return }
   if (act === 'view-stage') {
-    state.sel.stage = value; state.sel.tag = ''; state.sel.year = 'all'; state.sel.course = ''; state.sel.lesson = ''
-    saveSel(); go('courses'); return
+    state.overviewStage = state.overviewStage === value ? '' : value
+    renderOverview()
+    return
   }
   if (act === 'clear-stage') { state.sel.stage = ''; state.sel.course = ''; state.sel.lesson = ''; saveSel(); renderCourses(); return }
   if (act === 'pick-course') {
@@ -1517,10 +1705,15 @@ function handleAct (act, btn) {
     if (!window.confirm('回滚到上一份完整内容版本？当前版本不会删除，之后仍然可以再切回来。')) return
     return doAction('rollback-content', {}, btn)
   }
-  if (act === 'rebuild-integration') return doAction('rebuild-integration', { id: btn.dataset.id || '' }, btn)
-  if (act === 'rebuild-integrations') return doAction('rebuild-integrations', {}, btn)
+  if (act === 'generate-topics') return doAction('generate-topics', { course: btn.dataset.course || state.sel.course || '' }, btn)
+  if (act === 'rebuild-topic') return doAction('rebuild-topic', { id: btn.dataset.id || '' }, btn)
+  if (act === 'rebuild-topics') return doAction('rebuild-topics', { course: btn.dataset.course || '' }, btn)
   if (act === 'edit-integration') return editIntegration(btn.dataset.id || '')
-  if (act === 'new-integration') { resetIntegrationDraft(); renderContent(); return }
+  if (act === 'new-integration') {
+    resetIntegrationDraft(state.tab === 'courses' ? state.sel.course : undefined)
+    renderIntegrationViews()
+    return
+  }
   if (act === 'save-integration') return saveIntegration(btn)
   if (act === 'delete-integration') return deleteIntegration(btn.dataset.id || '', btn)
   if (act === 'discover' || act === 'notify' || act === 'doctor' || act === 'backup') return doAction(act, {}, btn)
@@ -1530,6 +1723,11 @@ function handleAct (act, btn) {
     return doAction('prune', { apply: true }, btn)
   }
   if (act === 'save-config') return saveConfig(btn)
+  if (act === 'save-notify-email') return saveNotifyEmail(btn)
+  if (act === 'save-account-secret') return saveAccountSecret(btn.dataset.provider || '', btn)
+  if (act === 'delete-account-secret') return deleteAccountSecret(btn.dataset.provider || '', btn)
+  if (act === 'create-mcp-token') return createMcpToken(btn)
+  if (act === 'import-owner-library') return importOwnerLibrary(btn)
   toast('这个按钮还没有接上处理逻辑：' + act, 'error')
 }
 

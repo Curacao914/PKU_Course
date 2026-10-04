@@ -71,6 +71,8 @@ const rateLimitWindowMs = positiveOrUndefined(process.env.COURSE_RATE_LIMIT_WIND
 const maxConcurrent = positiveOrUndefined(process.env.COURSE_MAX_CONCURRENT)
 const requestTimeoutMs = positiveOrUndefined(process.env.COURSE_REQUEST_TIMEOUT_MS)
 const maxQueryChars = positiveOrUndefined(process.env.COURSE_MAX_QUERY_CHARS)
+const contentVisibility = String(process.env.COURSE_CONTENT_VISIBILITY || 'public').trim().toLowerCase()
+if (!['public', 'private'].includes(contentVisibility)) throw new Error('COURSE_CONTENT_VISIBILITY 只能是 public 或 private')
 
 const { url } = await startSiteServer({
   root,
@@ -80,6 +82,9 @@ const { url } = await startSiteServer({
   adminOrigin: isPublic ? (process.env.COURSE_ADMIN_ORIGIN || 'https://course.law-tech.dev') : '',
   adminToken,
   ssoKey: isPublic ? '' : String(process.env.COURSE_CONTROL_SIGNING_KEY || ''),
+  controlUrl: isPublic ? '' : String(process.env.COURSE_CONTROL_LOCAL_URL || 'http://127.0.0.1:3102'),
+  contentVisibility,
+  mcp: !(isPublic && contentVisibility === 'private'),
   scratchRoot,
   assetsDir,
   materialsRoot,

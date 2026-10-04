@@ -4,7 +4,8 @@ import path from 'node:path'
 
 import { readSiteIndex } from '@course/publish'
 
-import { createAdminHandler } from './admin.mjs'
+import { signRequest as signControlRequest } from '../../control/src/server/auth.mjs'
+import { createAdminHandler, verifyMcpAccessToken } from './admin.mjs'
 
 /**
  * course.law-tech.dev 的站点服务器。
@@ -117,6 +118,9 @@ export function createRequestHandler({
   adminOrigin = '',
   adminToken = '',
   ssoKey = '',
+  controlUrl = 'http://127.0.0.1:3102',
+  controlFetch = fetch,
+  contentVisibility = 'public',
   scratchRoot = '',
   workerPath = '',
   workerEnv = {},
@@ -163,6 +167,8 @@ export function createRequestHandler({
 } = {}) {
   const normalizedRoot = path.resolve(root)
   const normalizedAssets = assetsDir ? path.resolve(assetsDir) : ''
+  const privateContent = String(contentVisibility || 'public').toLowerCase() === 'private'
+  const controlBase = String(controlUrl || '').replace(/\/$/, '')
   const admin = adminEnabled
     ? createAdminHandler({
       root: normalizedRoot,
@@ -171,7 +177,9 @@ export function createRequestHandler({
       workerPath,
       workerEnv,
       runCommand,
-      ssoKey
+      ssoKey,
+      controlUrl,
+      controlFetch
     })
     : null
 
@@ -292,6 +300,96 @@ export function createRequestHandler({
     return requestBudget
   }
 
+
+  const privateMcpHandlers = new Map()
+
+  async function controlGetFor(ownerId, target) {
+    if (!controlBase || !ssoKey) throw new Error('个人内容控制面未配置')
+    const headers = signControlRequest({ key: ssoKey, ownerId, method: 'GET', path: target, body: '' })
+    const response = await controlFetch(controlBase + target, {
+      method: 'GET',
+      headers: { ...headers, accept: 'application/json' },
+      redirect: 'error'
+    })
+    const text = await response.text()
+    let payload = {}
+    try { payload = text ? JSON.parse(text) : {} } catch { throw new Error('个人内容控制面返回了无效 JSON') }
+    if (!response.ok || payload.ok === false) throw new Error(payload.error || `个人内容控制面 HTTP ${response.status}`)
+    return payload
+  }
+
+  function privateSource(ownerId, normalizeRecord) {
+    let last = null
+    async function content() {
+      last = await controlGetFor(ownerId, '/v1/private/content')
+      return last
+    }
+    async function noteById(id) {
+      return (await controlGetFor(ownerId, '/v1/private/note?id=' + encodeURIComponent(id))).note
+    }
+    return {
+      kind: 'private-account',
+      describe: () => ({ kind: 'private-account', label: '个人课程空间', location: 'account:' + ownerId, live: true }),
+      revision: () => '',
+      listNotes: async () => {
+        const data = await content()
+        return (data.notes || []).map(note => normalizeRecord({
+          ...(note.index || {}),
+          slug: note.slug || note.index?.slug || ('private/' + note.id),
+          courseName: note.courseName || note.index?.courseName || '',
+          lessonTitle: note.lessonTitle || note.index?.lessonTitle || note.title || '',
+          lessonDate: note.lessonDate || note.index?.lessonDate || '',
+          checksum: note.checksum || note.index?.checksum || ''
+        }))
+      },
+      readMarkdown: async slug => {
+        const data = await content()
+        const item = (data.notes || []).find(note => String(note.slug || note.index?.slug || ('private/' + note.id)) === String(slug || ''))
+        if (!item) throw new Error('个人课程空间找不到这节课')
+        const row = await noteById(item.id)
+        return String(row?.body_markdown || '')
+      },
+      listTopics: async () => {
+        const data = await content()
+        return (data.topics || []).filter(topic => topic.status === 'fresh').map(topic => ({
+          id: topic.topicId,
+          course: topic.courseName,
+          title: topic.title,
+          summary: topic.summary || '',
+          lessons: topic.lessons || [],
+          page: '/admin',
+          markdown: '',
+          json: ''
+        }))
+      },
+      readTopicMarkdown: async topicId => {
+        const data = await content()
+        const topic = (data.topics || []).find(item => String(item.topicId || '') === String(topicId || '') && item.status === 'fresh')
+        if (!topic) throw new Error('个人课程空间找不到当前有效专题')
+        const row = await noteById(topic.id)
+        return String(row?.body_markdown || '')
+      }
+    }
+  }
+
+  async function ensurePrivateMcp(ownerId) {
+    if (privateMcpHandlers.has(ownerId)) return privateMcpHandlers.get(ownerId)
+    const budget = await ensureBudget()
+    if (!budget) throw new Error(budgetFailed || '请求预算不可用')
+    const { createNotesService, createMcpHttpHandler, normalizeRecord } = await import('@course/notes-mcp')
+    const service = createNotesService({ source: privateSource(ownerId, normalizeRecord), siteOrigin })
+    const siteHost = (() => { try { return new URL(siteOrigin).hostname } catch { return '' } })()
+    const handler = createMcpHttpHandler({
+      service,
+      log: line => process.stderr.write(`${line}\n`),
+      allowedOrigins: [siteOrigin, ...mcpOrigins].filter(Boolean),
+      allowedHosts: [siteHost, 'localhost', '127.0.0.1', ...mcpHosts].filter(Boolean),
+      budget
+    })
+    privateMcpHandlers.set(ownerId, handler)
+    return handler
+  }
+
   let mcpHandler = null
   let mcpFailed = ''
   const mcpPath = '/mcp'
@@ -341,8 +439,41 @@ export function createRequestHandler({
     }
     const pathname = url.pathname
 
-    // Remote MCP：长期在线的 HTTP 入口（POST 为主，所以必须在方法检查之前）
+    // Remote MCP：私有内容模式下必须先用账户签发的 Bearer token 绑定 owner。
+    // token 只携带 owner id/角色并由服务端 HMAC 签名；真正的数据读取仍由 control 按 owner_id 过滤。
     if (mcp && (pathname === mcpPath || pathname === `${mcpPath}/`)) {
+      if (privateContent) {
+        if (String(req.method || '').toUpperCase() === 'OPTIONS') {
+          res.writeHead(204, {
+            'cache-control': 'no-store',
+            'access-control-allow-origin': '*',
+            'access-control-allow-methods': 'POST, GET, DELETE, OPTIONS',
+            'access-control-allow-headers': 'content-type, accept, mcp-protocol-version, mcp-session-id, authorization'
+          })
+          res.end()
+          return
+        }
+        const bearer = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '')
+        const identity = verifyMcpAccessToken(bearer, ssoKey)
+        if (!identity) {
+          res.writeHead(401, {
+            'content-type': 'application/json; charset=utf-8',
+            'cache-control': 'no-store',
+            'www-authenticate': 'Bearer realm="course-notes-mcp"'
+          })
+          res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32000, message: '需要有效的个人 MCP 访问令牌' } }))
+          return
+        }
+        try {
+          const handler = await ensurePrivateMcp(String(identity.sub))
+          await handler(req, res)
+        } catch (error) {
+          process.stderr.write(`[site] 私有 MCP 处理失败：${error instanceof Error ? error.message : String(error)}\n`)
+          if (!res.headersSent) sendJson(res, 500, { jsonrpc: '2.0', id: null, error: { code: -32603, message: '服务器内部错误' } })
+        }
+        return
+      }
+
       const handler = await ensureMcp()
       if (!handler) {
         sendJson(res, 503, { ok: false, error: 'mcp_unavailable', message: mcpFailed || 'MCP 未启用' })
@@ -392,6 +523,10 @@ export function createRequestHandler({
     }
 
     if (pathname === '/healthz') {
+      if (privateContent) {
+        sendJson(res, 200, { ok: true, visibility: 'private' }, { 'cache-control': 'no-store' })
+        return
+      }
       let index = { count: 0, generatedAt: null }
       try {
         index = readSiteIndex(normalizedRoot)
@@ -400,6 +535,16 @@ export function createRequestHandler({
         return
       }
       sendJson(res, 200, { ok: true, notes: index.count ?? 0, generatedAt: index.generatedAt ?? null })
+      return
+    }
+
+    if (privateContent && pathname !== '/favicon.ico' && !pathname.startsWith('/assets/')) {
+      if (pathname.startsWith('/api/')) {
+        sendJson(res, 404, { ok: false, error: 'private_content', message: '课程内容只在登录后的个人空间中提供' }, { 'cache-control': 'no-store' })
+        return
+      }
+      res.writeHead(302, { location: '/admin', 'cache-control': 'private, no-store' })
+      res.end()
       return
     }
 
@@ -631,7 +776,8 @@ export function startSiteServer({
   root, port = 3100, host = '127.0.0.1', adminToken = '',
   // 角色相关的三项必须透传下去：否则"公开进程"照样会挂上管理台（实测踩到：以为设了
   // admin:false，结果 /api/admin 仍然按"未配置令牌"回 503，而不是根本不存在的 404）。
-  admin = true, adminOrigin = '', ssoKey = '',
+  admin = true, adminOrigin = '', ssoKey = '', controlUrl = 'http://127.0.0.1:3102',
+  controlFetch = fetch, contentVisibility = 'public',
   mcp = true, mcpOrigins = [], mcpHosts = [],
   // 公开接口共用的预算（/api/search 与 /mcp 同一本账）：整块透传，避免只改了一半
   rateLimit = undefined, maxConcurrent = undefined, requestTimeoutMs = undefined, maxQueryChars = undefined,
@@ -641,7 +787,8 @@ export function startSiteServer({
   scratchRoot = '', workerPath = '', workerEnv = {}, assetsDir = '', materialsRoot = '', runCommand
 } = {}) {
   const server = createSiteServer({
-    root, adminToken, admin, adminOrigin, ssoKey, mcp, mcpOrigins, mcpHosts, siteOrigin,
+    root, adminToken, admin, adminOrigin, ssoKey, controlUrl, controlFetch, contentVisibility,
+    mcp, mcpOrigins, mcpHosts, siteOrigin,
     ...(rateLimit ? { rateLimit } : {}),
     ...(maxConcurrent ? { maxConcurrent } : {}),
     ...(requestTimeoutMs ? { requestTimeoutMs } : {}),

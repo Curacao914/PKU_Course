@@ -114,6 +114,43 @@ server {
         add_header Cache-Control "no-store" always;
     }
 
+
+    # 账号私有内容与账户设置都交给管理进程；浏览器只带 HttpOnly session，
+    # 管理进程再用 HMAC 访问本机 control，签名密钥不会进入浏览器。
+    location ^~ /api/account/ {
+        proxy_pass http://127.0.0.1:3101;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        add_header Cache-Control "private, no-store" always;
+    }
+
+    # 私有 MCP：Bearer token 在管理进程校验后绑定 owner_id，再由 control 做 owner 过滤。
+    location = /mcp {
+        proxy_pass http://127.0.0.1:3101;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 120s;
+        proxy_send_timeout 120s;
+        add_header Cache-Control "no-store" always;
+    }
+    location = /mcp/ {
+        proxy_pass http://127.0.0.1:3101;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 120s;
+        proxy_send_timeout 120s;
+        add_header Cache-Control "no-store" always;
+    }
+
     # Vercel 上的 law-tech.dev 通过这一条访问多用户控制面。
     # 浏览器本身拿不到 COURSE_CONTROL_SIGNING_KEY；请求必须由 law-tech 服务端转发。
     location ^~ /_control/ {

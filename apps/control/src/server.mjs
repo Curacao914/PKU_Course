@@ -53,7 +53,7 @@ function readJson(req) {
 function publicPku(row) {
   if (!row) return {
     configured: false, mode: 'qr', status: 'disconnected', autoSyncEnabled: false,
-    selectedCourseKeys: [], lastVerifiedAt: null, lastSyncAt: null, lastError: ''
+    selectedCourseKeys: [], scannedCourseKeys: [], lastVerifiedAt: null, lastSyncAt: null, lastError: ''
   }
   return {
     configured: Boolean(row.session_ciphertext || row.password_ciphertext),
@@ -62,6 +62,7 @@ function publicPku(row) {
     status: row.status,
     autoSyncEnabled: row.auto_sync_enabled,
     selectedCourseKeys: row.selected_course_keys || [],
+    scannedCourseKeys: row.scanned_course_keys || [],
     lastVerifiedAt: row.last_verified_at,
     lastSyncAt: row.last_sync_at,
     lastError: row.last_error || ''
@@ -98,12 +99,12 @@ export function createControlServer({ env = process.env, store = createAccountSt
       }
 
       let ownerId
-      const privateNote = url.pathname === '/v1/internal/private-note'
-      if (privateNote) {
+      const privateWrite = url.pathname === '/v1/internal/private-note' || url.pathname === '/v1/internal/private-topic'
+      if (privateWrite) {
         if (req.method !== 'POST') throw Object.assign(new Error('UNAUTHORIZED'), { status: 401 })
         const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '')
         const claims = jobTokens.verify(token, {
-          ownerId: req.headers['x-course-owner-id'], jobId: req.headers['x-course-job-id'], scope: 'private-note:write'
+          ownerId: req.headers['x-course-owner-id'], jobId: req.headers['x-course-job-id'], scope: 'private-content:write'
         })
         ownerId = claims.ownerId
       } else {
@@ -111,7 +112,7 @@ export function createControlServer({ env = process.env, store = createAccountSt
       }
 
       req.rawBody = await readBody(req)
-      if (!privateNote) {
+      if (!privateWrite) {
         ownerId = authenticate({ headers: req.headers, method: req.method, path: req.url, body: req.rawBody })
       }
       const profile = await store.profile(ownerId)
@@ -156,7 +157,12 @@ export function createControlServer({ env = process.env, store = createAccountSt
         ])
         send(res, 200, {
           ok: true,
-          profile: { id: profile.id, role: profile.role },
+          profile: {
+            id: profile.id,
+            role: profile.role,
+            email: profile.email || '',
+            notificationEmail: profile.notification_email || profile.email || ''
+          },
           credentials: {
             ocr: credentials.ocr || { configured: false },
             deepseek: credentials.deepseek || { configured: false },
@@ -164,6 +170,56 @@ export function createControlServer({ env = process.env, store = createAccountSt
           },
           pku: publicPku(pku),
           limits
+        })
+        return
+      }
+
+
+      if (req.method === 'GET' && url.pathname === '/v1/private/content') {
+        send(res, 200, { ok: true, ...(await store.privateContent(ownerId)) })
+        return
+      }
+
+      if (req.method === 'GET' && url.pathname === '/v1/private/note') {
+        const id = String(url.searchParams.get('id') || '').trim()
+        if (!id) { send(res, 400, { ok: false, error: 'NOTE_ID_REQUIRED' }); return }
+        const note = await store.privateNote(ownerId, id)
+        if (!note) { send(res, 404, { ok: false, error: 'NOTE_NOT_FOUND' }); return }
+        send(res, 200, { ok: true, note })
+        return
+      }
+
+      if (req.method === 'PUT' && url.pathname === '/v1/private/note') {
+        const body = await readJson(req)
+        if (!body.replayKey || !body.markdown) { send(res, 400, { ok: false, error: 'NOTE_PAYLOAD_REQUIRED' }); return }
+        const note = await store.savePrivateNote(ownerId, body)
+        send(res, 200, { ok: true, note: { id: note.id, title: note.title, updatedAt: note.updated_at } })
+        return
+      }
+
+      if (req.method === 'PUT' && url.pathname === '/v1/private/topic') {
+        const body = await readJson(req)
+        if (!body.topicId || !body.artifact) { send(res, 400, { ok: false, error: 'TOPIC_PAYLOAD_REQUIRED' }); return }
+        const topic = await store.savePrivateTopic(ownerId, body)
+        send(res, 200, { ok: true, topic: { id: topic.id, title: topic.title, updatedAt: topic.updated_at } })
+        return
+      }
+
+      if (req.method === 'DELETE' && url.pathname === '/v1/private/topic') {
+        const id = String(url.searchParams.get('id') || '').trim()
+        if (!id) { send(res, 400, { ok: false, error: 'TOPIC_ID_REQUIRED' }); return }
+        const removed = await store.deletePrivateTopic(ownerId, id)
+        send(res, removed ? 200 : 404, { ok: removed, removed: id })
+        return
+      }
+
+      if (req.method === 'PUT' && url.pathname === '/v1/account/notification-email') {
+        const body = await readJson(req)
+        const updated = await store.setNotificationEmail(ownerId, body.email)
+        send(res, 200, {
+          ok: true,
+          email: updated.email || '',
+          notificationEmail: updated.notification_email || updated.email || ''
         })
         return
       }
@@ -222,6 +278,17 @@ export function createControlServer({ env = process.env, store = createAccountSt
         }
         const note = await store.savePrivateNote(ownerId, body)
         send(res, 200, { ok: true, note: { id: note.id, title: note.title, updatedAt: note.updated_at } })
+        return
+      }
+
+      if (req.method === 'POST' && url.pathname === '/v1/internal/private-topic') {
+        const body = await readJson(req)
+        if (!body.topicId || !body.artifact) {
+          send(res, 400, { ok: false, error: 'TOPIC_PAYLOAD_REQUIRED' })
+          return
+        }
+        const topic = await store.savePrivateTopic(ownerId, body)
+        send(res, 200, { ok: true, topic: { id: topic.id, title: topic.title, updatedAt: topic.updated_at } })
         return
       }
 
@@ -293,6 +360,19 @@ export function createControlServer({ env = process.env, store = createAccountSt
       if (req.method === 'POST' && url.pathname === '/v1/jobs/sync') {
         const body = await readJson(req)
         const job = jobs.enqueue(ownerId, 'sync', { maxTasks: Math.max(1, Math.min(5, Number(body.maxTasks || 3))) })
+        send(res, 202, { ok: true, job })
+        return
+      }
+
+      if (req.method === 'POST' && url.pathname === '/v1/jobs/topics') {
+        const body = await readJson(req)
+        const courseName = String(body.courseName || '').trim()
+        if (!courseName) { send(res, 400, { ok: false, error: 'COURSE_REQUIRED' }); return }
+        const job = jobs.enqueue(ownerId, 'topics', {
+          courseName,
+          topicId: String(body.topicId || '').trim(),
+          rebuild: body.rebuild === true
+        })
         send(res, 202, { ok: true, job })
         return
       }

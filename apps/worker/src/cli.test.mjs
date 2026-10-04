@@ -451,6 +451,83 @@ test('notes turns a transcript file into a completed note and a ledger stage', a
   assert.ok(brief.keyPoints.length >= 1, '简报要给出要点')
 })
 
+
+test('topics does one course-level plan then writes validated topic artifacts', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-topics-'))
+  const scratch = path.join(dir, 'scratch')
+  const site = path.join(scratch, 'site')
+  fs.mkdirSync(site, { recursive: true })
+  const records = [
+    {
+      courseName: '国际刑法学', lessonTitle: '第1讲', lessonDate: '2026-09-09',
+      slug: 'notes/国际刑法学/第1讲', checksum: 'sum-1', theme: '基础',
+      sections: [{ id: '国际犯罪', title: '国际犯罪' }],
+      markdown: '## 国际犯罪\n\n国际犯罪的基本定义。'
+    },
+    {
+      courseName: '国际刑法学', lessonTitle: '第2讲', lessonDate: '2026-09-16',
+      slug: 'notes/国际刑法学/第2讲', checksum: 'sum-2', theme: '国际刑事审判',
+      sections: [{ id: '胜者正义', title: '胜者正义' }],
+      markdown: '## 胜者正义\n\n胜者正义的争议。'
+    }
+  ]
+  fs.writeFileSync(path.join(site, 'library.json'), JSON.stringify(records))
+
+  const calls = []
+  const callModel = async payload => {
+    calls.push(payload)
+    if (payload.role === 'topicPlan') {
+      return {
+        parsed: {
+          topics: [{
+            title: '国际刑法的基础与审判',
+            summary: '从国际犯罪进入国际刑事审判。',
+            lessons: records.map(record => record.slug)
+          }]
+        },
+        trace: { role: payload.role, usage: { prompt_tokens: 10, completion_tokens: 5 } }
+      }
+    }
+    if (payload.role === 'topic') {
+      return {
+        parsed: {
+          summary: '建立国际刑法基础到审判正当性的结构。',
+          nodes: [{
+            title: '基础与审判',
+            children: [
+              { title: '国际犯罪', sourceRefs: [{ slug: records[0].slug, sectionId: '国际犯罪' }] },
+              { title: '胜者正义', relation: 'contrast', sourceRefs: [{ slug: records[1].slug, sectionId: '胜者正义' }] }
+            ]
+          }]
+        },
+        trace: { role: payload.role, usage: { prompt_tokens: 20, completion_tokens: 10 } }
+      }
+    }
+    throw new Error('unexpected role ' + payload.role)
+  }
+
+  const { deps, lines } = harness({ callModel, configOverrides: { scratchRoot: scratch } })
+  const code = await runCli(['topics', '--course', '国际刑法学'], deps)
+  assert.equal(code, 0)
+  assert.deepEqual(calls.map(call => call.role), ['topicPlan', 'topic'])
+
+  const manifest = JSON.parse(fs.readFileSync(path.join(scratch, 'topic-manifest.json'), 'utf8'))
+  assert.equal(manifest.topics.length, 1)
+  assert.equal(manifest.topics[0].title, '国际刑法的基础与审判')
+
+  const files = fs.readdirSync(path.join(scratch, 'topics')).filter(name => name.endsWith('.json'))
+  assert.equal(files.length, 1)
+  const artifact = JSON.parse(fs.readFileSync(path.join(scratch, 'topics', files[0]), 'utf8'))
+  assert.equal(artifact.kind, 'course-topic')
+  assert.equal(artifact.lessons[0].checksum, 'sum-1')
+  assert.equal(artifact.nodes[0].children[1].sourceRefs[0].sectionId, '胜者正义')
+
+  const payload = parse(lines.at(-1))
+  assert.equal(payload.planned, true)
+  assert.equal(payload.generated, true)
+  assert.equal(payload.errors.length, 0)
+})
+
 test('prune deletes originals only after the text is verified', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-cli-'))
   const scratch = path.join(dir, 'scratch')
@@ -863,7 +940,19 @@ function fakeDerivedModel() {
       }
     }
     if (payload.role === 'onepage') {
-      return { parsed: { title: '重新生成的一页纸', markdown: ONEPAGE_MARKDOWN, outline: ['一、体系', '二、要点'] }, trace: { role: 'onepage' } }
+      return {
+        parsed: {
+          title: '重新生成的一页纸',
+          markdown: ONEPAGE_MARKDOWN,
+          outline: ['一、体系', '二、要点'],
+          sourceMap: [{
+            block: '一、体系',
+            label: '课程概览',
+            sections: [{ id: '课程概览', title: '课程概览', quote: '第一版正文，随后又改过一次。' }]
+          }]
+        },
+        trace: { role: 'onepage' }
+      }
     }
     throw new Error('未预期的角色：' + payload.role)
   }
@@ -932,6 +1021,7 @@ test('正文改一个字符之后，旧简报与旧一页纸都被拦下（中�
   assert.equal(await runCli(args, deps), 0, 'stderr: ' + errors.join(' | '))
   assert.deepEqual(parse(output.at(-1)).brief, { applied: true, reason: 'unbound' })
   assert.match(errors.join('\n'), /简报未绑定来源（历史数据）/)
+  assert.match(errors.join('\n'), /--from 中的简报与发布库当前简报不一致/, '旧 replay 简报覆盖正式库前必须显式警告')
   assert.match(notePage(), /老格式的简报/)
 
   // ④ 重新绑定之后：又回到 ok
@@ -1536,6 +1626,7 @@ test('通知 outbox：写完库还没入队就崩了，下一次发布会补发�
   assert.deepEqual(recovered.recoveredNotifications, [crippled[0].slug], '补发被记账')
   const afterRecovery = JSON.parse(fs.readFileSync(libraryFile, 'utf8'))
   assert.equal('notifyPending' in afterRecovery[0], false, '补发成功后清掉意图')
+  assert.equal(afterRecovery[0].notifiedAt, afterFirst[0].notifiedAt, '重发/补发不能把既有 notifiedAt 丢掉')
 
   // 再跑一次：没有可补的了（说明去重生效，不会越补越多）
   assert.equal(await runCli(['publish', '--from', notesDir, '--out', siteDir], deps), 0)
@@ -1558,6 +1649,8 @@ test('通知策略：--no-notify 会留下来，下一次不带参数重发也�
   assert.equal(first.notifyPolicy, 'none')
   assert.equal(first.notifyPolicySource, 'flag')
   assert.equal(first.delivery, null)
+  assert.equal(JSON.parse(fs.readFileSync(path.join(siteDir, 'library.json'), 'utf8'))[0].notifyPolicy, 'none',
+    '长期 no-notify 决定必须落进发布库')
 
   // 改内容后不带参数重发：策略是"上次说的算"，仍然不推
   fs.writeFileSync(path.join(notesDir, '第5-6节.md'), '# 第5-6节\n\n## 课程概览\n\n第二版。')
@@ -1567,6 +1660,8 @@ test('通知策略：--no-notify 会留下来，下一次不带参数重发也�
   assert.equal(second.notifyPolicy, 'none')
   assert.equal(second.notifyPolicySource, 'stored', '策略是持久化的，不是只在这一次生效')
   assert.equal(second.delivery, null)
+  assert.equal(JSON.parse(fs.readFileSync(path.join(siteDir, 'library.json'), 'utf8'))[0].notifyPolicy, 'none',
+    '从 previous 继承的 no-notify 也必须重新写回新 record')
 
   // 显式 --notify 才恢复推送
   fs.writeFileSync(path.join(notesDir, '第5-6节.md'), '# 第5-6节\n\n## 课程概览\n\n第三版。')

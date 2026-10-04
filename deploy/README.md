@@ -583,11 +583,14 @@ OWNER 继续使用 `~/.course-worker/env`；control 使用 `control-env`，MEMBE
 `COURSE_MEMBER_R2_*` 必须配置独立 MEMBER 桶的受限 token，不得填 OWNER 桶 token。
 该 token 仅限 MEMBER 暂存桶；它不是每用户的 S3 IAM 身份，应用层仍强制 owner namespace。
 
-law-tech 与 control 的 `COURSE_CONTROL_SIGNING_KEY` 相同，至少 32 字节。
-签名正文为 timestamp(ms)、nonce(16 random bytes hex)、method、原始 `/v1/` path+query、ownerId、
-SHA256(raw body)，以换行连接。代理必须原样保留 path/query/body，nginx 去掉 `/_control` 前缀。
-MEMBER 不持有 signing key；只拿绑定 owner/job/private-note:write 的 1 小时 token，
-任务结束即撤销，control 重启全部失效；过期写回失败，任务可重新执行。
+law-tech、OWNER/admin 与 control 的 `COURSE_CONTROL_SIGNING_KEY` 相同，至少 32 字节。
+OWNER 的 `~/.course-worker/env` 还必须配置自己的 `COURSE_ACCOUNT_OWNER_ID` 与
+`COURSE_CONTROL_LOCAL_URL=http://127.0.0.1:3102`：私有内容模式下，OWNER 发布笔记/专题后也要
+写回自己的账号空间。签名正文为 timestamp(ms)、nonce(16 random bytes hex)、method、原始
+`/v1/` path+query、ownerId、SHA256(raw body)，以换行连接。代理必须原样保留 path/query/body，
+nginx 去掉 `/_control` 前缀。MEMBER 不持有 signing key；只拿绑定
+owner/job/`private-content:write` 的 1 小时 token，任务结束即撤销，control 重启全部失效；
+过期写回失败，任务可重新执行。
 Cloudflare Access 可作为外围附加验证，law-tech 预留 service token 头；不假设 Vercel 固定出口 IP。
 
 MEMBER 全局并发固定为 1，下载并发固定为 1。`max_active_jobs`、`owner_reserved`、

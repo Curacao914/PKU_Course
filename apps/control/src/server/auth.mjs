@@ -49,7 +49,7 @@ export function createJobTokens({ now = Date.now, ttlMs = 60 * 60 * 1000 } = {})
   const key = crypto.randomBytes(32)
   const active = new Map()
   return {
-    issue({ ownerId, jobId, scope = 'private-note:write' }) {
+    issue({ ownerId, jobId, scope = 'private-content:write' }) {
       const claims = { ownerId, jobId, scope, expiresAt: now() + ttlMs, nonce: crypto.randomBytes(16).toString('hex') }
       const encoded = Buffer.from(JSON.stringify(claims)).toString('base64url')
       const token = encoded + '.' + crypto.createHmac('sha256', key).update(encoded).digest('base64url')

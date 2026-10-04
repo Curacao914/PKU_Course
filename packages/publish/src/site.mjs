@@ -124,11 +124,11 @@ a:hover { color: var(--accent-ink); }
 .topbar nav a { color: var(--muted); }
 .topbar nav a:hover { color: var(--ink); }
 .course-admin-link {
-  display: none; width: 34px; height: 34px; flex: none; align-items: center; justify-content: center;
+  display: inline-flex; width: 34px; height: 34px; flex: none; align-items: center; justify-content: center;
   border-radius: 10px; color: var(--muted); border: 1px solid transparent;
   transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
 }
-.course-admin-link.is-visible { display: inline-flex; }
+/* 管理入口永远存在；是否已登录由 /admin 自己做鉴权与跳转，不再让图标依赖会话探测结果。 */
 .course-admin-link:hover { color: var(--ink); background: var(--bg-soft); border-color: var(--line); }
 .course-admin-link svg {
   width: 17px; height: 17px; stroke: currentColor; fill: none; stroke-width: 1.7;
@@ -297,6 +297,51 @@ article .brief li { margin: 5px 0; }
 .map-holder { overflow-x: auto; padding: 10px; border: 1px solid var(--line); border-radius: var(--radius);
   background: var(--card-bg); overscroll-behavior-x: contain; -webkit-overflow-scrolling: touch; }
 .map-holder svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
+.map-source-panel { margin-top: 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-soft); }
+.map-source-panel[hidden] { display: none; }
+.map-topic-links, .map-section-links { display: flex; flex-wrap: wrap; gap: 5px 10px; align-items: baseline; }
+.map-topic-links { margin-bottom: 9px; }
+.map-topic-links strong, .map-section-links strong { font-size: 12px; color: var(--muted); font-weight: 500; }
+.map-topic-links a, .map-section-links a { font-size: 12.5px; color: var(--accent-ink); }
+
+/* ── 专题整合：同一棵结构数据的框架 / 提纲 / 自测三种看法 ── */
+.topic-head { max-width: 900px; }
+.topic-head .topic-summary { margin: 10px 0 0; color: var(--ink-soft); max-width: 58em; }
+.topic-tabs { display: inline-flex; gap: 2px; margin: 0 0 18px; padding: 2px; border-radius: 10px; background: var(--bg-sunken); }
+.topic-tabs button { font: inherit; font-size: 13px; padding: 6px 14px; border: 0; border-radius: 8px;
+  background: transparent; color: var(--ink-soft); cursor: pointer; }
+.topic-tabs button[aria-selected="true"] { background: var(--card-bg); color: var(--ink); font-weight: 600; box-shadow: var(--shadow-sm); }
+.topic-panel[hidden] { display: none; }
+.topic-framework { max-width: 980px; overflow-x: auto; padding: 2px 2px 24px; }
+.topic-level { display: grid; gap: 12px; }
+.topic-level.depth-0 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); align-items: start; }
+.topic-node { min-width: 0; }
+.topic-node-card { position: relative; padding: 13px 14px; border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--card-bg); box-shadow: var(--shadow-sm); }
+.topic-node-card strong { display: block; font-size: 14px; line-height: 1.45; }
+.topic-node-note { margin: 5px 0 0; color: var(--ink-soft); font-size: 12.5px; line-height: 1.6; }
+.topic-node .topic-level { margin: 9px 0 0 12px; padding-left: 12px; border-left: 1px solid var(--line-strong); }
+.topic-node[data-relation="condition"] > .topic-node-card,
+.topic-node[data-relation="sequence"] > .topic-node-card { border-left: 3px solid var(--accent); }
+.topic-node[data-relation="exception"] > .topic-node-card { border-left: 3px solid var(--warn); }
+.topic-node[data-relation="contrast"] > .topic-node-card,
+.topic-node[data-relation="parallel"] > .topic-node-card { background: var(--bg-soft); }
+.topic-rel { display: inline-block; margin: 0 0 5px; color: var(--muted); font-size: 10.5px; letter-spacing: .04em; }
+.topic-sources { display: flex; flex-wrap: wrap; gap: 4px 8px; margin-top: 7px; font-family: var(--sans); font-size: 11.5px; }
+.topic-sources a { color: var(--accent-ink); }
+.topic-outline { max-width: 760px; margin: 0; padding-left: 22px; font-family: var(--sans); }
+.topic-outline li { margin: 7px 0; }
+.topic-outline .topic-node-note { margin-left: 4px; }
+.topic-quiz { max-width: 760px; display: grid; gap: 12px; }
+.topic-quiz-group > h2 { margin: 18px 0 8px; font-size: 17px; }
+.topic-quiz-item { border: 1px solid var(--line); border-radius: var(--radius); background: var(--card-bg); }
+.topic-quiz-item summary { cursor: pointer; list-style: none; padding: 11px 13px; color: var(--ink-soft); font-size: 13px; }
+.topic-quiz-item summary::-webkit-details-marker { display: none; }
+.topic-quiz-answer { padding: 0 13px 12px; border-top: 1px solid var(--line); }
+.topic-quiz-answer strong { display: block; margin-top: 10px; }
+.topic-row td { background: color-mix(in srgb, var(--accent-soft) 42%, var(--card-bg)); }
+.topic-row .topic-links { display: flex; flex-wrap: wrap; gap: 5px 10px; }
+.topic-row .topic-links a { color: var(--accent-ink); font-size: .84em; }
 
 /* 不止一节讲过的术语：复习时最该先看的那些 */
 .chip-shared { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-ink); }
@@ -1000,19 +1045,6 @@ if (blocks.length) {
  * 所以这段脚本放在**每一页**的外壳里，并且在样式之后立刻执行——先应用再绘制，
  * 否则深色用户每次翻页都要被闪一下白。
  */
-const COURSE_SESSION_SCRIPT = '<script>' + [
-  '(function () {',
-  '  var link = document.querySelector("[data-course-admin]")',
-  '  if (!link) return',
-  '  fetch("/_auth/session", { credentials: "same-origin", cache: "no-store" })',
-  '    .then(function (response) { return response.ok ? response.json() : null })',
-  '    .then(function (state) {',
-  '      if (state && state.authenticated && state.role === "owner") link.classList.add("is-visible")',
-  '    })',
-  '    .catch(function () {})',
-  '})();',
-  '</script>'].join('\n')
-
 const PREF_SCRIPT = '<script>' + [
   '(function () {',
   '  var root = document.documentElement',
@@ -1042,8 +1074,7 @@ function pageShell({ title, description, body, canonical = '', scripts = '', lay
     : `<nav>${navLinks}</nav>` + settingsMenu()
   // 阅读页/一页纸页的这三个设置由工具栏图标排负责，不再挂第二个入口（否则一页上有两套同样的控件）
   const shellScripts = [
-    topRight ? scripts : [scripts, PREF_MENU_SCRIPT].filter(Boolean).join('\n'),
-    COURSE_SESSION_SCRIPT
+    topRight ? scripts : [scripts, PREF_MENU_SCRIPT].filter(Boolean).join('\n')
   ].filter(Boolean).join('\n')
   const courseAdminLink = '<a class="course-admin-link" data-course-admin href="/admin" title="进入管理" aria-label="进入管理">' + svgIcon('manage') + '</a>'
   return `<!doctype html>
@@ -1454,7 +1485,7 @@ export function renderNotePage(record, { siteOrigin = '', neighbours = {}, cours
  *
  * 图是客户端按需渲染的：绘图库 3.5MB，进页面就下载太贵；也只在选中某门课时画那一门。
  */
-export function renderKnowledgeMapPage({ notes = [], siteOrigin = '' } = {}) {
+export function renderKnowledgeMapPage({ notes = [], topics = [], siteOrigin = '' } = {}) {
   // 图里画三样东西：课次的先后、每节课的骨架（二级标题）、以及跨课次重复出现的概念。
   // 只画"反复出现的概念"是因为实测：224 个概念里只有 7 个跨了两节课——全都画上去，
   // 得到的不是知识图谱，而是一团毛线。
@@ -1462,8 +1493,14 @@ export function renderKnowledgeMapPage({ notes = [], siteOrigin = '' } = {}) {
   for (const note of notes) {
     const course = note.courseName || '未分类'
     const terms = [...new Set((note.metadata?.concepts || []).map(term => String(term).trim()).filter(Boolean))]
-    const sections = (note.headings || []).filter(heading => heading.level === 2 && heading.text)
-      .map(heading => String(heading.text).trim()).filter(Boolean).slice(0, 6)
+    const sections = (note.sections || note.headings || []).filter(section => {
+      const level = Number(section.level || 0)
+      const title = section.title || section.text
+      return level === 2 && title
+    }).map(section => ({
+      id: String(section.id || '').trim(),
+      title: String(section.title || section.text || '').trim()
+    })).filter(section => section.title).slice(0, 6)
     if (!courses.has(course)) courses.set(course, [])
     courses.get(course).push({
       slug: note.slug,
@@ -1473,6 +1510,31 @@ export function renderKnowledgeMapPage({ notes = [], siteOrigin = '' } = {}) {
       terms
     })
   }
+
+  const topicsByCourse = new Map()
+  for (const topic of topics || []) {
+    const course = String(topic.course || '').trim()
+    if (!course) continue
+    if (!topicsByCourse.has(course)) topicsByCourse.set(course, [])
+    topicsByCourse.get(course).push(topic)
+  }
+
+  const sourcePanels = [...courses.entries()].map(([course, lessons], index) => {
+    const courseTopics = topicsByCourse.get(course) || []
+    const topicLinks = courseTopics.length
+      ? '<div class="map-topic-links"><strong>专题</strong>' + courseTopics
+        .map(topic => `<a href="/${escapeHtml(topicSlug(topic))}.html">${escapeHtml(topic.title || '')}</a>`).join('') + '</div>'
+      : ''
+    const sectionLinks = lessons.flatMap(lesson => (lesson.sections || []).map(section => {
+      if (!section.id) return ''
+      const href = `/${String(lesson.slug || '').replace(/^\/+/, '')}.html#${encodeURIComponent(section.id)}`
+      return `<a href="${escapeHtml(href)}" title="${escapeHtml(lesson.lessonTitle || '')}">${escapeHtml(section.title)}</a>`
+    })).filter(Boolean)
+    return `<section class="map-source-panel" data-map-source-course="${escapeHtml(course)}"${index ? ' hidden' : ''}>` +
+      topicLinks +
+      (sectionLinks.length ? `<div class="map-section-links"><strong>原笔记节点</strong>${sectionLinks.join('')}</div>` : '') +
+      `</section>`
+  }).join('')
 
   const payload = JSON.stringify({
     courses: [...courses.entries()].map(([course, lessons]) => ({ course, lessons }))
@@ -1498,6 +1560,7 @@ export function renderKnowledgeMapPage({ notes = [], siteOrigin = '' } = {}) {
         '<p class="map-swipe-hint" aria-hidden="true">← 左右滑动查看完整关系图 →</p>',
         '<div class="map-holder" id="map-holder"></div>',
         '<div class="map-fallback" id="map-fallback" hidden></div>',
+        sourcePanels,
         '</div></div>',
         `<script id="map-data" type="application/json">${payload}</script>`,
         MAP_SCRIPT
@@ -1540,7 +1603,7 @@ function sourceFor (course) {
     // 课次先后：这节课接在下节课前面
     if (index) lines.push('  L' + (index - 1) + ' --> L' + index)
     ;(lesson.sections || []).forEach(function (section, at) {
-      lines.push('  S' + index + '_' + at + '["' + clean(section) + '"]')
+      lines.push('  S' + index + '_' + at + '["' + clean(section.title || section) + '"]')
       lines.push('  L' + index + ' --> S' + index + '_' + at)
     })
   })
@@ -1572,6 +1635,9 @@ async function draw (courseName) {
   const course = data.courses.find(item => item.course === courseName) || data.courses[0]
   if (!course) return
   title.textContent = course.course
+  document.querySelectorAll('[data-map-source-course]').forEach(function (panel) {
+    panel.hidden = panel.getAttribute('data-map-source-course') !== course.course
+  })
   const source = sourceFor(course)
   holder.innerHTML = ''
   fallback.hidden = true
@@ -2125,7 +2191,189 @@ const SEARCH_SCRIPT = `<script>
 })();
 </script>`
 
-export function renderIndexPage(records, { siteOrigin = '' } = {}) {
+
+const TOPIC_RELATION_LABEL = {
+  hierarchy: '层级',
+  parallel: '并列',
+  condition: '条件',
+  sequence: '顺序',
+  exception: '例外',
+  contrast: '对照'
+}
+
+export function topicSlug(topic = {}) {
+  const course = slugify(topic.course || 'course', 'course')
+  const identity = slugify(topic.id || topic.title || 'topic', 'topic')
+  return `topics/${course}/${identity}`
+}
+
+function topicSourceHref(ref = {}) {
+  const slug = String(ref.slug || '').replace(/^\/+/, '')
+  const sectionId = String(ref.sectionId || '')
+  if (!slug || !sectionId) return ''
+  return `/${slug}.html#${encodeURIComponent(sectionId)}`
+}
+
+function topicLessonLabel(slug, notes = []) {
+  const hit = notes.find(note => String(note.slug || '') === String(slug || ''))
+  return hit?.lessonTitle || String(slug || '')
+}
+
+function topicSourceLinks(refs = [], notes = []) {
+  const links = refs.map(ref => {
+    const href = topicSourceHref(ref)
+    if (!href) return ''
+    const note = notes.find(item => String(item.slug || '') === String(ref.slug || ''))
+    const section = (note?.sections || []).find(item => String(item.id || '') === String(ref.sectionId || ''))
+    const label = ref.title || section?.title || topicLessonLabel(ref.slug, notes)
+    return `<a href="${escapeHtml(href)}">${escapeHtml(label)}</a>`
+  }).filter(Boolean)
+  return links.length ? `<div class="topic-sources"><span>原文</span>${links.join('')}</div>` : ''
+}
+
+function renderTopicFrameworkNodes(nodes = [], notes = [], depth = 0) {
+  if (!nodes.length) return ''
+  return `<div class="topic-level depth-${depth}">${nodes.map(node => {
+    const relation = String(node.relation || 'hierarchy')
+    const relationLabel = depth ? (TOPIC_RELATION_LABEL[relation] || '') : ''
+    return `<section class="topic-node" data-relation="${escapeHtml(relation)}">` +
+      `<div class="topic-node-card">` +
+        (relationLabel ? `<span class="topic-rel">${escapeHtml(relationLabel)}</span>` : '') +
+        `<strong>${escapeHtml(node.title || '')}</strong>` +
+        (node.note ? `<p class="topic-node-note">${escapeHtml(node.note)}</p>` : '') +
+        topicSourceLinks(node.sourceRefs || [], notes) +
+      `</div>` +
+      renderTopicFrameworkNodes(node.children || [], notes, depth + 1) +
+    `</section>`
+  }).join('')}</div>`
+}
+
+function renderTopicOutlineNodes(nodes = [], notes = []) {
+  if (!nodes.length) return ''
+  return `<ol class="topic-outline">${nodes.map(node =>
+    `<li><strong>${escapeHtml(node.title || '')}</strong>` +
+    (node.note ? `<span class="topic-node-note"> — ${escapeHtml(node.note)}</span>` : '') +
+    topicSourceLinks(node.sourceRefs || [], notes) +
+    renderTopicOutlineNodes(node.children || [], notes) +
+    `</li>`
+  ).join('')}</ol>`
+}
+
+function renderTopicQuizBranch(node, notes = [], depth = 0) {
+  const children = node.children || []
+  if (depth === 0) {
+    return `<section class="topic-quiz-group"><h2>${escapeHtml(node.title || '')}</h2>` +
+      (node.note ? `<p class="topic-node-note">${escapeHtml(node.note)}</p>` : '') +
+      (children.length
+        ? children.map(child => renderTopicQuizBranch(child, notes, depth + 1)).join('')
+        : topicSourceLinks(node.sourceRefs || [], notes)) +
+      `</section>`
+  }
+  const relation = TOPIC_RELATION_LABEL[String(node.relation || '')] || '节点'
+  return `<details class="topic-quiz-item"><summary>回忆 · ${escapeHtml(relation)}</summary><div class="topic-quiz-answer">` +
+    `<strong>${escapeHtml(node.title || '')}</strong>` +
+    (node.note ? `<p class="topic-node-note">${escapeHtml(node.note)}</p>` : '') +
+    topicSourceLinks(node.sourceRefs || [], notes) +
+    (children.length ? children.map(child => renderTopicQuizBranch(child, notes, depth + 1)).join('') : '') +
+    `</div></details>`
+}
+
+const TOPIC_VIEW_SCRIPT = `<script>
+(function () {
+  var tabs = [].slice.call(document.querySelectorAll('[data-topic-tab]'))
+  var panels = [].slice.call(document.querySelectorAll('[data-topic-panel]'))
+  if (!tabs.length || !panels.length) return
+  var allowed = ['framework', 'outline', 'quiz']
+  function show (name, updateHash) {
+    if (allowed.indexOf(name) < 0) name = 'framework'
+    tabs.forEach(function (button) {
+      button.setAttribute('aria-selected', button.getAttribute('data-topic-tab') === name ? 'true' : 'false')
+    })
+    panels.forEach(function (panel) {
+      panel.hidden = panel.getAttribute('data-topic-panel') !== name
+    })
+    if (updateHash) {
+      try { history.replaceState(null, '', '#' + name) } catch (error) {}
+    }
+  }
+  tabs.forEach(function (button) {
+    button.addEventListener('click', function () { show(button.getAttribute('data-topic-tab'), true) })
+  })
+  show(String(location.hash || '').replace(/^#/, ''), false)
+})()
+</script>`
+
+export function renderTopicPage(topic = {}, { siteOrigin = '', notes = [] } = {}) {
+  const lessons = (topic.lessons || []).map(item => typeof item === 'string' ? item : item.slug).filter(Boolean)
+  const coverage = lessons.map(slug => topicLessonLabel(slug, notes)).join(' / ')
+  const body = [
+    '<header class="site topic-head">',
+    `<div class="eyebrow">${escapeHtml(topic.course || '')} · 专题整合</div>`,
+    `<h1>${escapeHtml(topic.title || '')}</h1>`,
+    topic.summary ? `<p class="topic-summary">${escapeHtml(topic.summary)}</p>` : '',
+    `<div class="meta"><span>${lessons.length} 节课</span>${coverage ? `<span>${escapeHtml(coverage)}</span>` : ''}</div>`,
+    '</header>',
+    '<div class="topic-tabs" role="tablist" aria-label="专题视图">',
+    '<button type="button" data-topic-tab="framework" aria-selected="true">框架</button>',
+    '<button type="button" data-topic-tab="outline" aria-selected="false">提纲</button>',
+    '<button type="button" data-topic-tab="quiz" aria-selected="false">自测</button>',
+    '</div>',
+    `<section class="topic-panel topic-framework" data-topic-panel="framework">${renderTopicFrameworkNodes(topic.nodes || [], notes)}</section>`,
+    `<section class="topic-panel" data-topic-panel="outline" hidden>${renderTopicOutlineNodes(topic.nodes || [], notes)}</section>`,
+    `<section class="topic-panel topic-quiz" data-topic-panel="quiz" hidden>${(topic.nodes || []).map(node => renderTopicQuizBranch(node, notes)).join('')}</section>`,
+    TOPIC_VIEW_SCRIPT
+  ].filter(Boolean).join('\n')
+
+  return pageShell({
+    title: `${topic.title || '专题整合'} · ${SITE_NAME}`,
+    description: topic.summary || `${topic.course || ''}专题整合`,
+    canonical: siteOrigin ? `${String(siteOrigin).replace(/\/+$/, '')}/${topicSlug(topic)}.html` : '',
+    layout: 'wide',
+    body
+  })
+}
+
+function topicMarkdownNode(node = {}, depth = 0) {
+  const indent = '  '.repeat(depth)
+  const refs = (node.sourceRefs || []).map(ref => {
+    const href = topicSourceHref(ref)
+    return href ? `[原文](${href})` : ''
+  }).filter(Boolean)
+  const line = `${indent}- **${node.title || ''}**` +
+    (node.note ? `：${node.note}` : '') +
+    (refs.length ? `（${refs.join('、')}）` : '')
+  return [line, ...(node.children || []).flatMap(child => topicMarkdownNode(child, depth + 1))]
+}
+
+export function renderTopicMarkdown(topic = {}, { notes = [] } = {}) {
+  const lessonSlugs = (topic.lessons || []).map(item => typeof item === 'string' ? item : item.slug).filter(Boolean)
+  const lines = [
+    `# ${topic.course || ''} · ${topic.title || ''}`,
+    '',
+    topic.summary || '',
+    '',
+    `> 覆盖 ${lessonSlugs.length} 节课：${lessonSlugs.map(slug => topicLessonLabel(slug, notes)).join(' / ')}`,
+    '',
+    '## 知识框架',
+    '',
+    ...(topic.nodes || []).flatMap(node => topicMarkdownNode(node, 0))
+  ]
+  return lines.filter((line, index) => line !== '' || lines[index - 1] !== '').join('\n').trim() + '\n'
+}
+
+function topicIsFresh(topic = {}, records = []) {
+  const bySlug = new Map(records.map(record => [String(record.slug || ''), record]))
+  const lessons = topic.lessons || []
+  if (!lessons.length) return false
+  return lessons.every(item => {
+    const lesson = typeof item === 'string' ? { slug: item } : item
+    const current = bySlug.get(String(lesson.slug || ''))
+    if (!current) return false
+    return !lesson.checksum || String(current.checksum || '') === String(lesson.checksum || '')
+  })
+}
+
+export function renderIndexPage(records, { siteOrigin = '', topics = [] } = {}) {
   const groups = new Map()
   // "最新"= 最近上过的一节课（lessonDate），不是最近发布过一次的笔记
   for (const record of [...records].sort(compareLessonDescending)) {
@@ -2146,7 +2394,30 @@ export function renderIndexPage(records, { siteOrigin = '' } = {}) {
     '</aside>'
   ].join('\n')
 
-  /** 每门课表格的第一行：这门课的一页纸摘要（从最新一节的开始看）。 */
+  const topicsByCourse = new Map()
+  for (const topic of topics || []) {
+    const course = String(topic.course || '').trim()
+    if (!course) continue
+    if (!topicsByCourse.has(course)) topicsByCourse.set(course, [])
+    topicsByCourse.get(course).push(topic)
+  }
+
+  /** 每门课最上面先给专题：阶段复习从“这一块怎么搭起来”进入。 */
+  const topicRowOf = course => {
+    const list = topicsByCourse.get(course) || []
+    if (!list.length) return ''
+    return [
+      '<tr class="topic-row">',
+      '<td class="lesson-title"><strong>专题整合</strong></td>',
+      '<td class="lesson-keywords" colspan="3"><div class="topic-links">',
+      list.map(topic => `<a href="/${escapeHtml(topicSlug(topic))}.html">${escapeHtml(topic.title || '')}</a>`).join(''),
+      `<span class="kw">共 ${list.length} 个专题</span>`,
+      '</div></td>',
+      '</tr>'
+    ].join('')
+  }
+
+  /** 一页纸摘要紧跟专题之后：复习单节课时再从这里进入。 */
   const onepageRowOf = (course, items) => {
     const withOnepage = items.filter(item => item.onepage?.markdown)
     if (!withOnepage.length) return ''
@@ -2182,7 +2453,7 @@ export function renderIndexPage(records, { siteOrigin = '' } = {}) {
         `<section class="band" data-course="${escapeHtml(course)}">`,
         `<h2>${escapeHtml(course)}</h2>`,
         '<table class="lesson-table"><thead><tr><th>课次</th><th>关键词</th><th class="num">时长</th><th class="num">日期</th></tr></thead><tbody>',
-        // 第一行就是这门课的一页纸入口：复习时先看这一页，再决定翻不翻原文
+        topicRowOf(course),
         onepageRowOf(course, items),
         items.map(rowOf).join('\n'),
         '</tbody></table>',
@@ -2331,7 +2602,7 @@ export function writeDocs({ outputDir, siteOrigin = '', pages = [] } = {}) {
   return written
 }
 
-export function writeSite({ records = [], outputDir, siteOrigin = '', docs = [] } = {}) {
+export function writeSite({ records = [], topics = [], outputDir, siteOrigin = '', docs = [] } = {}) {
   if (!outputDir) throw new Error('写站点需要 outputDir')
   const root = path.resolve(outputDir)
   fs.mkdirSync(root, { recursive: true })
@@ -2347,6 +2618,9 @@ export function writeSite({ records = [], outputDir, siteOrigin = '', docs = [] 
   // 全量重写时顺手把派生字段按正文重算：模板与解析规则改了，重建出来的站点才是新的
   const sorted = records.map(refreshRecord)
     .sort(compareLessonDescending)
+  // 公开阅读层只接当前正文仍匹配的专题。正文或专题范围一变，旧专题先从阅读入口撤下，
+  // 管理台会标“待更新”；这样不会把旧框架伪装成当前版本。
+  const freshTopics = (topics || []).filter(topic => topicIsFresh(topic, sorted))
 
   // 上一讲 / 下一讲：同一门课内按**上课日期**排序后的相邻两篇
   const neighboursOf = record => {
@@ -2367,7 +2641,7 @@ export function writeSite({ records = [], outputDir, siteOrigin = '', docs = [] 
       chars: item.onepage?.chars || 0
     }))
 
-  write('index.html', renderIndexPage(sorted, { siteOrigin }))
+  write('index.html', renderIndexPage(sorted, { siteOrigin, topics: freshTopics }))
   for (const record of sorted) {
     write(`${record.slug}.html`, renderNotePage(record, {
       siteOrigin,
@@ -2389,6 +2663,27 @@ export function writeSite({ records = [], outputDir, siteOrigin = '', docs = [] 
     }
   }
 
+  // 专题页：一份结构数据同时写 HTML / Markdown / JSON。人看三视图，AI 直接取 Markdown/JSON。
+  for (const topic of freshTopics) {
+    const slug = topicSlug(topic)
+    write(`${slug}.html`, renderTopicPage(topic, { siteOrigin, notes: sorted }))
+    write(`${slug}.md`, renderTopicMarkdown(topic, { notes: sorted }))
+    write(`${slug}.json`, `${JSON.stringify(topic, null, 2)}\n`)
+  }
+  write('topics.json', `${JSON.stringify({
+    version: 1,
+    topics: freshTopics.map(topic => ({
+      id: topic.id,
+      course: topic.course,
+      title: topic.title,
+      summary: topic.summary || '',
+      lessons: (topic.lessons || []).map(item => typeof item === 'string' ? item : item.slug),
+      page: `/${topicSlug(topic)}.html`,
+      markdown: `/${topicSlug(topic)}.md`,
+      json: `/${topicSlug(topic)}.json`
+    }))
+  }, null, 2)}\n`)
+
   // 索引页与搜索页：数据全部来自各篇笔记的元数据块，不重新跑模型
   write('concepts/index.html', renderTermIndexPage({
     title: '概念索引', kind: 'concepts', notes: sorted, siteOrigin,
@@ -2402,10 +2697,20 @@ export function writeSite({ records = [], outputDir, siteOrigin = '', docs = [] 
     title: '案例索引', kind: 'cases', notes: sorted, siteOrigin,
     description: '课堂上讲过的案例，以及它出现在哪些课次。'
   }))
-  write('map/index.html', renderKnowledgeMapPage({ notes: sorted, siteOrigin }))
+  write('map/index.html', renderKnowledgeMapPage({ notes: sorted, topics: freshTopics, siteOrigin }))
   // 文档页与 llms.txt：AI 的第一站。文档内容来自仓库里的 docs/public/*.md
   for (const relative of writeDocs({ outputDir: root, siteOrigin, pages: docs })) written.push(relative)
-  write('llms.txt', renderLlmsTxt({ records: sorted, siteOrigin, pages: docs }))
+  write('llms.txt', renderLlmsTxt({
+    records: sorted,
+    topics: freshTopics.map(topic => ({
+      ...topic,
+      pagePath: `/${topicSlug(topic)}.html`,
+      markdownPath: `/${topicSlug(topic)}.md`,
+      jsonPath: `/${topicSlug(topic)}.json`
+    })),
+    siteOrigin,
+    pages: docs
+  }))
   // 搜索页的课程筛选在建站时算好：课程列表跟着发布走，页面里不必再取一次数据
   const courseCounts = new Map()
   for (const record of sorted) {

@@ -20,8 +20,8 @@ test('HMAC requires signature, valid time, nonce, owner, method, raw path and bo
 test('job tokens bind owner/job/scope, expire and revoke on completion', () => {
   let now = 1000
   const tokens = createJobTokens({ now: () => now, ttlMs: 1000 })
-  const token = tokens.issue({ ownerId, jobId: 'job-a', scope: 'private-note:write' })
-  const context = { ownerId, jobId: 'job-a', scope: 'private-note:write' }
+  const token = tokens.issue({ ownerId, jobId: 'job-a', scope: 'private-content:write' })
+  const context = { ownerId, jobId: 'job-a', scope: 'private-content:write' }
   assert.equal(tokens.verify(token, context).ownerId, ownerId)
   for (const patch of [{ ownerId: other }, { jobId: 'job-b' }, { scope: 'credential:read' }]) assert.throws(() => tokens.verify(token, { ...context, ...patch }), {status: 401})
   assert.throws(() => tokens.verify(token + 'x', context), {status: 401})

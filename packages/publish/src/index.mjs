@@ -79,6 +79,7 @@ export {
   renderNotePage,
   renderSearchPage,
   renderTermIndexPage,
+  renderTopicMarkdown,
   termAnchors,
   toArticleChinese,
   writeSite

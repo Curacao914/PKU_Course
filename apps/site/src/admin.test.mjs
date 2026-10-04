@@ -444,6 +444,89 @@ test('integration definitions can be managed from the admin API and report fresh
   assert.ok(!fs.existsSync(path.join(integrationDir, 'criminal.md')), 'Markdown 产物也一起清掉')
 })
 
+
+test('topic definitions are separate from legacy integrations and report fresh/stale/missing', async () => {
+  const { handler, dir, scratchRoot } = fixture()
+  fs.writeFileSync(path.join(dir, 'library.json'), JSON.stringify([{
+    slug: 'notes/国际刑法学/第2讲',
+    courseName: '国际刑法学',
+    lessonTitle: '第2讲',
+    checksum: 'sum-topic-1',
+    markdown: '## 胜者正义\\n\\n正文',
+    sections: [{ id: '胜者正义', title: '胜者正义' }]
+  }]))
+
+  const saved = await call(handler, {
+    method: 'PUT',
+    url: '/api/admin/topics',
+    body: JSON.stringify({
+      definition: {
+        id: 'intl-trial',
+        course: '国际刑法学',
+        title: '国际刑事审判',
+        lessons: ['notes/国际刑法学/第2讲']
+      }
+    })
+  })
+  assert.equal(saved.res.state.status, 200)
+  assert.equal(saved.body.content.topics.items[0].status, 'missing')
+  assert.equal(saved.body.content.integrations.items.length, 0, '新专题不应写进旧章级整合清单')
+
+  const manifest = JSON.parse(fs.readFileSync(path.join(scratchRoot, 'topic-manifest.json'), 'utf8'))
+  assert.equal(manifest.topics[0].id, 'intl-trial')
+
+  const topicDir = path.join(scratchRoot, 'topics')
+  fs.mkdirSync(topicDir, { recursive: true })
+  fs.writeFileSync(path.join(topicDir, 'intl.json'), JSON.stringify({
+    kind: 'course-topic',
+    version: 1,
+    id: 'intl-trial',
+    course: '国际刑法学',
+    title: '国际刑事审判',
+    generatedAt: '2026-10-04T00:00:00.000Z',
+    lessons: [{
+      slug: 'notes/国际刑法学/第2讲',
+      lessonTitle: '第2讲',
+      checksum: 'sum-topic-1'
+    }],
+    nodes: [{ id: 'n1', title: '胜者正义', relation: 'hierarchy', sourceRefs: [{ slug: 'notes/国际刑法学/第2讲', sectionId: '胜者正义' }], children: [] }]
+  }))
+
+  const fresh = await call(handler, { url: '/api/admin/content' })
+  assert.equal(fresh.body.topics.items[0].status, 'fresh')
+
+  const adjusted = await call(handler, {
+    method: 'PUT',
+    url: '/api/admin/topics',
+    body: JSON.stringify({
+      definition: {
+        id: 'intl-trial',
+        course: '国际刑法学',
+        title: '国际刑事审判与正当性',
+        lessons: ['notes/国际刑法学/第2讲']
+      }
+    })
+  })
+  assert.equal(adjusted.body.content.topics.items[0].status, 'stale', '人工调整专题定义后旧产物必须标待更新')
+  assert.equal(adjusted.body.content.topics.items[0].definitionChanged, true)
+
+  fs.writeFileSync(path.join(dir, 'library.json'), JSON.stringify([{
+    slug: 'notes/国际刑法学/第2讲',
+    courseName: '国际刑法学',
+    lessonTitle: '第2讲',
+    checksum: 'sum-topic-2',
+    markdown: '## 胜者正义\\n\\n修订'
+  }]))
+  const stale = await call(handler, { url: '/api/admin/content' })
+  assert.equal(stale.body.topics.items[0].status, 'stale')
+  assert.deepEqual(stale.body.topics.items[0].staleLessons, ['第2讲'])
+
+  const removed = await call(handler, { method: 'DELETE', url: '/api/admin/topics?id=intl-trial' })
+  assert.equal(removed.res.state.status, 200)
+  assert.equal(removed.body.content.topics.items.length, 0)
+  assert.ok(!fs.existsSync(path.join(topicDir, 'intl.json')))
+})
+
 test('run parameters can be edited from the console and are validated', async () => {
   const { handler, scratchRoot } = fixture()
   const initial = await call(handler, { url: '/api/admin/config' })
@@ -600,6 +683,24 @@ test('最近任务：状态保留，但实现边界不塞进前端', async () =>
   assert.match(ADMIN_HTML, /id="recentJobs"/)
   assert.doesNotMatch(ADMIN_HTML, /进程内快照，服务重启后这里就空了/)
   assert.doesNotMatch(ADMIN_HTML, /已确认的课程阶段在账本里/)
+})
+
+test('概览先给四个状态汇总，点状态才展开紧凑清单', () => {
+  assert.match(ADMIN_HTML, /class="grid four"/)
+  assert.match(ADMIN_HTML, /data-value="published"[\s\S]{0,120}<small>已发布<\/small>/)
+  assert.match(ADMIN_HTML, /data-value="active"[\s\S]{0,120}<small>进行中<\/small>/)
+  assert.match(ADMIN_HTML, /data-value="attention"[\s\S]{0,120}<small>待处理<\/small>/)
+  assert.match(ADMIN_HTML, /data-value="queued"[\s\S]{0,120}<small>排队中<\/small>/)
+  assert.match(ADMIN_HTML, /class="status-expand"/)
+  assert.doesNotMatch(ADMIN_HTML, /件待处理/, '不再把待处理清单做成概览第一张巨型卡片')
+})
+
+test('课程管理内嵌专题维护，不再要求跳到“管理专题整合”页面', () => {
+  assert.match(ADMIN_HTML, /data-fold="courseIntegration"/)
+  assert.match(ADMIN_HTML, /function courseIntegrationHtml/)
+  assert.match(ADMIN_HTML, /data-act="save-integration"/)
+  assert.doesNotMatch(ADMIN_HTML, /管理专题整合/)
+  assert.doesNotMatch(ADMIN_HTML, /把同一课程的多节课组织成持续更新的专题笔记/)
 })
 
 test('管理台只呈现产品概念，不把原型和实现说明端给用户', () => {

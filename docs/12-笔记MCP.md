@@ -18,12 +18,16 @@
 | 3 | `get_note` | 整篇 Markdown；`section` 只取一节，`maxChars` 限长 | 一节 1—3k 字 |
 | 3.5 | `list_terms` | 某门课的概念/法条/案例清单（带次数与落点） | 复习型问题一次看全 |
 
-模型看到的 `instructions`（initialize 响应里）就是这张表的顺序，工具 description 里也写明
-「什么时候该用下一层」。这样常见的三种问法各自只花很少的 token：
+模型看到的 `instructions`（initialize 响应里）直接写成**决策树**，而不是要求每次机械地 1→2→3 全走一遍。目标是让模型在已知信息足够时跳过无用层级：
 
-- 「我有哪些课 / 某课讲到哪了」→ 第 1—2 层，不读正文；
-- 「XX 概念在哪几节讲过」→ `search_notes`（默认只查索引，命中处带小节锚点）；
-- 「把第 N 节讲给我听」→ `get_course` 拿 slug，再 `get_note(slug, section="…")`。
+- 用户已经点名课程 → 直接 `get_course`，跳过 `list_courses`；
+- 用户已经点名具体课次 → 可直接 `get_note(course+lesson)`；
+- 「这门课讲过哪些概念/法条/案例」→ `list_terms`，不要逐词搜索；
+- 「XX 在哪几节、哪几个小节出现」→ `search_notes`，默认索引优先，索引答不上来时才下沉正文；
+- 「老师具体怎么论证」→ `get_note(section=…)`，优先只读命中小节；
+- 单节速览优先用一页纸；课程级结构先用 theme/摘要、术语索引、知识地图或专题类派生视图缩小范围，再回原笔记。
+
+**来源边界**：单课笔记是事实源。一页纸、知识地图、索引与专题类内容负责压缩和导航；它们不作为第二份独立证据，出现冲突时回原笔记核实。这样既省 token，也避免同一句话在多个派生产物里被重复计数。
 
 ### 返回示例（都是真实输出，数据是测试夹具）
 
@@ -246,16 +250,17 @@ MCP 的 stdio 服务器是**由客户端在本地拉起**的，所以「在服�
 `LogLevel=ERROR` 压掉 ssh 横幅；命令用 `exec` 让 node 取代 shell，`SIGTERM`/stdin EOF 才传得到。
 缺点是每次会话都要过一遍 ssh 握手，且远端笔记更新即时可见的前提是 ssh 命令每次都重新启动进程。
 
-### 7.3 HTTP 端点（已内置：站点进程上的 `POST /mcp`）
+### 7.3 HTTP 端点（账号私有：管理进程上的 `POST /mcp`）
 
-站点进程（`course-site`，公开角色监听 3100）已经把**同一个协议服务器**挂在 `POST /mcp` 上
-（`packages/notes-mcp/src/http.mjs`）：无状态——每次 POST 自带完整 JSON-RPC，不返回
-`Mcp-Session-Id`，客户端重连、多实例、重启都不需要重新握手；响应一律 `application/json`
-（不用 SSE：CDN / nginx / Cloudflare 对 SSE 的缓冲更难伺候，而我们的工具都是请求-响应式，
-没有服务端推送）。
+私有内容模式下，nginx 把 `/mcp` 交给管理进程（3101），公开站点进程不再挂公开 MCP。
+协议层仍然无状态：每次 POST 自带完整 JSON-RPC，不返回 `Mcp-Session-Id`；但请求必须携带
+登录后在「账户设置 → MCP」生成的 Bearer Token。Token 只绑定一个 `owner_id`，服务端再经
+control 按 `owner_id` 读取该账号的笔记/专题，不能退回公共 `library.json` 作为旁路。
 
 ```bash
-curl -sS https://course.law-tech.dev/mcp -H 'content-type: application/json' \
+curl -sS https://course.law-tech.dev/mcp \
+  -H 'content-type: application/json' \
+  -H 'authorization: Bearer <账户设置中生成的 token>' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
@@ -264,15 +269,15 @@ curl -sS https://course.law-tech.dev/mcp -H 'content-type: application/json' \
 `-32602`、请求体超限 → 413、不支持的 `MCP-Protocol-Version` → 400。支持的版本：
 2025-11-25 / 2025-06-18 / 2025-03-26 / 2024-11-05。
 
-安全边界（默认开启，都是"存在才校验"，不打断 CLI 客户端）：Origin 与 Host 白名单——
+安全边界分两层：先校验账号签发的 Bearer Token；通过后再检查 Origin 与 Host 白名单。
 浏览器带来的 Origin 必须在本站域名内，Host 必须是本站域名或本机（防 DNS rebinding），
-用 `mcpOrigins` / `mcpHosts` 增补。
+用 `mcpOrigins` / `mcpHosts` 增补。无 Token 或 Token 失效时直接 401，不进入检索服务。
 
-#### 7.3.1 请求预算：`/mcp` 与站内搜索共用一本账
+#### 7.3.1 请求预算
 
-限流 / 并发 / 墙钟时间 / 查询长度都实现在 `packages/notes-mcp/src/budget.mjs`，而
-`POST /mcp` 与站内搜索 `GET /api/search` 用的是**同一个 budget 实例**——
-只给 MCP 加闸门等于留了后门：同一台机器，绕开 MCP 直接刷搜索一样能把它打满。
+限流 / 并发 / 墙钟时间 / 查询长度都实现在 `packages/notes-mcp/src/budget.mjs`。公开模式下
+`POST /mcp` 与 `GET /api/search` 可以共用一本账；账号私有模式关闭公开搜索旁路，因此远程
+入口只对已经通过身份校验的 MCP 请求开放，但仍保留相同的预算闸门防止单账号把服务打满。
 
 | 预算 | 默认 | 超了会怎样 |
 |---|---|---|

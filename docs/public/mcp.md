@@ -2,7 +2,20 @@
 
 本站是北大法学课程笔记（商法概论、刑事执行法、国际刑法学、法律实证分析等）。每节课有一篇结构化中文笔记，另有每节一张 A4 的「一页纸摘要」。
 
-**这个 MCP 解决的问题**：AI 要回答"跨课次、跨课程"的问题（例如"老师几次讲到法人人格否认，讲法有什么变化"），把全部笔记塞进上下文既不现实也没必要。这个服务器把内容分成三层，让 AI 先看目录、再看摘要、最后才取正文——按需取用，像 Skill 的渐进式披露。
+**这个 MCP 解决的问题**：AI 要回答"跨课次、跨课程"的问题（例如"老师几次讲到法人人格否认，讲法有什么变化"），把全部笔记塞进上下文既不现实也没必要。这个服务器让 AI 先用课程结构、摘要与索引缩小范围，再按需进入具体小节正文——像 Skill 一样渐进式披露。
+
+## 零、先理解内容层：什么用于导航，什么才是依据
+
+| 内容 | 最适合回答 | AI 怎么取 | 地位 |
+|---|---|---|---|
+| `theme` / `keywords` / 课次摘要 | "这门课或这几节大概讲什么" | `list_courses` / `get_course` | 导航 |
+| 一页纸 | "这一节考前快速过一遍" | `llms.txt` 里的「一页纸 Markdown」 | 派生速览 |
+| 概念 / 法条 / 案例索引 | "这门课有哪些核心对象、分别在哪" | `list_terms` | 导航 + 落点 |
+| 专题整合 | "这几节课合起来形成什么知识框架" | `get_course` 看 `topics` → `fetch(topic:<id>)` | 中观派生结构 |
+| 知识地图 | "整门课的课次与概念怎么连起来" | `llms.txt` / 站点知识地图 | 宏观导航 |
+| 单课笔记 | "老师具体怎么讲、依据和论证是什么" | `get_note`，优先 `section` | **事实源** |
+
+派生内容的作用是**压缩、组织和定位**。它们与原笔记冲突时，以单课笔记为准；回答跨课次问题时，也尽量把结论落回具体课程、课次和小节。
 
 ## 一、挂载
 
@@ -57,19 +70,25 @@
 | 工具 | 用在哪一层 | 参数 | 返回 |
 |---|---|---|---|
 | `list_courses` | 第一层：有哪些课 | 无 | 课程名、课次数、最新课次时间，以及这门课所有主题与关键词 |
-| `get_course` | 第二层：这门课讲了什么 | `course`（必填，支持部分匹配）、`outline` | 每节的标题、时间、阅读时长、主题、关键词、摘要（**不含正文**） |
+| `get_course` | 第二层：这门课讲了什么 | `course`（必填，支持部分匹配）、`outline` | 课次摘要 + 当前专题清单；专题带 `fetchId`、Markdown/JSON 地址（**不含单课正文**） |
 | `search_notes` | 跨课次/跨课程检索 | `query`（必填）、`course`、`includeBody` | 命中片段 + 定位（哪门课、哪一节、正文哪个小节） |
 | `get_note` | 第三层：读正文 | `slug` 或 `course`+`lesson`、`section`（只取某一节）、`maxChars`（默认 12000，上限 60000） | 笔记 Markdown；被截断时会说明还有哪些小节可取 |
 | `list_terms` | 术语清单 | `course`、`kind`（concept/statute/case） | 这门课的概念/法条/案例，含出现次数与落点 |
+| `fetch` | 标准文档读取 | search 的笔记 id，或 `get_course` 返回的 `topic:<id>` | 原笔记/小节，或专题 Markdown |
 
 **资源（resources）**：`notes://courses`、`notes://course/<课程名>`、`notes://terms/<课程名>`、`notes://note/<slug>`。
 
 ## 三、推荐的调用流程
 
-1. **先 `list_courses`**：拿到课程清单与每门课的主题/关键词，判断该看哪几门课。绝大多数问题到这里就能缩小范围。
-2. **再 `get_course`**：看某门课每一节的主题、关键词与摘要，决定要不要读正文。
-3. **要读正文才 `get_note`**：优先用 `section` 只取相关小节；整篇默认也会限制在 12000 字以内。
-4. **跨课次的问题用 `search_notes`**：例如"哪几节讲过人格否认"，它会给出每一处的落点；需要细节再对这些课次调 `get_note`。
+这里不是固定的 1→2→3 流水线，而是一棵**最短路径决策树**：
+
+1. **范围未知**才用 `list_courses`；用户已经点名课程时，直接进入 `get_course`。
+2. **课程内摸底**用 `get_course`。它会同时给课次摘要和当前专题：如果问题本身就是阶段/专题复习，先把 `topics[].fetchId` 交给 `fetch`，读现成专题框架；只有需要课次章节结构时才请求 outline。
+3. **盘点概念、法条、案例**优先 `list_terms`，不要拿几十个关键词逐个 `search_notes`。
+4. **找跨课次落点**用 `search_notes`。默认策略已经先查索引，索引答不上来时才下沉正文；只有明确需要穷尽正文时才打开 `includeBody=true`。
+5. **读依据**才用 `get_note`，并优先把返回的小节 id / 标题作为 `section`；整篇读取是最后一档。
+6. **已经知道具体课次**时，可以直接 `get_note(course+lesson)`，无需先走课程列表。
+7. **复习而非查证**时：单节优先一页纸；阶段复习优先 `get_course → fetch(topic:<id>)`；整门课先看知识地图/索引。需要确定性依据时再回 `get_note(section=...)`。
 
 典型返回（`list_courses` 节选）：
 
@@ -84,15 +103,13 @@
 
 接入之后可以直接这样交代：
 
-> 你有一个 `course-notes` MCP，里面是我北大法学课程的笔记。回答我的问题时：
-> 先用 `list_courses` 看有哪些课，再用 `get_course` 看相关课次的主题与关键词；
-> 只有需要原文细节时才用 `get_note`，并尽量用 `section` 只取相关小节；
-> 涉及"哪几节课讲过同一个概念"这类问题时用 `search_notes`，并在回答里给出课次出处。
+> 你有一个 `course-notes` MCP，里面是我的北大法学课程笔记。单课笔记是事实源，一页纸、专题整合、知识地图和索引用于导航与复习。请按问题走最短路径：已知课程就直接 `get_course`；如果返回的专题与问题匹配，先 `fetch(topics[].fetchId)` 读专题，再按其中的原文落点核实；已知具体课次可直接 `get_note`。盘点概念/法条/案例先 `list_terms`，跨课次找落点用 `search_notes`，只有需要论证细节时再 `get_note(section=...)`。不要习惯性读取整篇或先开启全文扫描。
 
 ## 五、机器可读的其它入口
 
 - `https://course.law-tech.dev/llms.txt`：站点摘要与全部入口清单（AI 的第一站）
 - `https://course.law-tech.dev/api/notes`：笔记索引 JSON（标题、主题、关键词、摘要、目录；不含正文）
+- `https://course.law-tech.dev/topics.json`：当前有效专题索引；每项带专题页面、Markdown、JSON 地址
 - `https://course.law-tech.dev/md/<课程>/<课次>.md`：单篇笔记的 Markdown 原文（路径带课程，
   两门课同一天同名课次不会互相覆盖）
 - `https://course.law-tech.dev/md/<课程>/<课次>-一页纸.md`：一页纸摘要
@@ -106,18 +123,19 @@
 
 ## 七、Remote MCP（长期在线，不需要本地任何程序）
 
-上面三种挂载方式都需要本机跑一个 Node 进程（stdio）。**长期在线、脱离用户电脑**的是这个地址：
+上面三种挂载方式都需要本机跑一个 Node 进程（stdio）。长期在线入口仍然是：
 
     https://course.law-tech.dev/mcp
 
-- 传输：Streamable HTTP（POST 一条 JSON-RPC，回一条 JSON；不带会话，服务器无状态）
-- 身份验证：**无**（全部是公开只读内容）
-- 数据源：与站点同一份发布库（`library.json`），新笔记发布后按文件更新时间自动可见，不需要重启或重新部署
-- 只读：所有工具都标了 `readOnlyHint: true`，服务器没有任何写入能力
+- 传输：Streamable HTTP（POST 一条 JSON-RPC，回一条 JSON；协议层无会话）
+- 身份验证：**Bearer Token**。登录课程空间后，在「账户设置 → MCP」生成；令牌只绑定当前账号，30 天自动失效
+- 数据源：当前账号自己的课程笔记与专题；所有读取都按 `owner_id` 过滤，不读取别人的内容
+- 只读：所有工具都标了 `readOnlyHint: true`，MCP 没有课程内容写入能力
+- 隐私：站点切到私有内容模式后，`/api/notes`、静态 Markdown、专题页与搜索不再作为公开旁路提供
 
-### 接到 ChatGPT
+### 接到 ChatGPT / Claude / 其它 Remote MCP 客户端
 
-「新建插件 / 连接器」→ 填 URL `https://course.law-tech.dev/mcp` → 身份验证选「无 / 不需要」→ 扫描后应出现：
+填 URL `https://course.law-tech.dev/mcp`，并把「账户设置 → MCP」生成的值作为 `Authorization: Bearer <token>` 提交。客户端如果不支持给 Remote MCP 配置 Bearer Header，就不要退回公开/无认证模式；应改用支持认证头的客户端或本地 stdio 方式。连接后应出现：
 
 | 工具 | 用途 |
 |---|---|
@@ -129,17 +147,15 @@
 | `search` | OpenAI 标准知识检索（`{ results: [{ id, title, url }] }`） |
 | `fetch` | OpenAI 标准取文档（`{ id, title, text, url, metadata }`）；id 支持 `slug#小节` |
 
-### 接到 Claude / 其它客户端
-
-支持 Remote MCP 的客户端直接填 URL 即可；只支持 stdio 的客户端用上面三种本地方式之一。
-
 ### 更新行为
 
-发布一篇新笔记（`course publish`）之后：`list_courses` / `get_course` / `search_notes` / `get_note` / `list_terms` / `search` / `fetch` / `/api/notes` / `/llms.txt` / `/concepts` 等索引都会自动跟上，**不需要改 MCP 配置，也不需要重新部署服务**。远程站点数据源默认 60 秒缓存，本地发布库按文件修改时间判断，发布后最长等一个缓存周期。
+发布一篇新笔记之后，私有空间会更新当前账号的 note 记录；专题绑定的课次发生 checksum 变化时会显示「待更新」。Remote MCP 每次读取都经当前账号的数据源，不需要重新部署服务或重新生成令牌。
 
-## 八、验收记录（2026-09-27 实测）
+## 八、历史验收记录（2026-09-27，公开模式）
 
-用官方 **MCP Inspector**（`npx @modelcontextprotocol/inspector --cli https://course.law-tech.dev/mcp --transport http`）对公开 HTTPS 端点逐项跑过：
+下面这组记录只说明 MCP 工具与协议层当时已经跑通过。**它发生在内容改为账号私有之前**，其中「无认证」「公开 /api/notes」「公开笔记页」等结论不再适用于当前模式；新的私有认证与 owner 隔离应由部署验收重新确认。
+
+当时使用官方 **MCP Inspector** 对公开 HTTPS 端点逐项跑过：
 
 | 项 | 结果 |
 |---|---|

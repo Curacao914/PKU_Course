@@ -18,6 +18,18 @@ export function createAccountStore(env = process.env) {
     return data
   }
 
+  async function setNotificationEmail(ownerId, email) {
+    const value = String(email || '').trim().toLowerCase()
+    if (value && (value.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value))) {
+      throw Object.assign(new Error('通知邮箱格式不正确'), { status: 400 })
+    }
+    const { data, error } = await supabase.from('profiles')
+      .update({ notification_email: value || null, updated_at: new Date().toISOString() })
+      .eq('id', ownerId).select('id,email,notification_email').single()
+    if (error) throw error
+    return data
+  }
+
   async function credentialRows(ownerId) {
     const { data, error } = await supabase.from('provider_credentials')
       .select('provider, ciphertext, iv, auth_tag, last4, verified_at, updated_at').eq('owner_id', ownerId)
@@ -195,12 +207,23 @@ export function createAccountStore(env = process.env) {
       replayKey,
       courseName: String(input.courseName || ''),
       lessonTitle: String(input.lessonTitle || ''),
+      slug: String(input.slug || ''),
+      checksum: String(input.checksum || ''),
+      lessonDate: String(input.lessonDate || ''),
+      index: input.index && typeof input.index === 'object' ? input.index : null,
       source: 'course-worker',
       updatedFromCourseAt: new Date().toISOString()
     }
-    const { data: existing, error: readError } = await supabase.from('notes')
-      .select('id').eq('owner_id', ownerId).contains('metadata', { replayKey }).maybeSingle()
+    // replayKey 历史上并非全局唯一：真实课程数据里出现过两节课共用 replayKey。
+    // 私有空间优先用发布层已经去冲突的 slug 定位；只有老记录没有 slug 时，才允许
+    // “唯一 replayKey”兜底。这样同课次标题/日期相近也不会互相覆盖。
+    const { data: candidates, error: readError } = await supabase.from('notes')
+      .select('id, metadata').eq('owner_id', ownerId).eq('note_type', 'course')
     if (readError) throw readError
+    const slug = String(input.slug || '')
+    const bySlug = slug ? (candidates || []).find(row => String(row.metadata?.slug || '') === slug) : null
+    const byReplay = (candidates || []).filter(row => String(row.metadata?.replayKey || '') === replayKey)
+    const existing = bySlug || (byReplay.length === 1 ? byReplay[0] : null)
     if (existing) {
       const { data, error } = await supabase.from('notes').update({
         title: String(input.lessonTitle || input.courseName || '课程笔记'),
@@ -210,11 +233,13 @@ export function createAccountStore(env = process.env) {
         updated_at: new Date().toISOString()
       }).eq('id', existing.id).eq('owner_id', ownerId).select('*').single()
       if (error) throw error
-      await notifyEmail(ownerId, {
-        eventKey: 'course-note:' + replayKey + ':' + data.updated_at,
-        title: '课程笔记已完成：' + String(input.courseName || '') + ' · ' + String(input.lessonTitle || ''),
-        summary: '新的课程笔记已经保存到你的个人工作台。'
-      })
+      if (!input.silent) {
+        await notifyEmail(ownerId, {
+          eventKey: 'course-note:' + replayKey + ':' + data.updated_at,
+          title: '课程笔记已完成：' + String(input.courseName || '') + ' · ' + String(input.lessonTitle || ''),
+          summary: '新的课程笔记已经保存到你的个人工作台。'
+        })
+      }
       return data
     }
     const { data, error } = await supabase.from('notes').insert({
@@ -226,12 +251,121 @@ export function createAccountStore(env = process.env) {
       metadata
     }).select('*').single()
     if (error) throw error
-    await notifyEmail(ownerId, {
-      eventKey: 'course-note:' + replayKey + ':' + data.updated_at,
-      title: '课程笔记已完成：' + String(input.courseName || '') + ' · ' + String(input.lessonTitle || ''),
-      summary: '新的课程笔记已经保存到你的个人工作台。'
-    })
+    if (!input.silent) {
+      await notifyEmail(ownerId, {
+        eventKey: 'course-note:' + replayKey + ':' + data.updated_at,
+        title: '课程笔记已完成：' + String(input.courseName || '') + ' · ' + String(input.lessonTitle || ''),
+        summary: '新的课程笔记已经保存到你的个人工作台。'
+      })
+    }
     return data
+  }
+
+
+  async function privateNotes(ownerId) {
+    const { data, error } = await supabase.from('notes')
+      .select('id,title,body_markdown,note_type,status,metadata,created_at,updated_at')
+      .eq('owner_id', ownerId).in('note_type', ['course', 'course-topic'])
+      .order('updated_at', { ascending: false })
+    if (error) throw error
+    return data || []
+  }
+
+  function privateTopicStatus(topic, noteBySlug) {
+    const artifact = topic?.metadata?.artifact
+    if (!artifact || !Array.isArray(artifact.lessons)) return 'missing'
+    for (const lesson of artifact.lessons) {
+      const note = noteBySlug.get(String(lesson?.slug || ''))
+      if (!note) return 'stale'
+      const current = String(note.metadata?.checksum || '')
+      const built = String(lesson?.checksum || '')
+      if (built && current !== built) return 'stale'
+    }
+    return 'fresh'
+  }
+
+  async function privateContent(ownerId) {
+    const rows = await privateNotes(ownerId)
+    const notes = rows.filter(row => row.note_type === 'course')
+    const noteBySlug = new Map(notes.map(row => [String(row.metadata?.slug || ''), row]).filter(([slug]) => slug))
+    const topics = rows.filter(row => row.note_type === 'course-topic').map(row => ({
+      id: row.id,
+      topicId: String(row.metadata?.topicId || ''),
+      courseName: String(row.metadata?.courseName || ''),
+      title: row.title,
+      summary: String(row.metadata?.summary || ''),
+      lessons: Array.isArray(row.metadata?.lessons) ? row.metadata.lessons : [],
+      artifact: row.metadata?.artifact || null,
+      status: privateTopicStatus(row, noteBySlug),
+      updatedAt: row.updated_at
+    }))
+    return {
+      notes: notes.map(row => ({
+        id: row.id,
+        title: row.title,
+        courseName: String(row.metadata?.courseName || ''),
+        lessonTitle: String(row.metadata?.lessonTitle || row.title || ''),
+        lessonDate: String(row.metadata?.lessonDate || ''),
+        replayKey: String(row.metadata?.replayKey || ''),
+        slug: String(row.metadata?.slug || ''),
+        checksum: String(row.metadata?.checksum || ''),
+        index: row.metadata?.index || null,
+        status: row.status,
+        updatedAt: row.updated_at
+      })),
+      topics
+    }
+  }
+
+  async function privateNote(ownerId, id) {
+    const { data, error } = await supabase.from('notes')
+      .select('id,title,body_markdown,note_type,status,metadata,created_at,updated_at')
+      .eq('owner_id', ownerId).eq('id', id).maybeSingle()
+    if (error) throw error
+    return data || null
+  }
+
+  async function savePrivateTopic(ownerId, input) {
+    const artifact = input?.artifact && typeof input.artifact === 'object' ? input.artifact : null
+    const topicId = String(input.topicId || artifact?.id || '')
+    if (!topicId || !artifact) throw new Error('专题缺 topicId 或 artifact')
+    const metadata = {
+      topicId,
+      courseName: String(input.courseName || artifact.course || ''),
+      summary: String(input.summary || artifact.summary || ''),
+      lessons: Array.isArray(artifact.lessons) ? artifact.lessons.map(item => String(item?.slug || item || '')).filter(Boolean) : [],
+      artifact,
+      source: 'course-worker',
+      updatedFromCourseAt: new Date().toISOString()
+    }
+    const { data: existing, error: readError } = await supabase.from('notes')
+      .select('id').eq('owner_id', ownerId).eq('note_type', 'course-topic')
+      .contains('metadata', { topicId }).maybeSingle()
+    if (readError) throw readError
+    const row = {
+      title: String(input.title || artifact.title || '专题整合'),
+      body_markdown: String(input.markdown || ''),
+      note_type: 'course-topic',
+      status: 'published',
+      metadata,
+      updated_at: new Date().toISOString()
+    }
+    if (existing) {
+      const { data, error } = await supabase.from('notes').update(row)
+        .eq('id', existing.id).eq('owner_id', ownerId).select('*').single()
+      if (error) throw error
+      return data
+    }
+    const { data, error } = await supabase.from('notes').insert({ owner_id: ownerId, ...row }).select('*').single()
+    if (error) throw error
+    return data
+  }
+
+  async function deletePrivateTopic(ownerId, id) {
+    const { data, error } = await supabase.from('notes').delete()
+      .eq('owner_id', ownerId).eq('note_type', 'course-topic').eq('id', id).select('id')
+    if (error) throw error
+    return Boolean(data?.length)
   }
 
   async function createMaterial(ownerId, input) {
@@ -275,10 +409,11 @@ export function createAccountStore(env = process.env) {
   }
 
   return {
-    profile, credentialStatus, credentials, putCredential, deleteCredential,
+    profile, setNotificationEmail, credentialStatus, credentials, putCredential, deleteCredential,
     getPkuConnection, pkuSecrets, putPkuPassword, savePkuSession, markPku,
     deletePkuPassword, setPkuSelection, saveScannedCourses, resourceLimits,
-    notifyEmail, autoSyncOwners, savePrivateNote, createMaterial, getMaterial, markMaterial
+    notifyEmail, autoSyncOwners, savePrivateNote, privateNotes, privateContent, privateNote,
+    savePrivateTopic, deletePrivateTopic, createMaterial, getMaterial, markMaterial
   }
 }
 

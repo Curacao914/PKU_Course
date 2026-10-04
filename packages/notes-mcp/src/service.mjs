@@ -86,6 +86,14 @@ export function createNotesService({ source, siteOrigin = '', semantic = null } 
   /** 第一层：课程总览。 */
   async function listCourses({ query = '', limit = 50 } = {}, context = {}) {
     const records = await listNotes(context)
+    const topicIndex = typeof source.listTopics === 'function'
+      ? await source.listTopics({ signal: context?.signal })
+      : []
+    const topicCounts = new Map()
+    for (const topic of topicIndex || []) {
+      const course = String(topic.course || '').trim()
+      if (course) topicCounts.set(course, (topicCounts.get(course) || 0) + 1)
+    }
     const groups = new Map()
     for (const record of records) {
       if (!record.courseName) continue
@@ -103,6 +111,7 @@ export function createNotesService({ source, siteOrigin = '', semantic = null } 
         courseName,
         teacher,
         lessonCount: sorted.length,
+        topicCount: topicCounts.get(courseName) || 0,
         latestLessonDate: lessonDateOf(latest),
         latestLessonTitle: latest?.lessonTitle || '',
         themes: [...sorted].reverse().filter(record => record.theme).slice(0, 3)
@@ -141,6 +150,24 @@ export function createNotesService({ source, siteOrigin = '', semantic = null } 
     const courseName = resolveCourse(records, course)
     const list = records.filter(record => record.courseName === courseName).sort(byLessonAsc)
     const teacher = [...list].reverse().find(record => record.teacher)?.teacher || ''
+    const topicIndex = typeof source.listTopics === 'function'
+      ? await source.listTopics({ signal: context?.signal })
+      : []
+    const topics = (topicIndex || []).filter(topic => String(topic.course || '') === courseName).map(topic => {
+      const absolute = value => value
+        ? (String(value).startsWith('http') ? String(value) : `${origin}${String(value).startsWith('/') ? '' : '/'}${value}`)
+        : ''
+      return {
+        id: String(topic.id || ''),
+        fetchId: `topic:${String(topic.id || '')}`,
+        title: String(topic.title || ''),
+        summary: String(topic.summary || ''),
+        lessons: Array.isArray(topic.lessons) ? topic.lessons : [],
+        pageUrl: absolute(topic.page || ''),
+        markdownUrl: absolute(topic.markdown || ''),
+        jsonUrl: absolute(topic.json || '')
+      }
+    })
     const ordered = order === 'desc' ? [...list].reverse() : list
     const lessons = ordered.slice(0, limit).map(record => ({
       slug: record.slug,
@@ -152,7 +179,17 @@ export function createNotesService({ source, siteOrigin = '', semantic = null } 
       summary: clip(record.summary || record.brief?.briefing || '', 180),
       ...(includeOutline ? { outline: outlineOf(record, outlineLimit, outlineOffset) } : {})
     }))
-    return { courseName, teacher, lessonCount: list.length, returned: lessons.length, order, limit, lessons }
+    return {
+      courseName,
+      teacher,
+      lessonCount: list.length,
+      topicCount: topics.length,
+      topics,
+      returned: lessons.length,
+      order,
+      limit,
+      lessons
+    }
   }
 
   /** 跨课次/跨课程检索：返回片段 + 定位，不返回全文。 */
@@ -351,7 +388,33 @@ export function createNotesService({ source, siteOrigin = '', semantic = null } 
    */
   async function fetchDocument({ id = '' } = {}, context = {}) {
     const raw = String(id || '').trim()
-    if (!raw) throw new ToolError('fetch 需要 id（来自 search 的 results[].id）。')
+    if (!raw) throw new ToolError('fetch 需要 id（来自 search / get_course 返回的稳定 id）。')
+    if (raw.startsWith('topic:')) {
+      const topicId = raw.slice('topic:'.length)
+      if (!topicId || typeof source.listTopics !== 'function' || typeof source.readTopicMarkdown !== 'function') {
+        throw new ToolError('当前数据源不支持专题读取。')
+      }
+      const topics = await source.listTopics({ signal: context?.signal })
+      const topic = (topics || []).find(item => String(item.id || '') === topicId)
+      if (!topic) throw new ToolError(`找不到专题 id=${topicId}。先用 get_course 取当前专题列表。`)
+      const text = await source.readTopicMarkdown(topicId, { signal: context?.signal })
+      const absolute = value => value
+        ? (String(value).startsWith('http') ? String(value) : `${origin}${String(value).startsWith('/') ? '' : '/'}${value}`)
+        : ''
+      return {
+        id: raw,
+        title: [topic.course, topic.title].filter(Boolean).join(' · '),
+        text,
+        url: absolute(topic.page || ''),
+        metadata: {
+          kind: 'topic',
+          course: String(topic.course || ''),
+          lessons: Array.isArray(topic.lessons) ? topic.lessons : [],
+          markdownUrl: absolute(topic.markdown || ''),
+          jsonUrl: absolute(topic.json || '')
+        }
+      }
+    }
     const [slugPart, sectionPart = ''] = raw.split('#')
     const section = sectionPart ? decodeURIComponent(sectionPart) : ''
     const note = await getNote({ slug: slugPart, section, maxChars: NOTE_MAX_CHARS_LIMIT }, context)

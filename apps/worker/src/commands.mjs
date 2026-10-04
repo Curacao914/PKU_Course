@@ -17,7 +17,9 @@ import {
   buildSourceMapSource,
   checkNoteQuality,
   formatQualityReport,
+  generateTopicArtifact,
   normalizeSourceMapDraft,
+  planCourseTopics,
   renderIntegrationMarkdown
 } from '@course/notes'
 
@@ -25,8 +27,12 @@ import { formatInventory, scanArtifactInventory } from './artifact-inventory.mjs
 import { activeArtifactDirs } from './artifact-sources.mjs'
 import {
   emptyIntegrationManifest,
+  emptyTopicManifest,
   normalizeIntegrationManifest,
+  normalizeTopicManifest,
+  replaceCourseTopics,
   selectConfiguredIntegrations,
+  selectConfiguredTopics,
   upsertIntegrationDefinition
 } from '@course/notes'
 import { collectExceptions, formatExceptions } from './reconcile.mjs'
@@ -54,6 +60,7 @@ import {
 } from './site-releases.mjs'
 
 import { hashPassword, noteCostCny, resolvePricing, validatePassword } from '@course/core'
+import { signRequest as signControlRequest } from '../../control/src/server/auth.mjs'
 
 import {
   LOW_BALANCE_THRESHOLD_CNY,
@@ -103,6 +110,7 @@ import {
   plainBlockText,
   readSiteIndex,
   refreshRecord,
+  renderTopicMarkdown,
   resolveSourceMapEntries,
   sectionTexts,
   slugify,
@@ -1353,6 +1361,95 @@ export function createCommands(context) {
     return report.blocking ? 1 : 0
   }
 
+  function topicManifestPath(options = {}) {
+    return path.resolve(options.options?.manifest || path.join(config.scratchRoot, 'topic-manifest.json'))
+  }
+
+  function readTopicManifest(file) {
+    if (!fs.existsSync(file)) return emptyTopicManifest()
+    let raw
+    try {
+      raw = JSON.parse(fs.readFileSync(file, 'utf8'))
+    } catch (error) {
+      throw new Error(`专题清单不是合法 JSON：${file}（${error instanceof Error ? error.message : String(error)}）`)
+    }
+    return normalizeTopicManifest(raw)
+  }
+
+  function writeTopicArtifact(artifact, outputDir) {
+    fs.mkdirSync(outputDir, { recursive: true })
+    const file = path.join(outputDir, `${slugify(artifact.id, 'topic')}.json`)
+    writeJsonAtomic(file, artifact)
+    return file
+  }
+
+  function readGeneratedTopics(dir = path.join(config.scratchRoot, 'topics')) {
+    if (!fs.existsSync(dir)) return []
+    const manifestFile = path.join(config.scratchRoot, 'topic-manifest.json')
+    const manifest = fs.existsSync(manifestFile) ? readTopicManifest(manifestFile) : null
+    const definitions = manifest
+      ? new Map(manifest.topics.filter(item => item.enabled !== false).map(item => [item.id, item]))
+      : null
+    const topics = []
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith('.json')) continue
+      try {
+        const value = JSON.parse(fs.readFileSync(path.join(dir, entry.name), 'utf8'))
+        if (value?.kind !== 'course-topic' || !value?.id) continue
+        if (definitions) {
+          const definition = definitions.get(value.id)
+          if (!definition) continue
+          const artifactLessons = (value.lessons || []).map(item => String(item.slug || ''))
+          if (String(value.title || '') !== String(definition.title || '')) continue
+          if (JSON.stringify(artifactLessons) !== JSON.stringify(definition.lessons || [])) continue
+        }
+        topics.push(value)
+      } catch {
+        // 管理台会把损坏/缺失产物报出来；建站不能因为一份坏专题拖死全部原笔记。
+      }
+    }
+    return topics
+  }
+
+
+  function privateVisibilityEnabled() {
+    return String(env.COURSE_CONTENT_VISIBILITY || '').trim().toLowerCase() === 'private'
+  }
+
+  async function writeOwnerPrivateContent(target, payload) {
+    const endpoint = String(env.COURSE_CONTROL_LOCAL_URL || 'http://127.0.0.1:3102').replace(/\/$/, '')
+    const key = String(env.COURSE_CONTROL_SIGNING_KEY || '')
+    const ownerId = String(config.account?.ownerId || '')
+    if (!privateVisibilityEnabled()) return null
+    if (config.account?.resourceClass === 'member') throw new Error('MEMBER 不能使用 OWNER 控制面签名')
+    if (!endpoint || !key || !ownerId) {
+      throw new Error('私有内容模式下 OWNER 必须配置 COURSE_ACCOUNT_OWNER_ID、COURSE_CONTROL_SIGNING_KEY 与 COURSE_CONTROL_LOCAL_URL')
+    }
+    const body = JSON.stringify(payload)
+    const signed = signControlRequest({ key, ownerId, method: 'PUT', path: target, body })
+    const response = await injectedFetch(endpoint + target, {
+      method: 'PUT',
+      headers: { ...signed, 'content-type': 'application/json', accept: 'application/json' },
+      body,
+      redirect: 'error'
+    })
+    const result = await response.json().catch(() => ({}))
+    if (!response.ok || result.ok === false) {
+      throw new Error(result.error || `OWNER 私有内容写回失败（HTTP ${response.status}）`)
+    }
+    return result
+  }
+
+  function topicModelConfig() {
+    return {
+      apiKey: config.ai.apiKey || 'unset',
+      baseUrl: config.ai.baseUrl,
+      provider: config.ai.provider,
+      source: 'environment',
+      models: config.ai.models
+    }
+  }
+
   function integrationManifestPath(options = {}) {
     return path.resolve(options.options?.manifest || path.join(config.scratchRoot, 'integration-manifest.json'))
   }
@@ -1580,6 +1677,175 @@ export function createCommands(context) {
       manifest: saved ? { file: manifestFile, id: saved.id, lessons: saved.lessons } : null
     }, options)
     return written.errors.length ? 1 : 0
+  }
+
+  async function topicsRun(options) {
+    const privateAccount = config.account?.resourceClass === 'member'
+    const siteRoot = path.resolve(options.options['site-root'] || path.join(config.scratchRoot, 'site'))
+    const defaultLibrary = privateAccount
+      ? path.join(config.scratchRoot, 'private-library.json')
+      : path.join(siteRoot, 'library.json')
+    const libraryFile = path.resolve(options.options.library || defaultLibrary)
+    if (!fs.existsSync(libraryFile)) {
+      throw new Error(`找不到${privateAccount ? '个人课程索引' : '发布库'} ${libraryFile}（先完成至少一节课的发布）`)
+    }
+    const records = JSON.parse(fs.readFileSync(libraryFile, 'utf8'))
+    const manifestFile = topicManifestPath(options)
+    const outputDir = path.resolve(options.options['out-dir'] || path.join(config.scratchRoot, 'topics'))
+    const modelConfig = topicModelConfig()
+    const callForTopic = injectedCallModel ||
+      (payload => callCourseModel({ ...payload, config: { ...modelConfig, ...(payload.config || {}) }, onRetry: onModelRetry }))
+
+    function refreshReadingSite() {
+      if (privateAccount) return { rebuilt: false, reason: 'private_account' }
+      const defaultTopicDir = path.resolve(path.join(config.scratchRoot, 'topics'))
+      if (path.resolve(outputDir) !== defaultTopicDir) {
+        return { rebuilt: false, reason: 'custom_topic_output' }
+      }
+      // 新部署用原子 release：专题生成后阅读站立刻看到新结果。旧式实体目录不在这里直接覆写，
+      // 避免与并发 publish 互相踩；下一次 publish --rebuild 会带上 topics。
+      if (!usesAtomicSiteReleases(siteRoot)) return { rebuilt: false, reason: 'legacy_site_layout' }
+      const revision = libraryRevision(libraryFile)
+      const outcome = publishViaRelease({
+        siteRoot,
+        records,
+        expectedRevision: revision.revision,
+        origin: options.options.origin || 'https://course.law-tech.dev',
+        carryEmbeddings: true
+      })
+      return { rebuilt: true, release: outcome.release }
+    }
+
+
+    async function publishPrivateTopic(artifact) {
+      const payload = {
+        topicId: artifact.id,
+        courseName: artifact.course,
+        title: artifact.title,
+        summary: artifact.summary || '',
+        artifact,
+        markdown: renderTopicMarkdown(artifact, { notes: records })
+      }
+      if (!privateAccount) {
+        if (!privateVisibilityEnabled()) return null
+        const result = await writeOwnerPrivateContent('/v1/private/topic', payload)
+        return result?.topic || null
+      }
+      const endpoint = String(env.COURSE_CONTROL_LOCAL_URL || '').replace(/\/$/, '')
+      const secret = String(env.COURSE_JOB_TOKEN || '')
+      const ownerId = String(config.account?.ownerId || '')
+      const jobId = String(env.COURSE_JOB_ID || '')
+      if (!endpoint || !secret || !ownerId || !jobId) throw new Error('个人专题写回控制面的配置不完整')
+      const response = await injectedFetch(endpoint + '/v1/internal/private-topic', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer ' + secret,
+          'x-course-owner-id': ownerId,
+          'x-course-job-id': jobId,
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify(payload)
+      })
+      const result = await response.json().catch(() => ({}))
+      if (!response.ok || result.ok === false) {
+        throw new Error(result.error || `个人专题入库失败（HTTP ${response.status}）`)
+      }
+      return result.topic || null
+    }
+
+    async function buildOne(definition) {
+      const result = await generateTopicArtifact({
+        records,
+        definition,
+        callModel: callForTopic,
+        modelConfig,
+        generatedAt: clockNow().toISOString()
+      })
+      const file = writeTopicArtifact(result.artifact, outputDir)
+      const privateTopic = await publishPrivateTopic(result.artifact)
+      return {
+        id: definition.id,
+        course: definition.course,
+        title: definition.title,
+        lessons: definition.lessons,
+        file,
+        ...(privateTopic ? { privateTopic } : {}),
+        attempts: result.attempts,
+        usage: result.trace?.usage || null
+      }
+    }
+
+    if (options.flags?.has('configured')) {
+      const manifest = readTopicManifest(manifestFile)
+      const definitions = selectConfiguredTopics(manifest, {
+        id: options.options.id || '',
+        course: options.options.course || ''
+      })
+      if (!definitions.length) {
+        throw new Error(
+          options.options.id
+            ? `专题清单里找不到启用的 id=${options.options.id}`
+            : `专题清单没有匹配项：${manifestFile}`
+        )
+      }
+      const results = []
+      const errors = []
+      for (const definition of definitions) {
+        try {
+          results.push(await buildOne(definition))
+        } catch (error) {
+          errors.push({ id: definition.id, message: error instanceof Error ? error.message : String(error) })
+        }
+      }
+      const site = refreshReadingSite()
+      emit({ configured: true, manifestFile, outputDir, count: results.length, results, errors, site }, options)
+      return errors.length ? 1 : 0
+    }
+
+    const course = requireOption(options.options, 'course', 'topics')
+    const planned = await planCourseTopics({
+      records,
+      course,
+      callModel: callForTopic,
+      modelConfig
+    })
+    const current = readTopicManifest(manifestFile)
+    const next = replaceCourseTopics(current, course, planned.topics)
+    writeJsonAtomic(manifestFile, next)
+
+    if (options.flags?.has('plan-only')) {
+      emit({
+        planned: true,
+        course,
+        manifestFile,
+        topics: planned.topics.map(item => ({ id: item.id, title: item.title, summary: item.summary || '', lessons: item.lessons })),
+        usage: planned.trace?.usage || null
+      }, options)
+      return 0
+    }
+
+    const results = []
+    const errors = []
+    for (const definition of selectConfiguredTopics(next, { course })) {
+      try {
+        results.push(await buildOne(definition))
+      } catch (error) {
+        errors.push({ id: definition.id, message: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    const site = refreshReadingSite()
+    emit({
+      planned: true,
+      generated: true,
+      course,
+      manifestFile,
+      outputDir,
+      topics: planned.topics.map(item => ({ id: item.id, title: item.title, lessons: item.lessons })),
+      results,
+      errors,
+      site
+    }, options)
+    return errors.length ? 1 : 0
   }
 
   /**
@@ -2144,6 +2410,7 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
     try {
       const site = writeSite({
         records,
+        topics: readGeneratedTopics(),
         outputDir: transaction.stagingDir,
         siteOrigin: origin || 'https://course.law-tech.dev',
         docs: readPublicDocs()
@@ -2194,6 +2461,16 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
     const notePath = path.join(from, `${safeFileName(lessonTitle)}.md`)
     if (!fs.existsSync(notePath)) throw new Error(`找不到私有笔记：${notePath}`)
     const markdown = fs.readFileSync(notePath, 'utf8')
+    const nowIso = clockNow().toISOString()
+    const privateRecord = buildNoteRecord({
+      courseName,
+      lessonTitle,
+      markdown,
+      replayKey,
+      lessonDate: options.options['lesson-date'] || '',
+      firstPublishedAt: nowIso,
+      updatedAt: nowIso
+    })
     const endpoint = String(env.COURSE_CONTROL_LOCAL_URL || '').replace(/\/$/, '')
     const secret = String(env.COURSE_JOB_TOKEN || '')
     const ownerId = String(config.account?.ownerId || '')
@@ -2207,12 +2484,38 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
         'x-course-job-id': String(env.COURSE_JOB_ID || ''),
         'content-type': 'application/json'
       },
-      body: JSON.stringify({ replayKey, courseName, lessonTitle, markdown })
+      body: JSON.stringify({
+        replayKey,
+        courseName,
+        lessonTitle,
+        markdown,
+        slug: privateRecord.slug,
+        checksum: privateRecord.checksum,
+        lessonDate: privateRecord.lessonDate || '',
+        index: Object.fromEntries(Object.entries(privateRecord).filter(([key]) => key !== 'markdown'))
+      })
     })
     const result = await response.json().catch(() => ({}))
     if (!response.ok || result.ok === false) {
       throw new Error(result.error || `私有笔记入库失败（HTTP ${response.status}）`)
     }
+
+    // 每个 MEMBER 账户都有自己独立的本地索引，仅供该账户后续做专题划分/重建；
+    // 它不写入公开 site，也不会被别的 owner 读取。
+    const privateLibraryFile = path.join(config.scratchRoot, 'private-library.json')
+    const current = fs.existsSync(privateLibraryFile)
+      ? JSON.parse(fs.readFileSync(privateLibraryFile, 'utf8'))
+      : []
+    const next = [
+      ...current.filter(item => {
+        const sameSlug = privateRecord.slug && String(item.slug || '') === privateRecord.slug
+        // 老索引没有 slug 时才按 replayKey 兜底；不能把共享 replayKey 的另一节课一起删掉。
+        const legacySameReplay = !privateRecord.slug && !item.slug && String(item.replayKey || '') === replayKey
+        return !sameSlug && !legacySameReplay
+      }),
+      privateRecord
+    ]
+    writeJsonAtomic(privateLibraryFile, next)
 
     const store = openStore(config.ledgerPath)
     try {
@@ -2380,6 +2683,7 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
         // 兼容旧部署：在显式迁移之前维持原来的“直接写实体 site 目录”行为。
         site = writeSite({
           records: library,
+          topics: readGeneratedTopics(),
           outputDir: siteRoot,
           siteOrigin: options.options.origin || 'https://course.law-tech.dev',
           docs: readPublicDocs()
@@ -2563,6 +2867,30 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
         }
       }
     })
+    // --from 里的 replay 工件可能比正式发布库旧：它即便还能通过“历史未绑定”兼容，
+    // 也可能把后来人工/模型更新过的简报悄悄覆盖回旧稿。发布前把这种覆盖明确说出来；
+    // 这里先只告警，不擅自改变既有兼容语义。
+    if (previous?.brief && briefResolution.applied && briefResolution.value) {
+      const currentBrief = JSON.stringify({
+        briefing: previous.brief?.briefing || '',
+        keyPoints: previous.brief?.keyPoints || [],
+        theme: previous.theme || '',
+        keywords: previous.keywords || []
+      })
+      const incomingBrief = JSON.stringify({
+        briefing: briefResolution.value?.briefing || '',
+        keyPoints: briefResolution.value?.keyPoints || [],
+        theme: briefResolution.value?.theme || '',
+        keywords: briefResolution.value?.keywords || []
+      })
+      if (currentBrief !== incomingBrief) {
+        stderr(
+          `警告：--from 中的简报与发布库当前简报不一致；本次发布会用工件内容覆盖现有简报（来源状态：${briefResolution.reason}）。` +
+          ' 如果这是历史 replay，建议先同步当前发布库派生物或改用 staging。'
+        )
+      }
+    }
+
     const onepageResolution = await resolveDerived({
       label: '一页纸摘要',
       file: path.join(from, 'onepage.json'),
@@ -2626,6 +2954,23 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
     if (record.lessonDateSource === 'published' || record.lessonDateSource === 'none') {
       stderr(`这一节取不到上课日期，暂用 ${record.lessonDate || '（无）'} 当课次日期；可用 --lesson-date <YYYY-MM-DD> 指定`)
     }
+
+    // 私有内容模式下，OWNER 的个人空间是正式阅读面：每次发布都同步同一份 record。
+    // 旧 site/library 仍保留用于发布回滚与迁移，但公网会被 privacy gate 隐藏。
+    if (privateVisibilityEnabled()) {
+      await writeOwnerPrivateContent('/v1/private/note', {
+        replayKey,
+        courseName: course,
+        lessonTitle,
+        lessonDate: record.lessonDate || '',
+        slug: record.slug,
+        checksum: record.checksum,
+        markdown: record.markdown,
+        silent: true,
+        index: Object.fromEntries(Object.entries(record).filter(([key]) => key !== 'markdown'))
+      })
+    }
+
     const changed = !previous || previous.checksum !== contentChecksum
 
     /**
@@ -2680,7 +3025,10 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
       {
         ...record,
         checksum: contentChecksum,
-        ...(notifyPolicy.reason === 'flag' ? { notifyPolicy: notifyPolicy.policy } : {}),
+        // notifyPolicy 是持久决定：即使这次只是从 previous 继承，也必须重新落进新 record；
+        // notifiedAt 同样属于发布记账，重发正文/派生物不能把历史通知痕迹擦掉。
+        notifyPolicy: notifyPolicy.policy,
+        ...(previous?.notifiedAt ? { notifiedAt: previous.notifiedAt } : {}),
         ...(planned ? { notifyPending: planned } : (carriedPending ? { notifyPending: carriedPending } : {}))
       }
     ]
@@ -2714,6 +3062,7 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
       fs.mkdirSync(siteRoot, { recursive: true })
       site = writeSite({
         records: nextLibrary,
+        topics: readGeneratedTopics(),
         outputDir: siteRoot,
         siteOrigin: options.options.origin || 'https://course.law-tech.dev',
         docs: readPublicDocs()
@@ -4502,7 +4851,7 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
   return {
     doctor, discover, download, transcribe, notes, 'refresh-note': refreshNote, materials, balance, publish,
     notify, cycle, verify, status, retry, prune, backup, digest, 'ppt-reminder': pptReminder,
-    brief: briefRun, onepage: onepageRun, sourcemap: sourceMapRun, integrate: integrateRun,
+    brief: briefRun, onepage: onepageRun, sourcemap: sourceMapRun, integrate: integrateRun, topics: topicsRun,
     artifacts: artifactsRun, reconcile: reconcileRun, 'source-sync': sourceSync, embed: embedRun,
     'admin-passwd': adminPassword, mcp
   }
@@ -4583,6 +4932,10 @@ export const USAGE = `用法：course <命令> [选项]
              --configured [--id <稳定ID>] [--course <名称>] [--manifest <清单.json>]
                                            按长期清单重建整合；不给 --id 时重建所有启用项。
                                            普通 publish 修改正文后，也会免费重建包含该课次的配置项
+  topics     --course <名称> [--library <library.json>] [--out-dir <目录>] [--manifest <清单.json>]
+             [--plan-only]                  AI 按课程索引自动划分专题；默认随后逐专题读取所选课次并生成框架。
+             --configured [--id <稳定ID>] [--course <名称>]
+                                           按已保存专题重建；正文变更只会把专题标成待更新，不会自动花模型费用。
   sourcemap  [--course <名称>] [--lesson <课次>] [--site-root <站点目录>] [--library <library.json>]
              [--write] [--show] [--model --max-cost-cny <元>] [--no-purge]
                                            给已发布的一页纸补来源映射（只补映射，正文一个字不动）。

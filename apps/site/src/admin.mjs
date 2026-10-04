@@ -9,14 +9,20 @@ import { WECHAT_SESSION_MAX_AGE_MINUTES, wechatSessionState } from '@course/noti
 import { addMaterial, listMaterials, materialDir, readDecks, unassignedDir } from '@course/materials'
 import {
   emptyIntegrationManifest,
+  emptyTopicManifest,
   normalizeIntegrationManifest,
+  normalizeTopicManifest,
   removeIntegrationDefinition,
+  removeTopicDefinition,
   upsertIntegrationDefinition,
+  upsertTopicDefinition,
   checkBriefBinding
 } from '@course/notes'
 
+import { signRequest as signControlRequest } from '../../control/src/server/auth.mjs'
 import { ADMIN_HTML } from './admin-page.mjs'
-import { readSiteIndex, verifySourceMap } from '@course/publish'
+import { MEMBER_ADMIN_HTML } from './member-page.mjs'
+import { readSiteIndex, renderTopicMarkdown, verifySourceMap } from '@course/publish'
 import { openLedger } from '@course/store'
 
 /**
@@ -38,6 +44,7 @@ const DEFAULT_RUN_TIMEOUT_MS = 15 * 60 * 1000
 const COURSE_SESSION_COOKIE = 'lawtech_course_session'
 const COURSE_SSO_ORIGIN = 'https://desk.law-tech.dev'
 const COURSE_SESSION_TTL_SECONDS = 60 * 60
+const COURSE_MCP_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
 
 function base64urlJson(value) {
   return Buffer.from(JSON.stringify(value)).toString('base64url')
@@ -100,6 +107,23 @@ function ssoLocation(next = '/') {
   return COURSE_SSO_ORIGIN + '/api/course/sso?next=' + encodeURIComponent(safeCoursePath(next, '/'))
 }
 
+export function issueMcpAccessToken(session, key, nowSeconds = Math.floor(Date.now() / 1000)) {
+  if (!session?.sub || !['owner', 'member'].includes(session.role)) throw new Error('有效账户会话才可以签发 MCP token')
+  return signEnvelope({
+    v: 1,
+    sub: String(session.sub),
+    role: session.role,
+    iat: nowSeconds,
+    exp: nowSeconds + COURSE_MCP_TOKEN_TTL_SECONDS
+  }, key, 'course-mcp-v1')
+}
+
+export function verifyMcpAccessToken(token, key, nowSeconds = Math.floor(Date.now() / 1000)) {
+  const payload = verifyEnvelope(token, key, 'course-mcp-v1', nowSeconds)
+  if (!payload || !payload.sub || !['owner', 'member'].includes(payload.role)) return null
+  return payload
+}
+
 /**
  * 允许管理台触发的动作——**白名单 + argv 数组**，永不拼 shell 字符串。
  * 每个动作最终都落回与定时任务完全相同的那条 CLI 入口，因此不存在"界面上能做、
@@ -109,6 +133,7 @@ export const ALLOWED_ACTIONS = new Set([
   'doctor', 'discover', 'cycle', 'notify', 'notify-retry', 'download', 'transcribe', 'notes', 'publish', 'status',
   'retry', 'revise', 'refresh-note', 'republish', 'prune', 'backup', 'balance',
   'rollback-content', 'rebuild-content', 'rebuild-integration', 'rebuild-integrations',
+  'generate-topics', 'rebuild-topic', 'rebuild-topics',
   'ocr-material'
 ])
 
@@ -455,6 +480,12 @@ export function buildActionArgs(action, payload = {}, workerPath = '') {
       return [...base, 'integrate', '--configured', '--id', need('id')]
     case 'rebuild-integrations':
       return [...base, 'integrate', '--configured']
+    case 'generate-topics':
+      return [...base, 'topics', '--course', need('course')]
+    case 'rebuild-topic':
+      return [...base, 'topics', '--configured', '--id', need('id')]
+    case 'rebuild-topics':
+      return [...base, 'topics', '--configured', ...(payload.course ? ['--course', String(payload.course)] : [])]
     // 图片版课件（整页是图、扫描件）抽不出文字时，用这条把图上的字识别出来补进课件。
     // 走的是与定时任务同一条 CLI：界面上能点，命令行里也一定能跑。
     case 'ocr-material':
@@ -611,6 +642,27 @@ export function writeIntegrationManifestState(scratchRoot, manifest) {
   return { file, manifest: normalized }
 }
 
+function topicManifestPath(scratchRoot) {
+  return path.join(scratchRoot, 'topic-manifest.json')
+}
+
+export function readTopicManifestState(scratchRoot) {
+  const file = topicManifestPath(scratchRoot)
+  if (!fs.existsSync(file)) return emptyTopicManifest()
+  try {
+    return normalizeTopicManifest(JSON.parse(fs.readFileSync(file, 'utf8')))
+  } catch (error) {
+    throw new Error(`专题清单损坏：${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+export function writeTopicManifestState(scratchRoot, manifest) {
+  const normalized = normalizeTopicManifest(manifest)
+  const file = topicManifestPath(scratchRoot)
+  writePrivateJsonAtomic(file, normalized)
+  return { file, manifest: normalized }
+}
+
 function readJsonSafe(file, fallback = null) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')) } catch { return fallback }
 }
@@ -698,14 +750,65 @@ function integrationReport({ root, scratchRoot, manifest }) {
   })
 }
 
+function topicArtifacts(scratchRoot) {
+  const dir = path.join(scratchRoot, 'topics')
+  const found = new Map()
+  if (!fs.existsSync(dir)) return found
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith('.json')) continue
+    const file = path.join(dir, entry.name)
+    const artifact = readJsonSafe(file, null)
+    if (!artifact || artifact.kind !== 'course-topic' || !artifact.id) continue
+    found.set(String(artifact.id), { file, artifact })
+  }
+  return found
+}
+
+function topicReport({ root, scratchRoot, manifest }) {
+  const library = readJsonSafe(path.join(root, 'library.json'), [])
+  const currentBySlug = new Map((Array.isArray(library) ? library : []).map(record => [String(record.slug || ''), record]))
+  const artifacts = topicArtifacts(scratchRoot)
+  return manifest.topics.map(definition => {
+    const hit = artifacts.get(definition.id)
+    if (!hit) return { ...definition, status: 'missing', generatedAt: null, staleLessons: [] }
+    const staleLessons = (hit.artifact.lessons || []).filter(lesson => {
+      const current = currentBySlug.get(String(lesson.slug || ''))
+      return !current || String(current.checksum || '') !== String(lesson.checksum || '')
+    }).map(lesson => String(lesson.lessonTitle || lesson.slug || ''))
+    const artifactLessons = (hit.artifact.lessons || []).map(lesson => String(lesson.slug || ''))
+    const definitionChanged =
+      String(hit.artifact.title || '') !== String(definition.title || '') ||
+      JSON.stringify(artifactLessons) !== JSON.stringify(definition.lessons || [])
+    return {
+      ...definition,
+      status: staleLessons.length || definitionChanged ? 'stale' : 'fresh',
+      generatedAt: hit.artifact.generatedAt || null,
+      staleLessons,
+      definitionChanged
+    }
+  })
+}
+
+function removeTopicArtifact(scratchRoot, id) {
+  const hit = topicArtifacts(scratchRoot).get(String(id || '').trim())
+  if (!hit || !fs.existsSync(hit.file)) return []
+  fs.rmSync(hit.file, { force: true })
+  return [path.basename(hit.file)]
+}
+
 export function contentAdminReport({ root, scratchRoot }) {
-  const manifest = readIntegrationManifestState(scratchRoot)
+  const integrationManifest = readIntegrationManifestState(scratchRoot)
+  const topicManifest = readTopicManifestState(scratchRoot)
   return {
     ok: true,
     release: contentReleaseReport(root),
+    topics: {
+      path: topicManifestPath(scratchRoot),
+      items: topicReport({ root, scratchRoot, manifest: topicManifest })
+    },
     integrations: {
       path: integrationManifestPath(scratchRoot),
-      items: integrationReport({ root, scratchRoot, manifest })
+      items: integrationReport({ root, scratchRoot, manifest: integrationManifest })
     }
   }
 }
@@ -752,7 +855,9 @@ export function createAdminHandler({
   runCommand = defaultRunCommand,
   spawnOcr = defaultSpawnOcr,
   now = () => Date.now(),
-  ssoKey = ''
+  ssoKey = '',
+  controlUrl = 'http://127.0.0.1:3102',
+  controlFetch = fetch
 } = {}) {
   const failures = new Map()
   let running = null
@@ -769,6 +874,56 @@ export function createAdminHandler({
    */
   const jobs = new Map()
   const JOB_KEEP = 30
+
+
+  const controlBase = String(controlUrl || '').replace(/\/$/, '')
+
+  async function controlCall(session, { method = 'GET', target = '/', body = null } = {}) {
+    if (!session?.sub) throw Object.assign(new Error('ACCOUNT_SESSION_REQUIRED'), { status: 401 })
+    if (!controlBase || !ssoKey) throw Object.assign(new Error('ACCOUNT_CONTROL_UNAVAILABLE'), { status: 503 })
+    const rawBody = body == null ? '' : JSON.stringify(body)
+    const signed = signControlRequest({
+      key: ssoKey,
+      ownerId: String(session.sub),
+      method,
+      path: target,
+      body: rawBody
+    })
+    const response = await controlFetch(controlBase + target, {
+      method,
+      headers: {
+        ...signed,
+        accept: 'application/json',
+        ...(rawBody ? { 'content-type': 'application/json' } : {})
+      },
+      ...(rawBody ? { body: rawBody } : {}),
+      redirect: 'error'
+    })
+    const text = await response.text()
+    let payload = {}
+    try { payload = text ? JSON.parse(text) : {} } catch { payload = { ok: false, error: text || 'CONTROL_BAD_JSON' } }
+    return { status: response.status, ok: response.ok, payload }
+  }
+
+  async function accountWorkspace(session) {
+    const [account, content, tasks, jobsView] = await Promise.all([
+      controlCall(session, { target: '/v1/account/status' }),
+      controlCall(session, { target: '/v1/private/content' }),
+      controlCall(session, { target: '/v1/tasks?limit=300' }),
+      controlCall(session, { target: '/v1/jobs' })
+    ])
+    for (const item of [account, content, tasks, jobsView]) {
+      if (!item.ok) throw Object.assign(new Error(item.payload?.error || 'ACCOUNT_CONTROL_FAILED'), { status: item.status || 502 })
+    }
+    return {
+      ok: true,
+      account: account.payload,
+      notes: content.payload.notes || [],
+      topics: content.payload.topics || [],
+      tasks: tasks.payload.tasks || [],
+      jobs: jobsView.payload.jobs || []
+    }
+  }
 
   function jobMeta(payload = {}) {
     return {
@@ -1620,6 +1775,58 @@ export function createAdminHandler({
       return true
     }
 
+
+    if (pathname === `${ADMIN_PREFIX}topics` && (req.method === 'PUT' || req.method === 'POST')) {
+      let payload = {}
+      try {
+        payload = safeJson(await readBody(req)) || {}
+      } catch (error) {
+        sendJson(res, 400, { ok: false, error: 'bad_body', message: error.message })
+        return true
+      }
+      try {
+        const current = readTopicManifestState(scratchRoot)
+        const next = upsertTopicDefinition(current, payload.definition || payload)
+        const saved = writeTopicManifestState(scratchRoot, next)
+        sendJson(res, 200, {
+          ok: true,
+          manifest: saved.manifest,
+          content: contentAdminReport({ root, scratchRoot })
+        })
+      } catch (error) {
+        sendJson(res, 400, { ok: false, error: 'invalid_topic', message: error instanceof Error ? error.message : String(error) })
+      }
+      return true
+    }
+
+    if (pathname === `${ADMIN_PREFIX}topics` && req.method === 'DELETE') {
+      const id = String(url.searchParams.get('id') || '').trim()
+      if (!id) {
+        sendJson(res, 400, { ok: false, error: 'missing_topic_id' })
+        return true
+      }
+      try {
+        const current = readTopicManifestState(scratchRoot)
+        const next = removeTopicDefinition(current, id)
+        if (!next.removed) {
+          sendJson(res, 404, { ok: false, error: 'topic_not_found', id })
+          return true
+        }
+        const saved = writeTopicManifestState(scratchRoot, next)
+        const removedArtifacts = removeTopicArtifact(scratchRoot, id)
+        sendJson(res, 200, {
+          ok: true,
+          removed: id,
+          removedArtifacts,
+          manifest: saved.manifest,
+          content: contentAdminReport({ root, scratchRoot })
+        })
+      } catch (error) {
+        sendJson(res, 500, { ok: false, error: 'topic_delete_failed', message: error instanceof Error ? error.message : String(error) })
+      }
+      return true
+    }
+
     if (pathname === `${ADMIN_PREFIX}integrations` && (req.method === 'PUT' || req.method === 'POST')) {
       let payload = {}
       try {
@@ -1797,6 +2004,224 @@ export function createAdminHandler({
     return true
   }
 
+
+  async function handleAccountApi(req, res, pathname, url, session) {
+    if (!pathname.startsWith('/api/account/')) return false
+    if (!session) {
+      sendJson(res, 401, { ok: false, error: 'account_session_required' })
+      return true
+    }
+    try {
+      if (req.method === 'GET' && pathname === '/api/account/workspace') {
+        sendJson(res, 200, await accountWorkspace(session))
+        return true
+      }
+      if (req.method === 'GET' && pathname === '/api/account/status') {
+        const result = await controlCall(session, { target: '/v1/account/status' })
+        sendJson(res, result.status, result.payload)
+        return true
+      }
+      if (req.method === 'POST' && pathname === '/api/account/mcp-token') {
+        const token = issueMcpAccessToken(session, ssoKey, Math.floor(now() / 1000))
+        sendJson(res, 200, {
+          ok: true,
+          token,
+          expiresInSeconds: COURSE_MCP_TOKEN_TTL_SECONDS,
+          endpoint: '/mcp'
+        }, { 'cache-control': 'private, no-store' })
+        return true
+      }
+      if (req.method === 'GET' && pathname === '/api/account/note') {
+        const id = String(url.searchParams.get('id') || '').trim()
+        if (!id) { sendJson(res, 400, { ok: false, error: 'note_id_required' }); return true }
+        const result = await controlCall(session, { target: '/v1/private/note?id=' + encodeURIComponent(id) })
+        sendJson(res, result.status, result.payload, { 'cache-control': 'private, no-store' })
+        return true
+      }
+      if (req.method === 'PUT' && pathname === '/api/account/notification-email') {
+        const body = safeJson(await readBody(req)) || {}
+        const result = await controlCall(session, {
+          method: 'PUT',
+          target: '/v1/account/notification-email',
+          body: { email: String(body.email || '') }
+        })
+        sendJson(res, result.status, result.payload)
+        return true
+      }
+      if ((req.method === 'PUT' || req.method === 'DELETE') && pathname === '/api/account/credential') {
+        let target = '/v1/account/credential'
+        let body = null
+        if (req.method === 'PUT') {
+          body = safeJson(await readBody(req)) || {}
+        } else {
+          const provider = String(url.searchParams.get('provider') || '').trim()
+          if (!provider) { sendJson(res, 400, { ok: false, error: 'provider_required' }); return true }
+          target += '?provider=' + encodeURIComponent(provider)
+        }
+        const result = await controlCall(session, { method: req.method, target, body })
+        sendJson(res, result.status, result.payload)
+        return true
+      }
+      if ((req.method === 'PUT' || req.method === 'DELETE') && pathname === '/api/account/pku/password') {
+        const body = req.method === 'PUT' ? (safeJson(await readBody(req)) || {}) : null
+        const result = await controlCall(session, {
+          method: req.method,
+          target: '/v1/account/pku/password',
+          body
+        })
+        sendJson(res, result.status, result.payload)
+        return true
+      }
+      if (req.method === 'PUT' && pathname === '/api/account/pku/selection') {
+        const body = safeJson(await readBody(req)) || {}
+        const result = await controlCall(session, {
+          method: 'PUT',
+          target: '/v1/account/pku/selection',
+          body: {
+            selectedCourseKeys: Array.isArray(body.selectedCourseKeys) ? body.selectedCourseKeys : [],
+            autoSyncEnabled: body.autoSyncEnabled === true
+          }
+        })
+        sendJson(res, result.status, result.payload)
+        return true
+      }
+      if (req.method === 'POST' && pathname === '/api/account/pku/qr/start') {
+        const result = await controlCall(session, {
+          method: 'POST',
+          target: '/v1/account/pku/qr/start',
+          body: {}
+        })
+        sendJson(res, result.status, result.payload)
+        return true
+      }
+      if (req.method === 'GET' && pathname === '/api/account/pku/qr/status') {
+        const id = String(url.searchParams.get('id') || '').trim()
+        if (!id) { sendJson(res, 400, { ok: false, error: 'qr_id_required' }); return true }
+        const result = await controlCall(session, {
+          target: '/v1/account/pku/qr/status?id=' + encodeURIComponent(id)
+        })
+        sendJson(res, result.status, result.payload)
+        return true
+      }
+      if (req.method === 'POST' && pathname === '/api/account/discover') {
+        const payload = safeJson(await readBody(req)) || {}
+        const result = await controlCall(session, {
+          method: 'POST',
+          target: '/v1/jobs/discover',
+          body: { courseKey: String(payload.courseKey || '') }
+        })
+        sendJson(res, result.status, result.payload)
+        return true
+      }
+      if (req.method === 'POST' && pathname === '/api/account/sync') {
+        const payload = safeJson(await readBody(req)) || {}
+        const result = await controlCall(session, {
+          method: 'POST',
+          target: '/v1/jobs/sync',
+          body: { maxTasks: Math.max(1, Math.min(5, Number(payload.maxTasks || 3))) }
+        })
+        sendJson(res, result.status, result.payload)
+        return true
+      }
+      if (req.method === 'POST' && pathname === '/api/account/topics/generate') {
+        const payload = safeJson(await readBody(req)) || {}
+        const courseName = String(payload.courseName || '').trim()
+        if (!courseName) { sendJson(res, 400, { ok: false, error: 'course_required' }); return true }
+        const result = await controlCall(session, {
+          method: 'POST',
+          target: '/v1/jobs/topics',
+          body: { courseName }
+        })
+        sendJson(res, result.status, result.payload)
+        return true
+      }
+      if (req.method === 'POST' && pathname === '/api/account/topics/rebuild') {
+        const payload = safeJson(await readBody(req)) || {}
+        const courseName = String(payload.courseName || '').trim()
+        const topicId = String(payload.topicId || '').trim()
+        if (!courseName) { sendJson(res, 400, { ok: false, error: 'course_required' }); return true }
+        const result = await controlCall(session, {
+          method: 'POST',
+          target: '/v1/jobs/topics',
+          body: { courseName, topicId, rebuild: true }
+        })
+        sendJson(res, result.status, result.payload)
+        return true
+      }
+      if (req.method === 'DELETE' && pathname === '/api/account/topic') {
+        const id = String(url.searchParams.get('id') || '').trim()
+        if (!id) { sendJson(res, 400, { ok: false, error: 'topic_id_required' }); return true }
+        const result = await controlCall(session, {
+          method: 'DELETE',
+          target: '/v1/private/topic?id=' + encodeURIComponent(id)
+        })
+        sendJson(res, result.status, result.payload)
+        return true
+      }
+      if (req.method === 'POST' && pathname === '/api/account/import-owner-library') {
+        if (session.role !== 'owner') {
+          sendJson(res, 403, { ok: false, error: 'owner_required' })
+          return true
+        }
+        const libraryFile = path.join(root, 'library.json')
+        const records = readJsonSafe(libraryFile, [])
+        if (!Array.isArray(records)) throw new Error('当前发布库不可读')
+        let notes = 0
+        for (const record of records) {
+          const payload = {
+            replayKey: String(record.replayKey || record.slug || ''),
+            courseName: String(record.courseName || ''),
+            lessonTitle: String(record.lessonTitle || ''),
+            lessonDate: String(record.lessonDate || ''),
+            slug: String(record.slug || ''),
+            checksum: String(record.checksum || ''),
+            markdown: String(record.markdown || ''),
+            silent: true,
+            index: Object.fromEntries(Object.entries(record).filter(([key]) => key !== 'markdown'))
+          }
+          if (!payload.replayKey || !payload.markdown) continue
+          const result = await controlCall(session, { method: 'PUT', target: '/v1/private/note', body: payload })
+          if (!result.ok) throw Object.assign(new Error(result.payload?.error || '导入笔记失败'), { status: result.status })
+          notes += 1
+        }
+        let topics = 0
+        const topicDir = path.join(scratchRoot, 'topics')
+        if (fs.existsSync(topicDir)) {
+          for (const entry of fs.readdirSync(topicDir, { withFileTypes: true })) {
+            if (!entry.isFile() || !entry.name.endsWith('.json')) continue
+            const artifact = readJsonSafe(path.join(topicDir, entry.name), null)
+            if (!artifact || artifact.kind !== 'course-topic' || !artifact.id) continue
+            const result = await controlCall(session, {
+              method: 'PUT',
+              target: '/v1/private/topic',
+              body: {
+                topicId: artifact.id,
+                courseName: artifact.course,
+                title: artifact.title,
+                summary: artifact.summary || '',
+                artifact,
+                markdown: renderTopicMarkdown(artifact, { notes: records })
+              }
+            })
+            if (!result.ok) throw Object.assign(new Error(result.payload?.error || '导入专题失败'), { status: result.status })
+            topics += 1
+          }
+        }
+        sendJson(res, 200, { ok: true, imported: { notes, topics } })
+        return true
+      }
+      sendJson(res, 404, { ok: false, error: 'unknown_account_route', path: pathname })
+      return true
+    } catch (error) {
+      sendJson(res, Number(error?.status) || 502, {
+        ok: false,
+        error: 'account_control_failed',
+        message: error instanceof Error ? error.message : String(error)
+      })
+      return true
+    }
+  }
+
   return {
     /** @returns {boolean} 是否已处理该请求 */
     async handle(req, res, pathname, url, { adminToken } = {}) {
@@ -1818,7 +2243,7 @@ export function createAdminHandler({
           iat: nowSeconds,
           exp: nowSeconds + COURSE_SESSION_TTL_SECONDS
         }
-        const destination = ticket.role === 'owner' ? next : '/'
+        const destination = next
         res.writeHead(302, {
           location: destination,
           'set-cookie': sessionCookie(session, ssoKey),
@@ -1837,7 +2262,7 @@ export function createAdminHandler({
 
       if (pathname === '/_auth/start') {
         const next = safeCoursePath(url.searchParams.get('next'), '/')
-        const destination = session && session.role === 'owner' ? next : session ? '/' : ssoLocation(next)
+        const destination = session ? next : ssoLocation(next)
         res.writeHead(302, { location: destination, 'cache-control': 'no-store' })
         res.end()
         return true
@@ -1846,9 +2271,14 @@ export function createAdminHandler({
       if (pathname === '/_auth/session') {
         sendJson(res, 200, {
           authenticated: Boolean(session),
-          role: session?.role || ''
+          role: session?.role || '',
+          email: session?.email || ''
         })
         return true
+      }
+
+      if (pathname.startsWith('/api/account/')) {
+        return handleAccountApi(req, res, pathname, url, session)
       }
 
       if (pathname === '/admin' || pathname === '/admin/') {
@@ -1863,12 +2293,7 @@ export function createAdminHandler({
           res.end()
           return true
         }
-        if (session.role !== 'owner') {
-          res.writeHead(302, { location: '/', 'cache-control': 'no-store' })
-          res.end()
-          return true
-        }
-        const body = Buffer.from(ADMIN_HTML)
+        const body = Buffer.from(session.role === 'owner' ? ADMIN_HTML : MEMBER_ADMIN_HTML)
         res.writeHead(200, {
           'content-type': 'text/html; charset=utf-8',
           'cache-control': 'no-store',

@@ -2,7 +2,9 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { ResourceNotFoundError, ToolError } from './errors.mjs'
-import { createFixtureService } from './fixtures/fixture.mjs'
+import { normalizeRecord } from './records.mjs'
+import { createNotesService } from './service.mjs'
+import { createFixtureService, readLibrary } from './fixtures/fixture.mjs'
 import { COURSES_URI, courseUri, noteUri, termsUri } from './uris.mjs'
 
 const service = createFixtureService()
@@ -80,6 +82,49 @@ test('get_course：课次清单含 theme/keywords/摘要，不含正文', async 
   assert.equal(outline.total, outline.items.length)
   assert.equal(outline.truncated, false)
   assert.ok(outline.items[0].id, '目录项要带锚点 id，模型才能按 section 去取正文')
+})
+
+
+test('get_course 直接暴露当前专题，标准 fetch 可以继续读取专题 Markdown', async () => {
+  const records = readLibrary().map(normalizeRecord)
+  const topic = {
+    id: '国际法学::国家责任体系',
+    course: '国际法学',
+    title: '国家责任体系',
+    summary: '把归因、违反义务与法律后果放在一个框架里。',
+    lessons: [NOTE_ONE],
+    page: '/topics/国际法学/国家责任体系.html',
+    markdown: '/topics/国际法学/国家责任体系.md',
+    json: '/topics/国际法学/国家责任体系.json'
+  }
+  const topicMarkdown = '# 国际法学 · 国家责任体系\n\n- **归因**（[原文](/notes/国际法学/第一课-国家责任的构成.html#二-归因)）\n'
+  const topicService = createNotesService({
+    siteOrigin: 'https://course.law-tech.dev',
+    source: {
+      describe: () => ({ kind: 'fixture' }),
+      listNotes: async () => records,
+      listTopics: async () => [topic],
+      readMarkdown: async slug => records.find(record => record.slug === slug)?.markdown || '',
+      readTopicMarkdown: async id => {
+        assert.equal(id, topic.id)
+        return topicMarkdown
+      }
+    }
+  })
+
+  const courses = await topicService.listCourses()
+  assert.equal(courses.courses.find(item => item.courseName === '国际法学').topicCount, 1)
+
+  const course = await topicService.getCourse({ course: '国际法学' })
+  assert.equal(course.topicCount, 1)
+  assert.equal(course.topics[0].fetchId, 'topic:' + topic.id)
+  assert.equal(course.topics[0].markdownUrl, 'https://course.law-tech.dev' + topic.markdown)
+
+  const fetched = await topicService.fetchDocument({ id: course.topics[0].fetchId })
+  assert.equal(fetched.metadata.kind, 'topic')
+  assert.equal(fetched.metadata.course, '国际法学')
+  assert.equal(fetched.text, topicMarkdown)
+  assert.equal(fetched.url, 'https://course.law-tech.dev' + topic.page)
 })
 
 test('get_course：课程名部分匹配、歧义与找不到都给候选', async () => {

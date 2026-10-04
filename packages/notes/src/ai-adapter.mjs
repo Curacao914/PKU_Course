@@ -12,6 +12,8 @@ export const ROLE_MODEL_ENV = {
   grouping: 'COURSE_GROUPING_MODEL',
   brief: 'COURSE_BRIEF_MODEL',
   onepage: 'COURSE_ONEPAGE_MODEL',
+  topicPlan: 'COURSE_OUTLINE_MODEL',
+  topic: 'COURSE_ONEPAGE_MODEL',
   outline: 'COURSE_OUTLINE_MODEL',
   outlineRepair: 'COURSE_OUTLINE_MODEL',
   writer: 'COURSE_WRITER_MODEL',
@@ -76,6 +78,19 @@ detail：站内简报页的 Markdown，含本课主线、3—5 个核心问题�
 4. block 给出该要点在一页纸里的**开头 10—20 个字**（程序据此定位到具体块）。
 5. 一页纸里没有明确依据的要点（例如跨全课的概括、老师的整体判断）**不要硬指**某一节——直接不写这条。
 6. 只标注，不改写一页纸，也不要新增笔记里没有的内容。`,
+  topicPlan: `你是课程专题规划者 [topicPlan]。你只负责把一门课已经发布的若干课次按**知识体系**划成阶段性专题，不写专题正文。
+专题不是按日期机械分组，也不是把每一节课各立一个专题；它要回答“若干课次合起来形成了什么制度/问题结构”。优先识别教师连续讲授的制度板块、反复推进的问题线、相互比较或具有前后条件关系的知识组。
+硬约束：
+1. 只使用输入中列出的课次 slug，逐字照抄；不得编造课次。
+2. 所有课次至少属于一个专题；同一课次确实跨两个知识板块时可以重复出现。
+3. 一门课通常形成 1—8 个专题；宁可少而完整，不要切成一堆只有一个泛词的小块。
+4. title 要能直接成为复习目录标题，按知识内容命名，不用“第一阶段”“第 3—5 讲”。
+5. summary 只说明这个专题统摄的核心问题，不展开正文。只输出 RequiredOutputSchema 指定 JSON。`,
+  topic: `你是课程专题框架生成者 [topic]。你要把已经确定范围的若干课次重组为**复习用知识框架**，而不是重新写一篇长笔记。
+读者首先要一眼看出体系：分类、条件、例外、并列制度、判断顺序、相互对照分别是什么。节点应尽量短，必要解释放 note；默认最多三层。
+relation 只使用 hierarchy / parallel / condition / sequence / exception / contrast。
+每个承载具体知识结论的叶节点都必须给 sourceRefs，且 slug 与 sectionId 只能逐字照抄输入中的可用课次与小节清单；上级纯分组节点可以不挂来源。
+不得按课次顺序复述，也不得把原笔记压缩成另一篇长文。框架、提纲、自测会由程序从同一棵 nodes 树渲染，所以只生成一份结构数据。只输出 RequiredOutputSchema 指定 JSON。`,
   onepage: `你是课程一页纸摘要撰写者 [onepage]。把一节完整的课程笔记压进**一张 A4**，读者复习时只看这一页。
 硬约束（排版是内容的一部分，不是事后裁剪）：
 1. 总字数 ${1800} 字左右，**绝不能超过 ${2600} 字**（含表格单元格里的字）。超了宁可删要点。
@@ -136,6 +151,8 @@ function textBlock(label, value) {
 
 function overrideModelForRole(role, models = {}) {
   if (role === 'brief') return models.brief || models.writer || models.default
+  if (role === 'topicPlan') return models.outline || models.default
+  if (role === 'topic') return models.onepage || models.writer || models.default
   if (role === 'grouping' || role === 'outline' || role === 'outlineRepair') return models.outline || models.default
   if (role === 'writer' || role === 'splicer') return models.writer || models.default
   if (role === 'reviewer') return models.reviewer || models.default

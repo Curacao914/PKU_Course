@@ -25,6 +25,8 @@ EnvironmentFile=-%h/.course-worker/env
 Environment=COURSE_SITE_ROOT=%h/.course-worker/site
 Environment=COURSE_SITE_PORT=3101
 Environment=COURSE_SITE_HOST=127.0.0.1
+# 课程内容按账号私有；公开进程不再直接暴露笔记/Markdown/搜索，MCP 也要求个人 token。
+Environment=COURSE_CONTENT_VISIBILITY=private
 Environment=COURSE_ASSETS_DIR=%h/.course-worker/assets
 Environment=COURSE_MATERIALS_DIR=%h/.course-worker/materials
 Environment=COURSE_SITE_ROLE=admin

@@ -31,16 +31,19 @@ export const PREFERRED_PROTOCOL_VERSION = '2025-11-25'
 
 /** 客户端会把这段 instructions 放进系统提示——分层顺序写在这里最省事。 */
 export const INSTRUCTIONS = [
-  '这是北大法学课程笔记的检索服务，数据来自 course.law-tech.dev。请按层取用，不要一次拉全文：',
-  '1) list_courses —— 先看有哪些课（课次数、最新时间、theme、keywords）；',
-  '2) get_course(course) —— 锁定课程后看每一节的 theme/keywords/摘要，决定读哪一节；',
-  '3) search_notes(query, includeBody?) —— 跨课程/跨课次找某个概念、法条、案例时用，返回片段与定位；',
-  '4) get_note(slug, section?, maxChars?) —— 只在这一步读正文，优先带 section 只读相关小节；',
-  '5) list_terms(course) —— 复习型问题（这门课讲过哪些案例/法条）用它一次看全。',
-  '回答跨课次、跨课程的问题时，请在答案里标明具体课程与课次（返回里都带 slug 与 canonical URL）。',
-  '另外提供 OpenAI 标准知识接口 search(query) 与 fetch(id)：给不支持自定义工具的客户端用，' +
-    '检索逻辑与上面一致；能用课程专用工具时优先用它们（分层更清楚）。',
-  '支持 resources 的客户端也可以直接读 notes://courses、notes://course/<课程名>、notes://note/<slug>。'
+  '这是北大法学课程笔记的只读检索服务。单课笔记是事实源；一页纸、知识地图、索引和专题类内容用于压缩、导航与复习，发生冲突时回到单课笔记核实。',
+  '请按问题走最短路径，不要机械地每次从第一层开始，也不要一次拉整门课全文：',
+  '1) 不知道有哪些课或课程名不确定 → list_courses；用户已经点名课程时跳过。',
+  '2) 已知课程 → get_course(course)；它同时返回课次摘要和当前专题。若问题是阶段/专题复习，优先把 topics[].fetchId 交给 fetch 读专题 Markdown；若要核实具体论证，再回原笔记。只有需要课次目录时才 includeOutline。',
+  '3) 想一次看清某课有哪些概念/法条/案例 → list_terms(course)，比逐个关键词搜索更省。',
+  '4) 跨课次定位某概念、法条、案例或一句话 → search_notes(query)；默认自动先查索引，只有确需穷尽正文时才 includeBody=true。',
+  '5) 需要具体论证或原文依据 → get_note；优先传 section 只取命中小节，只有问题确实覆盖整节时才读取整篇或提高 maxChars。',
+  '6) 已知具体课次时可直接 get_note(course+lesson)，不必先 list_courses/get_course。',
+  '单节快速复习优先利用一页纸；中观/宏观复习优先利用 theme、摘要、list_terms、知识地图或专题类视图缩小范围，再回 get_note(section) 核实。',
+  '回答跨课次、跨课程问题时标明课程、课次以及能确定的小节；返回里有 slug/canonical URL 时保留可点击出处。',
+  'OpenAI 标准知识接口 search(query) / fetch(id) 与专用检索共用同一召回逻辑；fetch 也接受 get_course 返回的 topic:<id>。能用课程专用工具时优先使用上面的分层路径。',
+  '支持 resources 的客户端可直接读 notes://courses、notes://course/<课程名>、notes://terms/<课程名>、notes://note/<slug>。',
+  '当前内容按账号私有；不要访问公开 llms.txt 或静态 Markdown 作为旁路。需要课次、专题或出处时，继续使用本 MCP 返回的课程、topic、slug、section 与 fetchId。'
 ].join('\n')
 
 const NOTIFICATION = Symbol('notification')

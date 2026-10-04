@@ -187,6 +187,8 @@ test('requireCourseModelConfig maps every role to its模型环境变量', () => 
   const env = { ...ENV, COURSE_OUTLINE_MODEL: 'outline-m', COURSE_WRITER_MODEL: 'writer-m' }
   assert.equal(requireCourseModelConfig('outline', null, env).model, 'outline-m')
   assert.equal(requireCourseModelConfig('outlineRepair', null, env).model, 'outline-m', '修复复用大纲模型')
+  assert.equal(requireCourseModelConfig('topicPlan', null, env).model, 'outline-m', '专题划分复用大纲模型')
+  assert.equal(requireCourseModelConfig('topic', null, env).model, 'default-model', '专题框架未单配一页纸模型时回落通用模型')
   // grouping 未配置时回落到大纲模型
   assert.equal(requireCourseModelConfig('grouping', null, env).model, 'outline-m')
   // splicer 未配置时回落到最终审查或写作模型

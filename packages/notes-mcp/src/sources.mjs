@@ -54,6 +54,22 @@ export function createLocalLibrarySource({ file } = {}) {
   const target = path.resolve(String(file || ''))
   if (!String(file || '').trim()) throw new ToolError('没有配置本地发布库：把 COURSE_LIBRARY 指向 site/library.json')
   let cache = null
+  let topicsCache = null
+
+  function readTopics() {
+    const topicsFile = path.join(path.dirname(target), 'topics.json')
+    let stat
+    try { stat = fs.statSync(topicsFile) } catch { return [] }
+    if (topicsCache && topicsCache.mtimeMs === stat.mtimeMs && topicsCache.size === stat.size) return topicsCache.topics
+    try {
+      const payload = JSON.parse(fs.readFileSync(topicsFile, 'utf8'))
+      const topics = Array.isArray(payload?.topics) ? payload.topics : []
+      topicsCache = { mtimeMs: stat.mtimeMs, size: stat.size, topics }
+      return topics
+    } catch (error) {
+      throw new ToolError(`专题索引不是合法 JSON：${topicsFile}（${error instanceof Error ? error.message : String(error)}）`)
+    }
+  }
 
   function readLibrary() {
     let stat
@@ -83,6 +99,17 @@ export function createLocalLibrarySource({ file } = {}) {
     describe: () => ({ kind: 'local', label: '本地发布库', location: target, live: true }),
     revision: () => { readLibrary(); return cache?.revision || '' },
     listNotes: async () => readLibrary(),
+    listTopics: async () => readTopics(),
+    readTopicMarkdown: async id => {
+      const topic = readTopics().find(item => String(item.id || '') === String(id || ''))
+      if (!topic) throw new ToolError(`专题索引里找不到 id=${id}`)
+      const relative = String(topic.markdown || '').replace(/^\/+/, '')
+      if (!relative) throw new ToolError(`专题 ${id} 没有 Markdown 地址`)
+      const root = path.dirname(target)
+      const file = path.resolve(root, relative)
+      if (file !== root && !file.startsWith(root + path.sep)) throw new ToolError('专题 Markdown 路径越界')
+      try { return fs.readFileSync(file, 'utf8') } catch { throw new ToolError(`读不到专题 Markdown：${file}`) }
+    },
     readMarkdown: async slug => {
       const record = readLibrary().find(item => item.slug === slug)
       if (!record) throw new ToolError(`发布库里没有 slug=${slug} 的笔记（可能刚发布还没写进 library.json）。`)
@@ -110,7 +137,9 @@ export function createRemoteSiteSource({
   const base = normalizeOrigin(origin)
   const ttl = Math.max(0, Number(ttlMs) || 0)
   let indexCache = null
+  let topicsCache = null
   const markdownCache = new Map()
+  const topicMarkdownCache = new Map()
 
   async function fetchChecked(url, what, { signal } = {}) {
     let response
@@ -144,10 +173,49 @@ export function createRemoteSiteSource({
     return records
   }
 
+  async function loadTopics({ signal } = {}) {
+    if (topicsCache && now() - topicsCache.at < ttl) return topicsCache.topics
+    let response
+    try {
+      response = await fetchImpl(`${base}/topics.json`, {
+        headers: { accept: 'application/json' },
+        ...(signal ? { signal } : {})
+      })
+    } catch (error) {
+      throw new ToolError(`访问 ${base}/topics.json 失败：${error instanceof Error ? error.message : String(error)}`)
+    }
+    // 旧站点还没有专题索引时保持向后兼容：专题是加法，不能拖死原有 MCP。
+    if (response.status === 404) {
+      topicsCache = { at: now(), topics: [] }
+      return []
+    }
+    if (!response.ok) throw new ToolError(`请求 ${base}/topics.json 返回 ${response.status} ${response.statusText || ''}`.trim())
+    let payload
+    try { payload = await response.json() } catch { throw new ToolError(`专题索引不是合法 JSON：${base}/topics.json`) }
+    const topics = Array.isArray(payload?.topics) ? payload.topics : []
+    topicsCache = { at: now(), topics }
+    return topics
+  }
+
   return {
     kind: 'remote',
     describe: () => ({ kind: 'remote', label: '远程站点', location: base, live: true, ttlSeconds: Math.round(ttl / 1000) }),
     listNotes: (options = {}) => loadIndex(options),
+    listTopics: (options = {}) => loadTopics(options),
+    readTopicMarkdown: async (id, { signal } = {}) => {
+      const key = String(id || '')
+      const cached = topicMarkdownCache.get(key)
+      if (cached && now() - cached.at < ttl) return cached.text
+      const topic = (await loadTopics({ signal })).find(item => String(item.id || '') === key)
+      if (!topic) throw new ToolError(`专题索引里找不到 id=${id}`)
+      const relative = String(topic.markdown || '')
+      if (!relative) throw new ToolError(`专题 ${id} 没有 Markdown 地址`)
+      const url = relative.startsWith('http') ? relative : `${base}${relative.startsWith('/') ? '' : '/'}${relative}`
+      const response = await fetchChecked(url, 'markdown', { signal })
+      const text = await response.text()
+      topicMarkdownCache.set(key, { at: now(), text })
+      return text
+    },
     readMarkdown: async (slug, { signal } = {}) => {
       const key = String(slug)
       const cached = markdownCache.get(key)

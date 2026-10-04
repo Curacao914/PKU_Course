@@ -177,6 +177,43 @@ async function execute(job, env, store, r2, jobTokens) {
     }
   }
 
+  if (job.kind === 'topics') {
+    const courseName = String(job.payload?.courseName || '').trim()
+    if (!courseName) return { ok: false, results: [{ step: 'topics', code: 2, stderr: '缺课程名' }] }
+
+    // DB 是 MEMBER 私有内容的事实源。专题运行前把当前账号的课程 note 重建成 worker
+    // 所需的 library 形状；账户目录丢失/换机后也能从 DB 恢复，不依赖某次发布留下的缓存文件。
+    const privateRows = await store.privateNotes(job.ownerId)
+    const privateRecords = privateRows
+      .filter(row => row.note_type === 'course')
+      .map(row => ({
+        ...(row.metadata?.index || {}),
+        slug: String(row.metadata?.slug || row.metadata?.index?.slug || ''),
+        courseName: String(row.metadata?.courseName || row.metadata?.index?.courseName || ''),
+        lessonTitle: String(row.metadata?.lessonTitle || row.metadata?.index?.lessonTitle || row.title || ''),
+        lessonDate: String(row.metadata?.lessonDate || row.metadata?.index?.lessonDate || ''),
+        replayKey: String(row.metadata?.replayKey || row.metadata?.index?.replayKey || ''),
+        checksum: String(row.metadata?.checksum || row.metadata?.index?.checksum || ''),
+        markdown: String(row.body_markdown || '')
+      }))
+      .filter(record => record.slug && record.courseName && record.markdown)
+    const privateLibraryFile = path.join(prepared.root, 'private-library.json')
+    fs.writeFileSync(privateLibraryFile, JSON.stringify(privateRecords, null, 2), { mode: 0o600 })
+    try { fs.chmodSync(privateLibraryFile, 0o600) } catch {}
+
+    const args = ['topics']
+    if (job.payload?.rebuild || job.payload?.topicId) {
+      args.push('--configured')
+      if (job.payload?.topicId) args.push('--id', String(job.payload.topicId))
+      else args.push('--course', courseName)
+    } else {
+      args.push('--course', courseName)
+    }
+    const result = await runCourse(args, prepared.childEnv)
+    results.push({ step: 'topics', code: result.code, output: parseLastJson(result.stdout), stderr: result.stderr.slice(-4000) })
+    return { ok: result.code === 0, results }
+  }
+
   if (job.kind === 'sync') {
     const missing = []
     if (!prepared.credentials.dashscope) missing.push('阿里云语音识别 Key')
