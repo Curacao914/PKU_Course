@@ -2461,6 +2461,7 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
     const notePath = path.join(from, `${safeFileName(lessonTitle)}.md`)
     if (!fs.existsSync(notePath)) throw new Error(`找不到私有笔记：${notePath}`)
     const markdown = fs.readFileSync(notePath, 'utf8')
+    const privateChecksum = markdownBytesChecksum(markdown)
     const nowIso = clockNow().toISOString()
     const privateRecord = buildNoteRecord({
       courseName,
@@ -2490,9 +2491,12 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
         lessonTitle,
         markdown,
         slug: privateRecord.slug,
-        checksum: privateRecord.checksum,
+        checksum: privateChecksum,
         lessonDate: privateRecord.lessonDate || '',
-        index: Object.fromEntries(Object.entries(privateRecord).filter(([key]) => key !== 'markdown'))
+        index: {
+          ...Object.fromEntries(Object.entries(privateRecord).filter(([key]) => key !== 'markdown')),
+          checksum: privateChecksum
+        }
       })
     })
     const result = await response.json().catch(() => ({}))
@@ -2513,7 +2517,7 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
         const legacySameReplay = !privateRecord.slug && !item.slug && String(item.replayKey || '') === replayKey
         return !sameSlug && !legacySameReplay
       }),
-      privateRecord
+      { ...privateRecord, checksum: privateChecksum }
     ]
     writeJsonAtomic(privateLibraryFile, next)
 
@@ -2964,10 +2968,13 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
         lessonTitle,
         lessonDate: record.lessonDate || '',
         slug: record.slug,
-        checksum: record.checksum,
+        checksum: contentChecksum,
         markdown: record.markdown,
         silent: true,
-        index: Object.fromEntries(Object.entries(record).filter(([key]) => key !== 'markdown'))
+        index: {
+          ...Object.fromEntries(Object.entries(record).filter(([key]) => key !== 'markdown')),
+          checksum: contentChecksum
+        }
       })
     }
 

@@ -41,9 +41,20 @@ export function renderCourse(data) {
   const lines = [line(
     data.courseName,
     `${data.lessonCount} 课次`,
+    data.topicCount ? `${data.topicCount} 专题` : '',
     data.teacher ? `教师 ${data.teacher}` : '',
     data.order === 'desc' ? '倒序' : '正序'
   )]
+  if (data.topics?.length) {
+    lines.push('', `专题（${data.topics.length}）`)
+    for (const topic of data.topics) {
+      lines.push(`- ${topic.title}`)
+      lines.push(`  fetchId: ${topic.fetchId}`)
+      if (topic.lessons?.length) lines.push(`  覆盖课次：${topic.lessons.length} 节`)
+      if (topic.summary) lines.push(`  摘要：${topic.summary}`)
+    }
+    lines.push('  用 fetch(topic:<id>) 读取专题 Markdown；需要核实具体依据时再回原笔记。', '')
+  }
   for (const lesson of data.lessons) {
     lines.push(`- ${lesson.lessonTitle}`)
     lines.push(`  slug: ${line(lesson.slug, lessonDateOf(lesson), lesson.readMinutes ? `${lesson.readMinutes} 分钟` : '')}`)
