@@ -224,11 +224,85 @@ alter table public.provider_credentials add constraint provider_credentials_prov
    - `/_control/` 仍指 3102；
    - 旧 30 天令牌 401（不再兼容），重新生成长期令牌后 MCP 200；
    - 换发 → 旧 401；删除 → 当前 401；A 的令牌读不到 B。
-4. 全部通过后再更新 `docs/` 的部署记录（本文档续写 §7）。
+4. 全部通过后再更新 `docs/` 的部署记录（见 §8）。
 
-## 7 未完成 / 待用户决定
+## 7 当初的未完成项（已在 §8 全部执行完毕）
 
 - Cloudflare Bypass Cache 规则（§4）——**阻塞发布**。
 - DB 迁移（§5）——**阻塞长期令牌**。
 - MEMBER Phase 4（两账号隔离、扫码→选课→同步、MEMBER 侧 MCP 验收）仍缺一个真实 MEMBER 账号。
 - `tools/ui-click-audit.mjs` 的修复（§2 录而不改）——建议单独一轮。
+## 8 正式部署与验收（2026-10-04 18:07）
+
+两个前置由用户完成后，按 §6 顺序执行。
+
+### 8.1 前置复核（先验，再发）
+
+- **Cloudflare**：`GET /?cb=probe1` → `cf-cache-status: BYPASS`，说明规则按路径维度生效；仍在 HIT 的 `/`（age 7698）
+  是规则生效**之前**缓存下来的残留对象 —— 已 purge `/` 与 `/index.html`，复查两次都是 `BYPASS` + 源站的 `no-store`。
+- **Supabase**：插一行 `provider='mcp'` 现在回 **201**（§2 记录过修复前是 400 / 23514），探针行已删除，
+  事后确认 OWNER 名下只剩 deepseek / dashscope / ocr 三行。
+
+### 8.2 发布
+
+- `deploy/push-release.sh`：release **`20261004-180702`**，digest `456312cab6108ca4`，依赖仓命中 `5913813e0a384182`。
+  切换前在 release 内跑测试：`pass 735 / fail 0`（比 `npm test` 少 3 条，原因见 §9）。
+- nginx 与 release **同批**：先备份 `course.bak-20261004-180939`，`diff -u` 确认只差 `location /` 的
+  `proxy_pass 3100 → 3101`（外加两行注释），`nginx -t` 通过后 reload。
+- 三个单元 `active`；`course-cycle.timer` 保持 `inactive/disabled`。
+
+### 8.3 验收：HTTP 级 34 项全通过
+
+样本：OWNER 名下 **14 篇私有笔记 / 6 个专题**。
+
+| 项目 | 结果 |
+|---|---|
+| 匿名 `/`、`/notes/*` | 302 → SSO，并带 `next` |
+| 匿名 `/api/search` | 401 `account_session_required` |
+| 私有旁路 `/llms.txt`、`/feed.xml`、`/md/*` | 302 回 `/`（不作为旁路） |
+| 登录后 `/` | 200，是阅读站（含课程、课次、`/admin` 入口，不含管理壳） |
+| 笔记页 / 一页纸 / 专题三视图 / 单课程入口 / 地图 / 概念 / 法条 / 案例 / 搜索页 | 全部 200 |
+| 登录后 `/api/search` | 200，5 条命中且链接都是 `/notes/…`，`cache-control: private, no-store` |
+| 3100 直连旧静态路径 | 仍被 privacy gate 拦住（302） |
+| `/assets/*` | 从 3101 供出 200；公网可缓存（规则只放行这一处） |
+| `/_control/` | 未签名 401（仍指向 3102） |
+| 旧 30 天 HMAC 令牌 | **401**（不再兼容） |
+| 长期令牌 | 生成 200（`cmcp1.` 前缀，无 `expiresInSeconds`）→ tools/list 200 → get_course 200（1,847 字，含 `fetchId`） |
+| 专题页址 | `https://course.law-tech.dev/topics/犯罪学/…html`（不再是 `/admin`） |
+| 换发 | 旧令牌 401 / 新令牌 200 |
+| 伪造（别人的 owner 前缀 + 本账号密钥） | 401 |
+| 删除 | 当前令牌立刻 401 |
+| 公网 `/` 与 `/notes/*` 各请求两次 | `cf-cache-status: BYPASS/BYPASS`（不再 HIT） |
+| `/healthz` | `{ok: true, visibility: "private"}` |
+
+### 8.4 验收：生产真浏览器 7 项全通过
+
+在服务器上跑 Chromium（headless）走**公网 URL**，即真实用户路径：
+
+```
+✔ 首页 = 阅读站（课程筛选 + 14 条课次 + 6 个专题入口）
+✔ 点课次进笔记页（左栏课次 3 条、本页目录 110 条）
+✔ 上一讲/下一讲点得通（修好的根绝对链接：犯罪学 09-23 → 09-16）
+✔ 站内搜索出结果（10 条）
+✔ OWNER /admin 仍是完整管理台
+✔ 公网页面无 JS 报错、无 4xx/5xx 资源
+```
+
+### 8.5 部署后的当前状态
+
+- **OWNER 名下现在没有 MCP 令牌**：验收时生成过一枚，走完换发/删除两条路径后已删除（净状态 = 未配置，
+  与数据库一致）。需要用户在「账户设置 → MCP」重新生成一次，把新令牌填进 MCP 客户端；
+  旧的 30 天令牌已彻底失效，客户端若不更新会一直 401。
+- 回滚：`ssh ubuntu@124.222.111.108 'bash ~/course-staging/deploy/release.sh --rollback'`；
+  nginx 回滚用 `/etc/nginx/sites-available/course.bak-20261004-180939`。
+
+## 9 本轮发现但没改（留给下一轮）
+
+1. **`deploy/release.sh` 的测试 glob 漏了一个目录**：它跑的是
+   `packages/*/src/*.test.mjs apps/*/src/*.test.mjs tools/*.test.mjs`，比 `npm test` 少了
+   `apps/control/src/server/*.test.mjs`（3 条：控制面 HMAC 签名校验、job token 绑定/撤销、未签名请求 401）。
+   发布门禁因此少跑了控制面最要紧的 3 条断言（数字上就是 735 对 738）。改一行即可。
+2. `tools/ui-click-audit.mjs` 仍跑不起来（§2 录而不改）。
+3. MEMBER 的一页纸空壳（§2 录而不改）。
+4. MEMBER Phase 4 仍缺一个真实 MEMBER 账号（两账号隔离、扫码→选课→同步、MEMBER 侧 MCP 验收）。
+
