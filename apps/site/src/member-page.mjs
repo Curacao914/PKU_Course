@@ -152,14 +152,14 @@ ${ADMIN_CSS}
       '<div class="row" style="margin-top:10px"><button class="act primary" data-act="save-course-selection">保存课程选择</button></div>'
   }
   function renderAccount(){
-    var a=(state.data&&state.data.account)||{}, p=a.profile||{}, pku=a.pku||{}
+    var a=(state.data&&state.data.account)||{}, p=a.profile||{}, pku=a.pku||{}, creds=a.credentials||{}, mcp=creds.mcp||{}
     $('account').innerHTML='<div class="account-card"><h3>账号</h3><div class="field"><label>登录邮箱</label><input value="'+esc(p.email||'')+'" readonly></div><div class="field"><label>通知邮箱</label><div class="row"><input id="notifyEmail" value="'+esc(p.notificationEmail||p.email||'')+'" placeholder="留空则使用登录邮箱"><button class="act primary" data-act="save-notify-email">保存</button></div></div></div>'+
       '<div class="account-card"><h3>模型与识别 API</h3>'+credRow('deepseek','DeepSeek')+credRow('dashscope','阿里云')+credRow('ocr','OCR')+'</div>'+
       '<div class="account-card"><h3>教学网</h3><p class="small">状态：'+esc(pku.status||'disconnected')+(pku.lastSyncAt?' · 最近同步 '+esc(String(pku.lastSyncAt).slice(0,16).replace('T',' ')):'')+'</p>'+
       '<div class="secret-row"><strong>长期登录</strong><input id="pkuUser" autocomplete="username" placeholder="教学网账号"><input id="pkuPass" type="password" autocomplete="current-password" placeholder="密码"><button class="act primary" data-act="save-pku-password">保存</button></div>'+
       '<div class="row"><button class="act" data-act="start-pku-qr">扫码登录</button>'+(pku.hasPassword?'<button class="act danger" data-act="delete-pku-password">删除长期登录</button>':'')+'<button class="act" data-act="discover">扫描课程</button><button class="act" data-act="sync">立即同步</button></div><div id="pkuQrBox" class="qr-box"></div>'+
       coursePickHtml(pku)+'</div>'+
-      '<div class="account-card"><h3>MCP</h3><p class="small muted">令牌只读取当前账号课程内容，30 天后自动失效。</p><div class="row"><button class="act primary" data-act="mcp-token">生成访问令牌</button></div><div id="mcpTokenBox"></div></div>'
+      '<div class="account-card"><h3>MCP</h3><p class="small muted">令牌长期有效，直到你主动删除或重新生成；重新生成后旧令牌立即失效。</p><div class="row"><button class="act primary" data-act="mcp-token">'+(mcp.configured?'重新生成令牌':'生成访问令牌')+'</button>'+(mcp.configured?'<button class="act danger" data-act="delete-mcp-token">删除令牌</button>':'')+'</div><div id="mcpTokenBox"></div></div>'
   }
   function render(){renderOverview();renderCourses();renderTopics();renderAccount()}
   async function load(){
@@ -209,7 +209,8 @@ ${ADMIN_CSS}
     if(act==='delete-pku-password'){if(!confirm('删除长期登录凭据？'))return;try{await json('/api/account/pku/password',{method:'DELETE'});toast('已删除长期登录');load()}catch(e){toast(e.message,true)};return}
     if(act==='save-course-selection'){var keys=Array.from(document.querySelectorAll('[data-course-key]:checked')).map(function(x){return x.dataset.courseKey});try{await json('/api/account/pku/selection',{method:'PUT',body:JSON.stringify({selectedCourseKeys:keys,autoSyncEnabled:Boolean($('autoSync')&&$('autoSync').checked)})});toast('课程选择已保存');load()}catch(e){toast(e.message,true)};return}
     if(act==='start-pku-qr'){try{var q=await json('/api/account/pku/qr/start',{method:'POST',body:'{}'});var qbox=$('pkuQrBox');if(qbox)qbox.innerHTML='<p class="small muted">请使用北京大学 App 扫码</p>'+(q.image?'<img src="'+esc(q.image)+'" alt="北京大学教学网登录二维码">':'');pollQr(q.id)}catch(e){toast(e.message,true)};return}
-    if(act==='mcp-token'){try{var token=await json('/api/account/mcp-token',{method:'POST',body:'{}'});var box=$('mcpTokenBox');box.innerHTML='<div class="field" style="margin-top:10px"><label>MCP 地址</label><input value="'+esc(location.origin+'/mcp')+'" readonly></div><div class="field"><label>Bearer Token</label><textarea rows="4" readonly>'+esc(token.token||'')+'</textarea></div><p class="tiny muted">这个令牌等同于当前账号的课程只读权限，请不要转发。</p>';toast('已生成 30 天访问令牌')}catch(e){toast(e.message,true)};return}
+    if(act==='mcp-token'){try{var token=await json('/api/account/mcp-token',{method:'POST',body:'{}'});var box=$('mcpTokenBox');box.innerHTML='<div class="field" style="margin-top:10px"><label>MCP 地址</label><input value="'+esc(location.origin+'/mcp')+'" readonly></div><div class="field"><label>Bearer Token</label><textarea rows="4" readonly>'+esc(token.token||'')+'</textarea></div><p class="tiny muted">长期有效，直到删除或重新生成；这个值只显示这一次，请自行保存。</p>';toast('已生成长期访问令牌')}catch(e){toast(e.message,true)};return}
+    if(act==='delete-mcp-token'){if(!confirm('删除 MCP 访问令牌？删除后现有令牌会立即失效。'))return;try{await json('/api/account/mcp-token',{method:'DELETE'});toast('MCP 令牌已删除');load()}catch(e){toast(e.message,true)};return}
     if(act==='generate-topics')return post('/api/account/topics/generate',{courseName:b.dataset.course},'专题生成已进入队列')
     if(act==='rebuild-topic')return post('/api/account/topics/rebuild',{courseName:b.dataset.course,topicId:b.dataset.topicId},'专题更新已进入队列')
     if(act==='delete-topic'){if(!confirm('删除这个专题？'))return;try{await json('/api/account/topic?id='+encodeURIComponent(b.dataset.id),{method:'DELETE'});toast('专题已删除');load()}catch(e){toast(e.message,true)};return}

@@ -1,7 +1,15 @@
 import { createClient } from '@supabase/supabase-js'
 import { decryptFields, decryptSecret, encryptFields, encryptSecret } from './crypto.mjs'
 
-const PROVIDERS = new Set(['ocr', 'deepseek', 'dashscope'])
+/**
+ * provider_credentials.provider 的允许集合。
+ *
+ * 这个集合与数据库的 CHECK 约束必须**一起**扩：只改一边的后果是写入被 DB 拒绝（或反过来
+ * 代码先拒绝），而错误在运行时才出现。deploy/migrations 里那条迁移就是把 CHECK 扩成同一份
+ * 清单；mcp-token.test.mjs 会把两边摆在一起比，谁漏了就红。
+ */
+export const CREDENTIAL_PROVIDERS = ['ocr', 'deepseek', 'dashscope', 'mcp']
+const PROVIDERS = new Set(CREDENTIAL_PROVIDERS)
 
 export function createAccountStore(env = process.env) {
   const url = env.SUPABASE_URL

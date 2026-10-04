@@ -166,7 +166,11 @@ export function createControlServer({ env = process.env, store = createAccountSt
           credentials: {
             ocr: credentials.ocr || { configured: false },
             deepseek: credentials.deepseek || { configured: false },
-            dashscope: credentials.dashscope || { configured: false }
+            dashscope: credentials.dashscope || { configured: false },
+            // MCP 长期令牌也走 provider_credentials（provider='mcp'）。以前这里只回三个 key，
+            // 界面于是永远认为"没配过"：按钮一直写"生成访问令牌"（实际是换发、会让旧令牌立刻失效），
+            // 而"删除令牌"按钮因为 configured 恒为 false 根本不出现——删都删不掉。
+            mcp: credentials.mcp || { configured: false }
           },
           pku: publicPku(pku),
           limits
@@ -224,14 +228,42 @@ export function createControlServer({ env = process.env, store = createAccountSt
         return
       }
 
+      if (req.method === 'PUT' && url.pathname === '/v1/account/mcp-token') {
+        const body = await readJson(req)
+        const secret = String(body.secret || '')
+        if (secret.length < 32 || secret.includes('.')) {
+          send(res, 400, { ok: false, error: 'MCP_SECRET_INVALID' })
+          return
+        }
+        send(res, 200, { ok: true, credential: await store.putCredential(ownerId, 'mcp', secret) })
+        return
+      }
+
+      if (req.method === 'DELETE' && url.pathname === '/v1/account/mcp-token') {
+        await store.deleteCredential(ownerId, 'mcp')
+        send(res, 200, { ok: true })
+        return
+      }
+
+      if (req.method === 'GET' && url.pathname === '/v1/account/mcp-secret') {
+        await store.profile(ownerId)
+        const credentials = await store.credentials(ownerId)
+        send(res, 200, { ok: true, configured: Boolean(credentials.mcp), secret: credentials.mcp || '' })
+        return
+      }
+
       if (req.method === 'PUT' && url.pathname === '/v1/account/credential') {
         const body = await readJson(req)
-        send(res, 200, { ok: true, credential: await store.putCredential(ownerId, String(body.provider || ''), body.secret) })
+        const provider = String(body.provider || '')
+        if (provider === 'mcp') { send(res, 400, { ok: false, error: 'USE_MCP_TOKEN_ENDPOINT' }); return }
+        send(res, 200, { ok: true, credential: await store.putCredential(ownerId, provider, body.secret) })
         return
       }
 
       if (req.method === 'DELETE' && url.pathname === '/v1/account/credential') {
-        await store.deleteCredential(ownerId, String(url.searchParams.get('provider') || ''))
+        const provider = String(url.searchParams.get('provider') || '')
+        if (provider === 'mcp') { send(res, 400, { ok: false, error: 'USE_MCP_TOKEN_ENDPOINT' }); return }
+        await store.deleteCredential(ownerId, provider)
         send(res, 200, { ok: true })
         return
       }

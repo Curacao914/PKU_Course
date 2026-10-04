@@ -1023,6 +1023,7 @@ function accountPane () {
   if (!data.ok) return '<h2>账户</h2><p class="small muted">账户服务暂不可用</p>'
   var profile = data.profile || {}
   var credentials = data.credentials || {}
+  var mcp = credentials.mcp || {}
   function credentialRow (provider, label) {
     var item = credentials[provider] || {}
     return '<div class="field"><label>' + esc(label) + '</label><div class="row">' +
@@ -1038,7 +1039,7 @@ function accountPane () {
     credentialRow('deepseek', 'DeepSeek API') +
     credentialRow('dashscope', '阿里云 API') +
     credentialRow('ocr', 'OCR API') +
-    '<div class="field"><label>MCP</label><div class="row"><button class="act" data-act="create-mcp-token">生成 30 天访问令牌</button></div><div id="ownerMcpToken"></div></div>' +
+    '<div class="field"><label>MCP</label><p class="small muted">令牌长期有效，直到主动删除或重新生成。</p><div class="row"><button class="act" data-act="create-mcp-token">' + (mcp.configured ? '重新生成访问令牌' : '生成访问令牌') + '</button>' + (mcp.configured ? '<button class="act danger" data-act="delete-mcp-token">删除令牌</button>' : '') + '</div><div id="ownerMcpToken"></div></div>' +
     '<div class="row pane-actions"><button class="act" data-act="import-owner-library">同步现有笔记到个人空间</button></div>'
 }
 
@@ -1101,9 +1102,23 @@ async function createMcpToken (btn) {
     if (box) box.innerHTML =
       '<div class="field" style="margin-top:10px"><label>MCP 地址</label><input value="' + esc(location.origin + '/mcp') + '" readonly></div>' +
       '<div class="field"><label>Bearer Token</label><textarea rows="4" readonly>' + esc(data.token || '') + '</textarea></div>' +
-      '<p class="tiny muted">令牌只读取当前账号课程内容，30 天后失效；请勿转发。</p>'
-    toast('MCP 访问令牌已生成', 'ok')
+      '<p class="tiny muted">长期有效，直到删除或重新生成；这个值只显示这一次，请自行保存。</p>'
+    state.account = null
+    toast('MCP 长期访问令牌已生成', 'ok')
   } catch (error) { toast('生成失败：' + error.message, 'error') } finally { restore() }
+}
+
+async function deleteMcpToken (btn) {
+  if (!window.confirm('删除 MCP 访问令牌？删除后现有令牌会立即失效。')) return
+  var restore = busyButton(btn, '删除中…')
+  try {
+    var res = await fetch('/api/account/mcp-token', { method: 'DELETE', headers: headers(false) })
+    var data = await res.json().catch(function () { return {} })
+    if (!res.ok || !data.ok) throw new Error(data.message || data.error || '删除失败')
+    state.account = null
+    await load()
+    toast('MCP 访问令牌已删除', 'ok')
+  } catch (error) { toast('删除失败：' + error.message, 'error') } finally { restore() }
 }
 
 async function importOwnerLibrary (btn) {
@@ -1727,6 +1742,7 @@ function handleAct (act, btn) {
   if (act === 'save-account-secret') return saveAccountSecret(btn.dataset.provider || '', btn)
   if (act === 'delete-account-secret') return deleteAccountSecret(btn.dataset.provider || '', btn)
   if (act === 'create-mcp-token') return createMcpToken(btn)
+  if (act === 'delete-mcp-token') return deleteMcpToken(btn)
   if (act === 'import-owner-library') return importOwnerLibrary(btn)
   toast('这个按钮还没有接上处理逻辑：' + act, 'error')
 }

@@ -2,10 +2,11 @@ import fs from 'node:fs'
 import http from 'node:http'
 import path from 'node:path'
 
-import { readSiteIndex } from '@course/publish'
+import { readSiteIndex, topicSlug } from '@course/publish'
 
 import { signRequest as signControlRequest } from '../../control/src/server/auth.mjs'
-import { createAdminHandler, verifyMcpAccessToken } from './admin.mjs'
+import { createAdminHandler, parseMcpAccessToken, verifyMcpAccessToken } from './admin.mjs'
+import { runBudgetedSearch, searchPayload } from './search-endpoint.mjs'
 
 /**
  * course.law-tech.dev 的站点服务器。
@@ -179,7 +180,15 @@ export function createRequestHandler({
       runCommand,
       ssoKey,
       controlUrl,
-      controlFetch
+      controlFetch,
+      // 私有阅读站（/、/notes/*、/topics/*…）只在私有内容模式下由管理进程渲染；
+      // 公开模式必须原样交回站点处理器，否则整站被要求登录。
+      privateContent,
+      // 私有检索与 /mcp 共用同一本预算：这里注入进程侧那一个实例，不在管理进程里另起一本账。
+      searchBudget: async () => {
+        const budget = await ensureBudget()
+        return { budget, bindRequestLifecycle, failed: budgetFailed }
+      }
     })
     : null
 
@@ -357,7 +366,9 @@ export function createRequestHandler({
           title: topic.title,
           summary: topic.summary || '',
           lessons: topic.lessons || [],
-          page: '/admin',
+          // 专题页在阅读站上（/topics/<课程>/<专题>.html），不是管理页：
+          // MCP 回给模型/读者的链接必须落在能读三视图的那一页。
+          page: '/' + topicSlug({ course: topic.courseName, id: topic.topicId, title: topic.title }) + '.html',
           markdown: '',
           json: ''
         }))
@@ -439,8 +450,8 @@ export function createRequestHandler({
     }
     const pathname = url.pathname
 
-    // Remote MCP：私有内容模式下必须先用账户签发的 Bearer token 绑定 owner。
-    // token 只携带 owner id/角色并由服务端 HMAC 签名；真正的数据读取仍由 control 按 owner_id 过滤。
+    // Remote MCP：私有内容模式下先解析持久 Bearer token 里的 owner id，
+    // 再向 control 读取该 owner 当前保存的加密密钥做常量时间比较。删除/重签后旧 token 立即失效。
     if (mcp && (pathname === mcpPath || pathname === `${mcpPath}/`)) {
       if (privateContent) {
         if (String(req.method || '').toUpperCase() === 'OPTIONS') {
@@ -454,7 +465,16 @@ export function createRequestHandler({
           return
         }
         const bearer = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '')
-        const identity = verifyMcpAccessToken(bearer, ssoKey)
+        const parsed = parseMcpAccessToken(bearer)
+        let identity = null
+        if (parsed) {
+          try {
+            const stored = await controlGetFor(parsed.sub, '/v1/account/mcp-secret')
+            identity = stored?.configured ? verifyMcpAccessToken(bearer, stored.secret) : null
+          } catch {
+            identity = null
+          }
+        }
         if (!identity) {
           res.writeHead(401, {
             'content-type': 'application/json; charset=utf-8',
@@ -579,97 +599,18 @@ export function createRequestHandler({
         sendJson(res, 503, { ok: false, error: 'search_unavailable', message: failed || '检索服务不可用' })
         return
       }
-      const budget = await ensureBudget()
-      if (!budget || !bindRequestLifecycle) {
-        sendJson(res, 503, { ok: false, error: 'search_unavailable', message: budgetFailed || '请求预算不可用' })
-        return
-      }
-      // 长度预算：超长查询既不是有效查询，也会炸出成千上万个 n-gram（纯 CPU 成本）。
-      // 放在取槽位之前：这种请求不该占用限流额度。
-      const tooLong = budget.queryProblem(query)
-      if (tooLong) {
-        sendJson(res, 400, { ok: false, error: 'query_too_long', message: tooLong })
-        return
-      }
-      // 与 /mcp 同一本账：绕开 MCP 直接刷搜索一样能把这台 1.2G 的机器打满
-      const slot = budget.acquire({ key: budget.addressOf(req), label: 'search' })
-      if (!slot.ok) {
-        sendJson(res, slot.status, { ok: false, error: slot.code, message: slot.message }, { 'retry-after': String(slot.retryAfter) })
-        return
-      }
-      const lifecycle = bindRequestLifecycle(req, res, slot)
-      try {
-        // 超时 / 客户端断开都会中止检索本身（signal 一路传到检索的记录循环）
-        // 不再写死 includeBody:true：覆盖策略由检索层统一决定（coverage='auto'），
-        // 站点搜索与 MCP 所以及标准 search 三个入口因此拿到**同一批结果**。
-        const outcome = await lifecycle.race(service.searchNotes({ query, course, limit }, { signal: slot.signal }))
-        if (outcome.kind === 'gone') return
-        if (outcome.kind === 'timeout') {
-          if (lifecycle.canWrite()) {
-            sendJson(res, 504, {
-              ok: false,
-              error: 'search_timeout',
-              message: `检索超时（超过 ${budget.limits.timeoutMs}ms）：已中止本次检索，请换更具体的词或缩小范围后重试。`
-            }, { 'retry-after': '1' })
-          }
-          return
-        }
-        const found = outcome.result
-        sendJson(res, 200, {
-          ok: true,
-          query: found.query,
-          total: found.total,
-          // coverage/escalated 分开报：前者说"用没用正文"，后者说"索引答不上来才翻的正文"，
-          // 页面上那行提示说的是后者（本地库正文就在内存里，auto 每句都会用到它）
-          coverage: found.coverage,
-          escalated: found.escalated,
-          // 语义回退：字面一条都没命中时才会 used=true。页面上必须把它标出来——
-          // "按意思找的"和"字面对上的"可信度不一样，读者有权知道。
-          semantic: found.semantic || { used: false, enabled: false },
-          lexicalTotal: found.lexicalTotal ?? found.total,
-          bodyScanned: found.bodyScanned,
-          fuzzy: found.fuzzy,
-          terms: found.terms,
-          hits: found.hits.map(hit => ({
-            slug: hit.slug,
-            url: `/${String(hit.slug).replace(/^\/+/, '')}.html`,
-            // 小节锚点统一百分号编码：站点链接、MCP canonical URL、fetch 证据指向同一处
-            anchor: hit.location?.id
-              ? `/${String(hit.slug).replace(/^\/+/, '')}.html#${encodeURIComponent(hit.location.id)}`
-              : '',
-            courseName: hit.courseName,
-            lessonTitle: hit.lessonTitle,
-            lessonDate: hit.lessonDate,
-            theme: hit.theme || '',
-            keywords: (hit.keywords || []).slice(0, 6),
-            section: hit.location?.title || '',
-            sectionId: hit.location?.id || '',
-            // 一篇里命中的多个小节（去重、配额）：页面可以显示"本文命中 2 处"
-            sections: (hit.sections || []).map(item => ({ id: item.id, title: item.title, score: item.score })),
-            // 语义命中的条目带 similarity，前端据此显示"像到什么程度"
-            ...(hit.semantic ? { semantic: true, similarity: hit.similarity } : {}),
-            snippets: hit.snippets
-          }))
-        })
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        // 取消（客户端走了 / 预算到点）不是"查询写错了"，单独回 504
-        if (error?.name === 'CancelledError') {
-          if (lifecycle.canWrite()) {
-            sendJson(res, 504, { ok: false, error: 'search_timeout', message: '检索已中止（超时或客户端断开）。' }, { 'retry-after': '1' })
-          }
-          return
-        }
-        if (!lifecycle.canWrite()) return
-        // 区分"查询本身没词/不合法"与"发布库读不到"：前者是调用方的问题（400），
-        // 后者是站点的问题（503）——都报 400 会让人去改查询，白费功夫。
-        const serverSide = /读不到发布库|发布库不是合法 JSON|发布库格式不对/.test(message)
-        sendJson(res, serverSide ? 503 : 400, {
-          ok: false,
-          error: serverSide ? 'library_unavailable' : 'search_failed',
-          message
-        })
-      }
+      const found = await runBudgetedSearch({
+        req,
+        res,
+        send: sendJson,
+        query,
+        budget: await ensureBudget(),
+        bindRequestLifecycle,
+        unavailableMessage: budgetFailed,
+        run: ({ signal }) => service.searchNotes({ query, course, limit }, { signal })
+      })
+      if (!found) return
+      sendJson(res, 200, searchPayload(found))
       return
     }
 

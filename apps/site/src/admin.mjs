@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -22,7 +22,21 @@ import {
 import { signRequest as signControlRequest } from '../../control/src/server/auth.mjs'
 import { ADMIN_HTML } from './admin-page.mjs'
 import { MEMBER_ADMIN_HTML } from './member-page.mjs'
-import { readSiteIndex, renderTopicMarkdown, verifySourceMap } from '@course/publish'
+import { runBudgetedSearch, searchPayload } from './search-endpoint.mjs'
+import {
+  readSiteIndex,
+  renderIndexPage,
+  renderKnowledgeMapPage,
+  renderNotePage,
+  renderOnepagePageHtml,
+  renderSearchPage,
+  renderTermIndexPage,
+  renderTopicMarkdown,
+  renderTopicPage,
+  slugify,
+  topicSlug,
+  verifySourceMap
+} from '@course/publish'
 import { openLedger } from '@course/store'
 
 /**
@@ -44,7 +58,6 @@ const DEFAULT_RUN_TIMEOUT_MS = 15 * 60 * 1000
 const COURSE_SESSION_COOKIE = 'lawtech_course_session'
 const COURSE_SSO_ORIGIN = 'https://desk.law-tech.dev'
 const COURSE_SESSION_TTL_SECONDS = 60 * 60
-const COURSE_MCP_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
 
 function base64urlJson(value) {
   return Buffer.from(JSON.stringify(value)).toString('base64url')
@@ -74,6 +87,14 @@ function verifyEnvelope(token, key, scope, nowSeconds) {
   } catch {
     return null
   }
+}
+
+/**
+ * 路径解码：中文课程/课次/专题在 URL 里一定是百分号编码，而发布库里的 slug 是原文。
+ * 解码失败（脏输入，例如 /%E5%）按原样返回——匹配不上更安全，也不会抛 500。
+ */
+function decodePathname(pathname) {
+  try { return decodeURIComponent(pathname) } catch { return pathname }
 }
 
 function cookieValue(req, name) {
@@ -107,21 +128,30 @@ function ssoLocation(next = '/') {
   return COURSE_SSO_ORIGIN + '/api/course/sso?next=' + encodeURIComponent(safeCoursePath(next, '/'))
 }
 
-export function issueMcpAccessToken(session, key, nowSeconds = Math.floor(Date.now() / 1000)) {
+export function issueMcpAccessToken(session, secret = randomBytes(32).toString('base64url')) {
   if (!session?.sub || !['owner', 'member'].includes(session.role)) throw new Error('有效账户会话才可以签发 MCP token')
-  return signEnvelope({
-    v: 1,
-    sub: String(session.sub),
-    role: session.role,
-    iat: nowSeconds,
-    exp: nowSeconds + COURSE_MCP_TOKEN_TTL_SECONDS
-  }, key, 'course-mcp-v1')
+  const ownerId = String(session.sub)
+  const value = String(secret || '')
+  if (!/^[0-9a-f-]{36}$/i.test(ownerId) || value.length < 32 || value.includes('.')) {
+    throw new Error('MCP token 参数不合法')
+  }
+  return `cmcp1.${ownerId}.${value}`
 }
 
-export function verifyMcpAccessToken(token, key, nowSeconds = Math.floor(Date.now() / 1000)) {
-  const payload = verifyEnvelope(token, key, 'course-mcp-v1', nowSeconds)
-  if (!payload || !payload.sub || !['owner', 'member'].includes(payload.role)) return null
-  return payload
+export function parseMcpAccessToken(token) {
+  const [prefix, sub, secret, ...rest] = String(token || '').split('.')
+  if (prefix !== 'cmcp1' || rest.length || !/^[0-9a-f-]{36}$/i.test(sub) || secret.length < 32) return null
+  return { sub, secret }
+}
+
+export function verifyMcpAccessToken(token, storedSecret) {
+  const parsed = parseMcpAccessToken(token)
+  const stored = String(storedSecret || '')
+  if (!parsed || !stored) return null
+  const left = Buffer.from(parsed.secret)
+  const right = Buffer.from(stored)
+  if (left.length !== right.length || !timingSafeEqual(left, right)) return null
+  return { sub: parsed.sub }
 }
 
 /**
@@ -857,7 +887,18 @@ export function createAdminHandler({
   now = () => Date.now(),
   ssoKey = '',
   controlUrl = 'http://127.0.0.1:3102',
-  controlFetch = fetch
+  controlFetch = fetch,
+  /**
+   * 私有阅读站（`/`、`/notes/*`、`/topics/*`…）只在私有内容模式下接管。
+   *
+   * 为什么必须显式传：管理进程在公开模式（本地单进程调试，以及任何一次
+   * COURSE_CONTENT_VISIBILITY 漏配）下同样挂着这个 handler。若阅读站无条件接管根路径，
+   * 一次配置漂移就会让整站变成「先登录才能看」——公开进程明明还在正常提供公开站，
+   * 经 nginx 进来的读者却只看到 SSO 跳转。
+   */
+  privateContent = false,
+  /** 私有检索与 /mcp 共用同一本预算：由进程侧注入；拿不到预算时回 503，而不是放行。 */
+  searchBudget = null
 } = {}) {
   const failures = new Map()
   let running = null
@@ -923,6 +964,271 @@ export function createAdminHandler({
       tasks: tasks.payload.tasks || [],
       jobs: jobsView.payload.jobs || []
     }
+  }
+
+
+  async function privateReadingState(session) {
+    const result = await controlCall(session, { target: '/v1/private/content' })
+    if (!result.ok) {
+      throw Object.assign(new Error(result.payload?.error || 'PRIVATE_CONTENT_FAILED'), { status: result.status || 502 })
+    }
+    const notes = Array.isArray(result.payload.notes) ? result.payload.notes : []
+    const records = notes.map(note => ({
+      ...(note.index && typeof note.index === 'object' ? note.index : {}),
+      slug: String(note.slug || note.index?.slug || ''),
+      courseName: String(note.courseName || note.index?.courseName || ''),
+      lessonTitle: String(note.lessonTitle || note.index?.lessonTitle || note.title || ''),
+      lessonDate: String(note.lessonDate || note.index?.lessonDate || ''),
+      checksum: String(note.checksum || note.index?.checksum || '')
+    })).filter(record => record.slug && record.courseName)
+    const topics = (Array.isArray(result.payload.topics) ? result.payload.topics : [])
+      .filter(topic => topic.status === 'fresh' && topic.artifact)
+      .map(topic => topic.artifact)
+    return { notes, records, topics }
+  }
+
+  async function privateFullRecord(session, state, summary) {
+    const note = state.notes.find(item => String(item.slug || item.index?.slug || '') === String(summary.slug || ''))
+    if (!note) return null
+    const result = await controlCall(session, { target: '/v1/private/note?id=' + encodeURIComponent(note.id) })
+    if (!result.ok || !result.payload?.note) return null
+    const row = result.payload.note
+    return {
+      ...(summary || {}),
+      ...(row.metadata?.index && typeof row.metadata.index === 'object' ? row.metadata.index : {}),
+      slug: String(note.slug || summary.slug || ''),
+      courseName: String(note.courseName || summary.courseName || ''),
+      lessonTitle: String(note.lessonTitle || summary.lessonTitle || row.title || ''),
+      lessonDate: String(note.lessonDate || summary.lessonDate || ''),
+      checksum: String(note.checksum || summary.checksum || ''),
+      markdown: String(row.body_markdown || '')
+    }
+  }
+
+  function privateReadingSource(session, state, normalizeRecord) {
+    return {
+      kind: 'private-reading',
+      describe: () => ({ kind: 'private-reading', label: '个人课程空间', live: true }),
+      revision: () => '',
+      listNotes: async () => state.records.map(record => normalizeRecord(record)),
+      readMarkdown: async slug => {
+        const summary = state.records.find(record => String(record.slug || '') === String(slug || ''))
+        if (!summary) throw new Error('找不到这节课')
+        const full = await privateFullRecord(session, state, summary)
+        if (!full) throw new Error('找不到这节课')
+        return full.markdown
+      },
+      listTopics: async () => state.topics.map(topic => ({
+        id: String(topic.id || ''),
+        course: String(topic.course || ''),
+        title: String(topic.title || ''),
+        summary: String(topic.summary || ''),
+        lessons: Array.isArray(topic.lessons) ? topic.lessons : [],
+        page: '/' + topicSlug(topic) + '.html'
+      })),
+      readTopicMarkdown: async topicId => {
+        const topicRow = (await controlCall(session, { target: '/v1/private/content' })).payload?.topics
+          ?.find(item => String(item.topicId || '') === String(topicId || '') && item.status === 'fresh')
+        if (!topicRow) throw new Error('找不到专题')
+        const result = await controlCall(session, { target: '/v1/private/note?id=' + encodeURIComponent(topicRow.id) })
+        if (!result.ok || !result.payload?.note) throw new Error('找不到专题')
+        return String(result.payload.note.body_markdown || '')
+      }
+    }
+  }
+
+  function sendPrivateHtml(req, res, html) {
+    const body = Buffer.from(String(html || ''))
+    res.writeHead(200, {
+      'content-type': 'text/html; charset=utf-8',
+      'cache-control': 'private, no-store',
+      'x-content-type-options': 'nosniff',
+      'content-length': body.length
+    })
+    if (req.method === 'HEAD') res.end()
+    else res.end(body)
+  }
+
+  async function handlePrivateReading(req, res, pathname, url, session) {
+    /**
+     * 路由匹配一律用**解码后**的路径。
+     *
+     * 中文课次/课程/专题的 slug 是原文（notes/国际刑法学/第1-2节…），而浏览器与 fetch
+     * 发出的都是百分号编码路径，new URL() 也不会替你解码。不统一解码的后果不是报错，
+     * 而是"每一页都匹配不上"→静默回首页：整站看着正常，就是打不开任何一节课。
+     * 解码失败（脏输入）就按原样走，匹配不上后由上层拒绝。
+     */
+    const route = decodePathname(pathname)
+    const isReadingPath = route === '/' ||
+      route.startsWith('/notes/') ||
+      route.startsWith('/onepage/') ||
+      route.startsWith('/topics/') ||
+      route.startsWith('/courses/') ||
+      route === '/map/' ||
+      route === '/concepts/' ||
+      route === '/statutes/' ||
+      route === '/cases/' ||
+      route === '/search/' ||
+      route === '/api/search'
+    if (!isReadingPath) return false
+
+    if (!session) {
+      if (route === '/api/search') {
+        sendJson(res, 401, { ok: false, error: 'account_session_required' }, { 'cache-control': 'no-store' })
+        return true
+      }
+      const next = safeCoursePath(pathname + String(url.search || ''), '/')
+      res.writeHead(302, { location: ssoLocation(next), 'cache-control': 'no-store' })
+      res.end()
+      return true
+    }
+
+    if (!['GET', 'HEAD'].includes(String(req.method || '').toUpperCase())) {
+      sendJson(res, 405, { ok: false, error: 'method_not_allowed' })
+      return true
+    }
+
+    const state = await privateReadingState(session)
+
+    if (route === '/api/search') {
+      const query = String(url.searchParams.get('q') || '').trim()
+      const course = String(url.searchParams.get('course') || '').trim()
+      const rawLimit = Number(url.searchParams.get('limit'))
+      const limit = Math.min(Math.max(Number.isFinite(rawLimit) && rawLimit > 0 ? Math.floor(rawLimit) : 12, 1), 30)
+      if (!query) {
+        sendJson(res, 400, { ok: false, error: 'missing_query', message: '请输入检索词' })
+        return true
+      }
+      const { createNotesService, normalizeRecord } = await import('@course/notes-mcp')
+      const service = createNotesService({
+        source: privateReadingSource(session, state, normalizeRecord),
+        siteOrigin: 'https://course.law-tech.dev'
+      })
+      /**
+       * 与 /mcp、以及公开站内的 /api/search 共用**同一本预算**。
+       *
+       * 私有模式下 nginx 的通用 location / 指向本进程，站内搜索整体搬到了这里；
+       * 闸门如果不跟着搬，生产上这条入口的限流/并发/超时/查询长度四道预算就全没了——
+       * 公开模式里那套「两个入口一本账」也就只在没人用的 3100 上成立。
+       */
+      const gate = typeof searchBudget === 'function' ? await searchBudget() : null
+      const found = await runBudgetedSearch({
+        req,
+        res,
+        send: sendJson,
+        query,
+        budget: gate?.budget || null,
+        bindRequestLifecycle: gate?.bindRequestLifecycle || null,
+        unavailableMessage: gate?.failed || '请求预算不可用',
+        run: ({ signal }) => service.searchNotes({ query, course, limit }, { signal })
+      })
+      if (!found) return true
+      sendJson(res, 200, searchPayload(found), { 'cache-control': 'private, no-store' })
+      return true
+    }
+
+    if (route === '/') {
+      sendPrivateHtml(req, res, renderIndexPage(state.records, {
+        siteOrigin: 'https://course.law-tech.dev',
+        topics: state.topics
+      }))
+      return true
+    }
+
+    if (route === '/map/') {
+      sendPrivateHtml(req, res, renderKnowledgeMapPage({
+        notes: state.records,
+        topics: state.topics,
+        siteOrigin: 'https://course.law-tech.dev'
+      }))
+      return true
+    }
+
+    if (route === '/concepts/' || route === '/statutes/' || route === '/cases/') {
+      const kind = route.split('/').filter(Boolean)[0]
+      const meta = {
+        concepts: ['概念索引', '按课程与课次查看概念。'],
+        statutes: ['法条索引', '按课程与课次查看法条。'],
+        cases: ['案例索引', '按课程与课次查看案例。']
+      }[kind]
+      sendPrivateHtml(req, res, renderTermIndexPage({
+        title: meta[0],
+        description: meta[1],
+        kind,
+        notes: state.records,
+        siteOrigin: 'https://course.law-tech.dev'
+      }))
+      return true
+    }
+
+    if (route === '/search/') {
+      const counts = new Map()
+      for (const record of state.records) counts.set(record.courseName, (counts.get(record.courseName) || 0) + 1)
+      const courses = [...counts.entries()].map(([name, count]) => ({ name, count }))
+      sendPrivateHtml(req, res, renderSearchPage({ siteOrigin: 'https://course.law-tech.dev', courses }))
+      return true
+    }
+
+    if (route.startsWith('/courses/')) {
+      const course = [...new Set(state.records.map(record => record.courseName))]
+        .find(name => route === '/courses/' + slugify(name) + '/')
+      if (!course) return false
+      const records = state.records.filter(record => record.courseName === course)
+      const topics = state.topics.filter(topic => String(topic.course || '') === course)
+      sendPrivateHtml(req, res, renderIndexPage(records, {
+        siteOrigin: 'https://course.law-tech.dev/courses/' + slugify(course) + '/',
+        topics
+      }))
+      return true
+    }
+
+    if (route.startsWith('/notes/') && route.endsWith('.html')) {
+      const slug = route.slice(1, -5)
+      const summary = state.records.find(record => record.slug === slug)
+      if (!summary) return false
+      const full = await privateFullRecord(session, state, summary)
+      if (!full) return false
+      const courseLessons = state.records
+        .filter(record => record.courseName === full.courseName)
+        .sort((a, b) => String(a.lessonDate || '').localeCompare(String(b.lessonDate || '')))
+      const at = courseLessons.findIndex(record => record.slug === full.slug)
+      const neighbours = {
+        previous: at > 0 ? courseLessons[at - 1] : null,
+        next: at >= 0 && at < courseLessons.length - 1 ? courseLessons[at + 1] : null
+      }
+      sendPrivateHtml(req, res, renderNotePage(full, {
+        siteOrigin: 'https://course.law-tech.dev',
+        courseLessons,
+        neighbours
+      }))
+      return true
+    }
+
+    if (route.startsWith('/onepage/') && route.endsWith('.html')) {
+      const noteSlug = 'notes/' + route.slice('/onepage/'.length, -5)
+      const summary = state.records.find(record => record.slug === noteSlug)
+      if (!summary) return false
+      const courseLessons = state.records
+        .filter(record => record.courseName === summary.courseName)
+        .sort((a, b) => String(a.lessonDate || '').localeCompare(String(b.lessonDate || '')))
+      sendPrivateHtml(req, res, renderOnepagePageHtml(summary, {
+        siteOrigin: 'https://course.law-tech.dev',
+        courseLessons
+      }))
+      return true
+    }
+
+    if (route.startsWith('/topics/') && route.endsWith('.html')) {
+      const topic = state.topics.find(item => '/' + topicSlug(item) + '.html' === route)
+      if (!topic) return false
+      sendPrivateHtml(req, res, renderTopicPage(topic, {
+        siteOrigin: 'https://course.law-tech.dev',
+        notes: state.records
+      }))
+      return true
+    }
+
+    return false
   }
 
   function jobMeta(payload = {}) {
@@ -2022,13 +2328,31 @@ export function createAdminHandler({
         return true
       }
       if (req.method === 'POST' && pathname === '/api/account/mcp-token') {
-        const token = issueMcpAccessToken(session, ssoKey, Math.floor(now() / 1000))
+        const secret = randomBytes(32).toString('base64url')
+        const saved = await controlCall(session, {
+          method: 'PUT',
+          target: '/v1/account/mcp-token',
+          body: { secret }
+        })
+        if (!saved.ok) {
+          sendJson(res, saved.status, saved.payload)
+          return true
+        }
+        const token = issueMcpAccessToken(session, secret)
         sendJson(res, 200, {
           ok: true,
           token,
-          expiresInSeconds: COURSE_MCP_TOKEN_TTL_SECONDS,
+          persistent: true,
           endpoint: '/mcp'
         }, { 'cache-control': 'private, no-store' })
+        return true
+      }
+      if (req.method === 'DELETE' && pathname === '/api/account/mcp-token') {
+        const removed = await controlCall(session, {
+          method: 'DELETE',
+          target: '/v1/account/mcp-token'
+        })
+        sendJson(res, removed.status, removed.payload, { 'cache-control': 'private, no-store' })
         return true
       }
       if (req.method === 'GET' && pathname === '/api/account/note') {
@@ -2277,27 +2601,12 @@ export function createAdminHandler({
         return true
       }
 
+      // 阅读站只在私有内容模式下接管：公开模式（本地单进程 / 配置漂移）下这些路径
+      // 必须原样交回站点处理器，否则整站会被要求登录。
+      if (privateContent && await handlePrivateReading(req, res, pathname, url, session)) return true
+
       if (pathname.startsWith('/api/account/')) {
         return handleAccountApi(req, res, pathname, url, session)
-      }
-
-      // 私有模式下，course 根目录就是当前账号的课程阅读/操作空间。
-      // OWNER 的完整运维后台只留在 /admin，避免“打开课程站 = 进入管理后台”。
-      if (pathname === '/') {
-        if (!session) {
-          res.writeHead(302, { location: ssoLocation('/'), 'cache-control': 'no-store' })
-          res.end()
-          return true
-        }
-        const body = Buffer.from(MEMBER_ADMIN_HTML)
-        res.writeHead(200, {
-          'content-type': 'text/html; charset=utf-8',
-          'cache-control': 'private, no-store',
-          'x-content-type-options': 'nosniff',
-          'content-length': body.length
-        })
-        res.end(body)
-        return true
       }
 
       if (pathname === '/admin' || pathname === '/admin/') {
@@ -2312,12 +2621,7 @@ export function createAdminHandler({
           res.end()
           return true
         }
-        if (session.role !== 'owner') {
-          res.writeHead(302, { location: '/', 'cache-control': 'private, no-store' })
-          res.end()
-          return true
-        }
-        const body = Buffer.from(ADMIN_HTML)
+        const body = Buffer.from(session.role === 'owner' ? ADMIN_HTML : MEMBER_ADMIN_HTML)
         res.writeHead(200, {
           'content-type': 'text/html; charset=utf-8',
           'cache-control': 'no-store',

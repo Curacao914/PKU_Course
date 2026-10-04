@@ -128,7 +128,7 @@
     https://course.law-tech.dev/mcp
 
 - 传输：Streamable HTTP（POST 一条 JSON-RPC，回一条 JSON；协议层无会话）
-- 身份验证：**Bearer Token**。登录课程空间后，在「账户设置 → MCP」生成；令牌只绑定当前账号，30 天自动失效
+- 身份验证：**Bearer Token**。登录课程空间后，在「账户设置 → MCP」生成；令牌只绑定当前账号，长期有效，直到主动删除或重新生成
 - 数据源：当前账号自己的课程笔记与专题；所有读取都按 `owner_id` 过滤，不读取别人的内容
 - 只读：所有工具都标了 `readOnlyHint: true`，MCP 没有课程内容写入能力
 - 隐私：站点切到私有内容模式后，`/api/notes`、静态 Markdown、专题页与搜索不再作为公开旁路提供
