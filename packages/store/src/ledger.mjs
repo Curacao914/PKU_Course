@@ -76,6 +76,12 @@ export function openLedger(databasePath = ':memory:', options = {}) {
         AND title = ? AND starts_at_text = ? AND teacher = ?
       ORDER BY id
     `),
+    findSameTimeReplays: db.prepare(`
+      SELECT replay_key, title, teacher FROM tasks
+      WHERE owner_id = ? AND resource_class = ? AND course_name = ?
+        AND starts_at_text = ?
+      LIMIT 2
+    `),
     relinkExternalIdentity: db.prepare(`
       UPDATE tasks SET course_key = ?, source_replay_key = ?,
         course_name = ?, title = ?, starts_at_text = ?, teacher = ?, updated_at = ?
@@ -260,6 +266,12 @@ export function openLedger(databasePath = ':memory:', options = {}) {
               }
               existing += 1
               continue
+            }
+          }
+          if (!before && courseName && startsAt && /^\d{4}-\d{2}-\d{2}/.test(startsAt)) {
+            const near = statements.findSameTimeReplays.all(owner, resourceClass, courseName, startsAt)
+            if (near.length) {
+              throw new Error(`已有同一课程同一开始时间的录像但标题或教师不同：${courseName} · ${startsAt}；需人工核对后关联，拒绝生成重复任务`)
             }
           }
           if (before) existing += 1
