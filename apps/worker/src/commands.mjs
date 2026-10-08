@@ -3662,23 +3662,45 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
     summary.wechat = wechat
 
     try {
-      const store = openStore(config.ledgerPath)
-      try {
-        const sender = injectedSender || createWechatSender({
-          openclawBin: config.notify.openclawBin,
-          openclawHome: config.notify.openclawHome,
-          openclawStateDir: config.notify.openclawStateDir,
-          target: config.notify.target
-        })
-        const delivered = await runDeliveryCycle({
-          store, sender,
-          publicSiteUrl: config.notify.publicUrl,
-          maxAttempts: config.notify.maxAttempts,
-          workerId: `${workerId}:notify`
-        })
-        summary.notification = { sent: delivered.sent, retried: delivered.retried, failed: delivered.failed }
-      } finally {
-        store.close()
+      const fallbackConfig = config.notify.fallback || {}
+      const fallback = fallbackConfig.kind ? createFallbackSender({
+        kind: fallbackConfig.kind, url: fallbackConfig.url,
+        sendKey: fallbackConfig.key, token: fallbackConfig.key
+      }) : null
+      // 失效且没有备用通道时保留 pending，不能让 OpenClaw 假回执把它标为 sent，
+      // 也不能消耗最大重试次数。等会话恢复后下一轮再发。
+      if (!injectedSender && wechat.needed && !fallback?.configured) {
+        summary.notification = { sent: 0, retried: 0, failed: 0, blocked: 'wechat_session_unavailable' }
+      } else {
+        const store = openStore(config.ledgerPath)
+        try {
+          const primary = injectedSender || createWechatSender({
+            openclawBin: config.notify.openclawBin,
+            openclawHome: config.notify.openclawHome,
+            openclawStateDir: config.notify.openclawStateDir,
+            target: config.notify.target
+          })
+          const sender = injectedSender || createResilientSender({
+            primary, fallback: fallback?.configured ? fallback : null,
+            primaryUsable: async () => {
+              const current = checkWechatActivation({
+                stateDir: config.notify.openclawStateDir,
+                home: config.notify.openclawHome
+              })
+              return !current.needed && current.ok
+            },
+            onFallback: reason => stderr(`改用备用通道 ${fallbackConfig.kind}：${reason}`)
+          })
+          const delivered = await runDeliveryCycle({
+            store, sender,
+            publicSiteUrl: config.notify.publicUrl,
+            maxAttempts: config.notify.maxAttempts,
+            workerId: `${workerId}:notify`
+          })
+          summary.notification = { sent: delivered.sent, retried: delivered.retried, failed: delivered.failed }
+        } finally {
+          store.close()
+        }
       }
     } catch (error) {
       summary.errors.push({ step: 'notify', message: error instanceof Error ? error.message : String(error) })
