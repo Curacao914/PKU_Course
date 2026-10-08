@@ -153,11 +153,14 @@ export function createAccountStore(env = process.env) {
     })
   }
 
-  async function saveScannedCourses(ownerId, keys, {replace = true} = {}) {
+  async function saveScannedCourses(ownerId, courses, {replace = true} = {}) {
     const current = await getPkuConnection(ownerId)
-    const scanned = [...new Set([...(replace ? [] : current?.scanned_course_keys || []), ...keys])]
-    await markPku(ownerId, { scanned_course_keys: scanned,
-      selected_course_keys: (current?.selected_course_keys || []).filter(key => scanned.includes(key)) })
+    const next = reconcileScannedCourseSelection(current, courses, { replace })
+    await markPku(ownerId, {
+      scanned_course_keys: next.scanned,
+      selected_course_keys: next.selected
+    })
+    return next
   }
 
   async function resourceLimits(ownerId) {
@@ -430,4 +433,30 @@ export function validateCourseSelection(selected, scanned) {
     throw Object.assign(new Error('只能选择当前账户已扫描的课程'), {status:400})
   }
   return [...new Set(selected)]
+}
+
+/**
+ * 选课不能因为 Blackboard 的临时 courseKey 轮换而被清空。
+ * 通过同账户账本中的旧课程 key 进行唯一关联；无法确定时保留旧选择，
+ * 由同步预检阻止继续，等待用户确认。
+ */
+export function reconcileScannedCourseSelection(previous = {}, courses = [], { replace = true } = {}) {
+  const rows = courses.map(course => typeof course === 'string'
+    ? { courseKey: course, aliasKeys: [] } : course)
+    .filter(course => typeof course?.courseKey === 'string' && course.courseKey)
+  const scanned = [...new Set([...(replace ? [] : previous?.scanned_course_keys || []), ...rows.map(row => row.courseKey)])]
+  const candidates = new Map()
+  for (const course of rows) {
+    for (const alias of course.aliasKeys || []) {
+      if (typeof alias !== 'string' || !alias || alias === course.courseKey) continue
+      if (!candidates.has(alias)) candidates.set(alias, new Set())
+      candidates.get(alias).add(course.courseKey)
+    }
+  }
+  const selected = [...new Set((previous?.selected_course_keys || []).map(key => {
+    const mapped = candidates.get(key)
+    return mapped?.size === 1 ? [...mapped][0] : key
+  }))]
+  const pending = selected.filter(key => !scanned.includes(key))
+  return { scanned, selected, pending }
 }
