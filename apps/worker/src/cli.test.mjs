@@ -10,6 +10,7 @@ import { markdownChecksum } from '@course/publish'
 import { openLedger } from '@course/store'
 
 import { runCli } from './cli.mjs'
+import { nextActionableTask } from './commands.mjs'
 
 const SECRETS = {
   PKU_USERNAME: 'student-id-2026',
@@ -2581,4 +2582,40 @@ test('a crashing command exits 1 and reports the message without a stack dump', 
   })
   assert.equal(await runCli(['discover'], deps), 1)
   assert.match(errors.join('\n'), /命令 discover 失败：AUTH_EXPIRED/)
+})
+
+test('OWNER worker excludes MEMBER-owned rows incorrectly marked resource_class=owner', async () => {
+  const { deps, ledger, lines } = harness({
+    sender: { target: 'mock', probe: async () => ({ ok: true }),
+      send: async () => ({ externalId: 'mock' }) }
+  })
+  const memberOwnerId = '11111111-2222-4333-8444-555555555555'
+  ledger.discoverReplays([{ replay_key: 'owner-normal', course_key: 'course-owner',
+    course_name: 'OWNER课程', title: '正常课次' }])
+  // 历史污染记录：owner_id 为 MEMBER，但 resource_class 错写成 owner。
+  ledger.discoverReplays([{ replay_key: 'replay-legacy-member',
+    course_key: 'course-member', course_name: 'MEMBER课程', title: '异常记录',
+    resource_class: 'owner' }], { ownerId: memberOwnerId, resourceClass: 'owner' })
+  const normal = nextActionableTask(ledger, { ownerId: '', resourceClass: 'owner' })
+  assert.equal(normal.replay_key, 'owner-normal')
+  const result = await runCli(['cycle', '--replay-key', memberOwnerId + '::replay-legacy-member'], deps)
+  assert.equal(result, 1, '显式指定不属于 OWNER 的任务也必须拒绝')
+  const report = JSON.parse(lines.at(-1))
+  assert.match(report.tasks[0].error, /不属于当前账户/)
+  assert.equal(ledger.getTask(memberOwnerId + '::replay-legacy-member').attempts, 0)
+  assert.equal(ledger.getTask(memberOwnerId + '::replay-legacy-member').stage, 'discovered')
+  ledger.close()
+})
+
+test('owner auto candidate selection cannot pick wrongly scoped high-priority member tasks', () => {
+  const ledger = openLedger(':memory:')
+  const member = '22222222-3333-4444-8555-666666666666'
+  ledger.discoverReplays([{ replay_key: 'bad', course_key: 'c1', course_name: 'C1',
+    title: '错误成员', priority: 999, resource_class: 'owner' }],
+    { ownerId: member, resourceClass: 'owner' })
+  ledger.discoverReplays([{ replay_key: 'good', course_key: 'c2', course_name: 'C2',
+    title: 'OWNER', priority: 10 }])
+  assert.equal(nextActionableTask(ledger, { ownerId: '', resourceClass: 'owner' }).replay_key, 'good')
+  assert.equal(nextActionableTask(ledger, { ownerId: member, resourceClass: 'member' }), null)
+  ledger.close()
 })
