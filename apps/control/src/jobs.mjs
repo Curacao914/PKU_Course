@@ -275,7 +275,12 @@ async function execute(job, env, store, r2, jobTokens) {
 
   if (job.kind === 'discover' && results.every(result => result.code === 0)) {
     const courses = results.flatMap(result => Array.isArray(result.output?.courseCatalog) ? result.output.courseCatalog : [])
-    await store.saveScannedCourses(job.ownerId, courses, { replace: !job.payload?.courseKey })
+    const saved = await store.saveScannedCourses(job.ownerId, courses, { replace: !job.payload?.courseKey })
+    if (saved.pending.length) {
+      results.push({ step: 'course-identity', code: 2,
+        stderr: '部分已选课程无法与最新目录唯一对应，已保留原选择：' + saved.pending.join(', ') })
+      return { ok: false, results }
+    }
   }
   await persistSession(job.ownerId, prepared, store, mode)
 
