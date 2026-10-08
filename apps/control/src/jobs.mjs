@@ -134,7 +134,7 @@ async function execute(job, env, store, r2, jobTokens) {
   const prepared = await prepare(job.ownerId, env, store)
   prepared.childEnv.COURSE_JOB_TOKEN = jobTokens.issue({ ownerId: job.ownerId, jobId: job.id })
   prepared.childEnv.COURSE_JOB_ID = job.id
-  const selected = prepared.pku.row?.selected_course_keys || []
+  let selected = prepared.pku.row?.selected_course_keys || []
   const mode = prepared.pku.row?.mode || 'qr'
   const results = []
 
@@ -230,6 +230,25 @@ async function execute(job, env, store, r2, jobTokens) {
     }
   }
 
+  // 先全量只读发现，重关联上一轮保存的课程选项，然后才按选项正式登记。
+  // 如果扫描失败或出现未关联选项，不能把它误报成教学网凭据失效。
+  if (job.kind === 'sync') {
+    const preflight = await runCourse(['discover', '--no-record'], prepared.childEnv)
+    const catalog = parseLastJson(preflight.stdout)
+    results.push({ step: 'course-identity-preflight', code: preflight.code, output: catalog, stderr: preflight.stderr.slice(-4000) })
+    if (preflight.code !== 0 || !Array.isArray(catalog?.courseCatalog) || !catalog.courseCatalog.length) {
+      return { ok: false, results: [...results, { step: 'course-identity', code: 1,
+        stderr: '教学网课程目录扫描异常，已保留原课程选择，未执行任务登记或下载' }] }
+    }
+    const mapped = await store.saveScannedCourses(job.ownerId, catalog.courseCatalog)
+    if (mapped.pending.length) {
+      return { ok: false, results: [...results, { step: 'course-identity', code: 2,
+        stderr: '已选课程无法唯一关联到新课程主键，请重新选择课程：' + mapped.pending.join(', ') }] }
+    }
+    selected = mapped.selected
+    prepared.childEnv.COURSE_SELECTED_COURSE_KEYS = JSON.stringify(selected)
+  }
+
   const discoverKeys = job.kind === 'discover'
     ? [job.payload?.courseKey || '']
     : selected
@@ -255,8 +274,8 @@ async function execute(job, env, store, r2, jobTokens) {
   }
 
   if (job.kind === 'discover' && results.every(result => result.code === 0)) {
-    const keys = results.flatMap(result => (result.output?.courses || []).map(course => course.courseKey)).filter(key => typeof key === 'string' && key)
-    await store.saveScannedCourses(job.ownerId, keys, { replace: !job.payload?.courseKey })
+    const courses = results.flatMap(result => Array.isArray(result.output?.courseCatalog) ? result.output.courseCatalog : [])
+    await store.saveScannedCourses(job.ownerId, courses, { replace: !job.payload?.courseKey })
   }
   await persistSession(job.ownerId, prepared, store, mode)
 
