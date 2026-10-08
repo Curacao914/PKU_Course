@@ -542,7 +542,11 @@ test('legacy replay mapping never crosses MEMBER/OWNER scopes', () => {
 test('ambiguous historic course replay identities fail closed and roll back', () => {
   const db = ledger()
   db.discoverReplays([{ ...REPLAY, replay_key: 'replay-old-1', course_key: 'course-legacy-1' }])
-  db.discoverReplays([{ ...REPLAY, replay_key: 'replay-old-2', course_key: 'course-legacy-2' }])
+  db.discoverReplays([{ ...REPLAY, replay_key: 'replay-old-2', course_key: 'course-legacy-2',
+    starts_at_text: '2026-05-28 13:00' }])
+  // 模拟迁移前已经存在的历史重复记录（新发现流程会拒绝新增这样的记录）。
+  db.db.prepare('UPDATE tasks SET starts_at_text = ? WHERE replay_key = ?')
+    .run(REPLAY.starts_at_text, 'replay-old-2')
   assert.throws(() => db.discoverReplays([{ ...REPLAY,
     replay_key: 'replay-new', course_key: 'course-stable' }]), /身份存在歧义/)
   assert.equal(db.getTask('replay-new'), null)
@@ -553,9 +557,11 @@ test('ambiguous historic course replay identities fail closed and roll back', ()
 test('incomplete recording metadata is never used for identity reattachment', () => {
   const db = ledger()
   db.discoverReplays([{ ...REPLAY, replay_key: 'replay-old-empty-teacher', teacher: '' }])
-  const result = db.discoverReplays([{ ...REPLAY, replay_key: 'replay-new-empty-teacher',
-    course_key: 'course-stable', teacher: '' }])
-  assert.equal(result.inserted, 1)
-  assert.equal(result.existing, 0)
+  assert.throws(() => db.discoverReplays([{ ...REPLAY, replay_key: 'replay-new-empty-teacher',
+    course_key: 'course-stable', teacher: '' }]), /同一开始时间/)
+  assert.equal(db.listTasks().length, 1, '同一时间元数据不全的回放不能形成重复任务')
+  const result = db.discoverReplays([{ ...REPLAY, replay_key: 'replay-new-other-time',
+    course_key: 'course-stable', starts_at_text: '2026-05-28 13:00', teacher: '' }])
+  assert.equal(result.inserted, 1, '真正不同时间的回放仍可加入')
   db.close()
 })
