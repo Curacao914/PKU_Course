@@ -91,6 +91,25 @@ function parseLastJson(text) {
   return null
 }
 
+/**
+ * Resolve old Blackboard course keys through the same account's ledger aliases.
+ * A stale or ambiguous key requires explicit re-selection; it is never a login failure.
+ */
+export function resolveRequestedCourseKey(requested, catalog = []) {
+  const key = String(requested || '').trim()
+  if (!key) return { key: '', error: '' }
+  const matches = catalog.filter(course => course.courseKey === key ||
+    (course.aliasKeys || []).includes(key))
+  if (matches.length === 1) return { key: matches[0].courseKey, error: '' }
+  return { key: '', error: matches.length
+    ? '课程标识匹配到多门课程，请重新选择后重试'
+    : '旧课程标识已失效或课程不在当前目录中，请重新扫描并选择课程' }
+}
+
+function isPkuAuthFailure(message = '') {
+  return /教学网会话失效|没有识别到统一登录表单|没有识别到统一登录按钮|登录后没有回到当前学期课程|AUTH_EXPIRED/.test(String(message))
+}
+
 export async function prepare(ownerId, env, store) {
   const [profile, credentials, pku, limits] = await Promise.all([
     store.profile(ownerId),
@@ -249,10 +268,33 @@ async function execute(job, env, store, r2, jobTokens) {
     prepared.childEnv.COURSE_SELECTED_COURSE_KEYS = JSON.stringify(selected)
   }
 
-  const discoverKeys = job.kind === 'discover'
-    ? [job.payload?.courseKey || '']
-    : selected
+  // 单门课重扫使用旧 courseKey 时先扫描完整目录，再按稳定键或同账户别名匹配。
+  // 绝不能因为旧 key 失配就触发教学网扫码/重登录通知。
+  let requestedCourseKey = String(job.payload?.courseKey || '').trim()
+  if (job.kind === 'discover' && requestedCourseKey) {
+    const initial = await runCourse(['discover', '--no-record'], prepared.childEnv)
+    const initialCatalog = parseLastJson(initial.stdout)
+    results.push({ step: 'course-identity-preflight', code: initial.code,
+      output: initialCatalog, stderr: initial.stderr.slice(-4000) })
+    if (initial.code !== 0 || !Array.isArray(initialCatalog?.courseCatalog) || !initialCatalog.courseCatalog.length) {
+      const failure = initial.stderr.slice(-1000) || '无法读取完整课程目录'
+      if (isPkuAuthFailure(failure)) {
+        await store.markPku(job.ownerId, { status: 'needs_reauth', last_error: failure })
+        await store.notifyEmail(job.ownerId, {
+          eventKey: 'pku-needs-reauth', title: '教学网需要重新登录',
+          summary: '课程同步已经暂停。请重新扫码或检查登录凭据。'
+        }).catch(() => {})
+      }
+      await persistSession(job.ownerId, prepared, store, mode).catch(() => {})
+      return { ok: false, results }
+    }
+    const resolved = resolveRequestedCourseKey(requestedCourseKey, initialCatalog.courseCatalog)
+    if (resolved.error) return { ok: false, results: [...results,
+      { step: 'course-identity', code: 2, stderr: resolved.error }] }
+    requestedCourseKey = resolved.key
+  }
 
+  const discoverKeys = job.kind === 'discover' ? [requestedCourseKey] : selected
   for (const courseKey of discoverKeys) {
     const args = ['discover']
     if (job.kind === 'discover') args.push('--no-record')
@@ -260,14 +302,15 @@ async function execute(job, env, store, r2, jobTokens) {
     const result = await runCourse(args, prepared.childEnv)
     const output = parseLastJson(result.stdout)
     results.push({ step: 'discover', courseKey, code: result.code, output, stderr: result.stderr.slice(-4000) })
-    if (result.code !== 0 && !output?.loginMode) {
+    if (result.code !== 0) {
       const failure = result.stderr.slice(-1000) || '教学网同步失败'
-      await store.markPku(job.ownerId, { status: 'needs_reauth', last_error: failure })
-      await store.notifyEmail(job.ownerId, {
-        eventKey: 'pku-needs-reauth',
-        title: '教学网需要重新登录',
-        summary: '课程同步已经暂停。请回到课程设置重新扫码，或检查长期登录凭据。'
-      }).catch(() => {})
+      if (isPkuAuthFailure(failure)) {
+        await store.markPku(job.ownerId, { status: 'needs_reauth', last_error: failure })
+        await store.notifyEmail(job.ownerId, {
+          eventKey: 'pku-needs-reauth', title: '教学网需要重新登录',
+          summary: '课程同步已经暂停。请重新扫码或检查登录凭据。'
+        }).catch(() => {})
+      }
       await persistSession(job.ownerId, prepared, store, mode).catch(() => {})
       return { ok: false, results }
     }
