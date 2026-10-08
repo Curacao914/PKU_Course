@@ -3245,7 +3245,7 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
       stderr(`备用通道 ${fallback.kind} 缺地址或密钥，本次不使用`)
     }
 
-    const sender = createResilientSender({
+    const sender = injectedSender || createResilientSender({
       primary,
       fallback: fallback && fallback.configured ? fallback : null,
       primaryUsable: async () => {
