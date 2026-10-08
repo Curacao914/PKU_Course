@@ -2402,6 +2402,46 @@ test('微信会话过期时如实记录"不能自动激活"，不假装试过', 
   assert.equal(code, 0)
 })
 
+test('微信会话过期且没有备用通道：不投递、不消耗重试、保留 pending 等会话恢复', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'openclaw-state-'))
+  const accounts = path.join(stateDir, 'openclaw-weixin', 'accounts')
+  fs.mkdirSync(accounts, { recursive: true })
+  const tokens = path.join(accounts, 'bot.context-tokens.json')
+  fs.writeFileSync(tokens, JSON.stringify({ 'user@im.wechat': 'token' }))
+  // 固定时钟 + 23 小时前的互动：超过 12 小时阈值即"已过期"
+  const fixed = new Date('2026-09-25T00:30:00Z')
+  fs.utimesSync(tokens, new Date(fixed.getTime() - 23 * 3600 * 1000), new Date(fixed.getTime() - 23 * 3600 * 1000))
+
+  // 刻意不注入 sender：走真实的通道判定。会话已过期，且没有配置备用通道。
+  const { deps, lines, ledger } = harness({ now: () => fixed })
+  ledger.enqueueDelivery({
+    dedupeKey: 'course-note:expired', purpose: 'course-note', bodyText: '正文', objectUrl: '/n.html',
+    scheduledFor: '2026-01-01T00:00:00.000Z'
+  })
+
+  const env = {
+    ...deps.env,
+    COURSE_WECHAT_TARGET: 'wxid',
+    OPENCLAW_STATE_DIR: stateDir,
+    OPENCLAW_HOME: stateDir
+  }
+  const code = await runCli(['cycle', '--max-tasks', '1'], { ...deps, env })
+  const summary = parse(lines.at(-1))
+
+  assert.equal(summary.wechat.needed, true)
+  assert.equal(summary.notification.blocked, 'wechat_session_unavailable',
+    '会话不可用又没有备用通道时，必须如实记录阻塞，而不是试一次主通道')
+  assert.equal(summary.notification.sent, 0)
+  assert.equal(summary.notification.retried, 0, '阻塞不是发送失败，不该消耗最大重试次数')
+  assert.equal(summary.notification.failed, 0)
+
+  const row = ledger.listDeliveries({ limit: 50 }).find(item => item.dedupe_key === 'course-note:expired')
+  assert.equal(row.status, 'pending', '会话恢复前必须保留 pending，等下一轮再发')
+  assert.equal(row.attempts, 0, '不应产生任何投递尝试')
+  assert.equal(row.external_id, '', '不能留下"接口说成功、微信没收到"的假回执')
+  assert.equal(code, 0)
+})
+
 test('cycle skips media work when the disk is full but still delivers notifications', async () => {
   const sent = []
   const sender = {
