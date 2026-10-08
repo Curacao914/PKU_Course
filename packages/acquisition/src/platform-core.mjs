@@ -57,6 +57,19 @@ export function chooseCurrentCourses(courses) {
   return courses
 }
 
+/**
+ * Blackboard launcher 里的 PkId.container 是 JVM 对象身份，服务重启即变化。
+ * 课程永久身份只使用 Blackboard 的原生课程 PK；遇到无法识别的 PkId 必须
+ * 明确失败，不能悄悄退回含 JVM hash 的临时字符串。
+ */
+export function stableCourseIdentity(raw) {
+  const value = String(raw || '').trim()
+  const pk = /^PkId\{\s*key\s*=\s*([^,}\s]+)/.exec(value)
+  if (pk) return pk[1]
+  if (/^PkId\s*\{/i.test(value)) throw new Error('无法识别 Blackboard 课程主键，已停止登记以保护历史任务')
+  return value
+}
+
 export function courseKey(identity) {
   return `course-${sha256(identity).slice(0, 24)}`
 }
