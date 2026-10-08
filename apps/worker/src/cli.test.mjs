@@ -2619,3 +2619,17 @@ test('owner auto candidate selection cannot pick wrongly scoped high-priority me
   assert.equal(nextActionableTask(ledger, { ownerId: member, resourceClass: 'member' }), null)
   ledger.close()
 })
+
+test('direct download cannot claim a misclassified MEMBER task from OWNER context', async () => {
+  const { deps, ledger, errors } = harness()
+  const member = '33333333-4444-4555-8666-777777777777'
+  ledger.discoverReplays([{ replay_key: 'foreign-download', course_key: 'course-foreign',
+    course_name: '外部成员', title: '不应被下载', resource_class: 'owner' }],
+    { ownerId: member, resourceClass: 'owner' })
+  const key = member + '::foreign-download'
+  const code = await runCli(['download', '--course-key', 'course-foreign', '--replay-key', key], deps)
+  assert.equal(code, 1)
+  assert.match(errors.join('\n'), /不属于当前账户的任务作用域/)
+  assert.equal(ledger.getTask(key).attempts, 0)
+  ledger.close()
+})
