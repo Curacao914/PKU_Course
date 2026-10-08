@@ -156,11 +156,12 @@ export function createAccountStore(env = process.env) {
   async function saveScannedCourses(ownerId, courses, {replace = true} = {}) {
     const current = await getPkuConnection(ownerId)
     const next = reconcileScannedCourseSelection(current, courses, { replace })
+    if (next.pending.length) return { ...next, updated: false }
     await markPku(ownerId, {
       scanned_course_keys: next.scanned,
       selected_course_keys: next.selected
     })
-    return next
+    return { ...next, updated: true }
   }
 
   async function resourceLimits(ownerId) {
