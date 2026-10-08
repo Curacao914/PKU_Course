@@ -495,3 +495,67 @@ test('长任务续租：阶段上报顺手续租，且只续自己领的那条',
   db.close()
 })
 
+
+test('Blackboard JVM rotation relinks OWNER replay without resetting artifacts or task events', () => {
+  const db = ledger()
+  const old = { ...REPLAY, replay_key: 'replay-jvm-old', course_key: 'course-jvm-old' }
+  db.discoverReplays([old])
+  const before = db.getTask(old.replay_key)
+  db.reportStage({ id: before.id, stage: 'transcript_ready',
+    data: { artifacts: { mediaPath: '/legacy/replays/replay-jvm-old/media.mp4',
+      transcriptPath: '/legacy/replays/replay-jvm-old/transcript.md' } } })
+  const rotated = { ...old, replay_key: 'replay-pk-stable', course_key: 'course-pk-stable' }
+  const discovery = db.discoverReplays([rotated])
+  assert.equal(discovery.inserted, 0)
+  assert.equal(discovery.existing, 1)
+  assert.deepEqual(discovery.relinked.map(item => item.replayKey), [old.replay_key])
+  const after = db.getTask(old.replay_key)
+  assert.equal(after.id, before.id)
+  assert.equal(after.stage, 'transcript_ready')
+  assert.equal(after.source_replay_key, rotated.replay_key)
+  assert.equal(after.course_key, rotated.course_key)
+  assert.match(after.artifacts.transcriptPath, /replay-jvm-old/)
+  assert.equal(db.getTask(rotated.replay_key), null)
+  assert.equal(db.listTasks().length, 1)
+  assert.equal(db.discoverReplays([rotated]).existing, 1)
+  assert.equal(db.listTasks().length, 1)
+  db.close()
+})
+
+test('legacy replay mapping never crosses MEMBER/OWNER scopes', () => {
+  const db = ledger()
+  const a = '11111111-2222-4333-8444-555555555555'
+  const b = '22222222-3333-4444-8555-666666666666'
+  const old = { ...REPLAY, replay_key: 'replay-old-scope', course_key: 'course-old-scope' }
+  db.discoverReplays([old])
+  db.discoverReplays([old], { ownerId: a, resourceClass: 'member' })
+  db.discoverReplays([old], { ownerId: b, resourceClass: 'member' })
+  const next = { ...old, replay_key: 'replay-new-scope', course_key: 'course-new-scope' }
+  db.discoverReplays([next], { ownerId: a, resourceClass: 'member' })
+  assert.equal(db.getTask(a + '::replay-old-scope').source_replay_key, next.replay_key)
+  assert.equal(db.getTask(b + '::replay-old-scope').source_replay_key, old.replay_key)
+  assert.equal(db.getTask('replay-old-scope').source_replay_key, old.replay_key)
+  assert.deepEqual(db.courseKeyAliases({ ownerId: a, resourceClass: 'member', courseName: old.course_name }), [next.course_key])
+  db.close()
+})
+
+test('ambiguous historic course replay identities fail closed and roll back', () => {
+  const db = ledger()
+  db.discoverReplays([{ ...REPLAY, replay_key: 'replay-old-1', course_key: 'course-legacy-1' }])
+  db.discoverReplays([{ ...REPLAY, replay_key: 'replay-old-2', course_key: 'course-legacy-2' }])
+  assert.throws(() => db.discoverReplays([{ ...REPLAY,
+    replay_key: 'replay-new', course_key: 'course-stable' }]), /身份存在歧义/)
+  assert.equal(db.getTask('replay-new'), null)
+  assert.equal(db.listTasks().length, 2)
+  db.close()
+})
+
+test('incomplete recording metadata is never used for identity reattachment', () => {
+  const db = ledger()
+  db.discoverReplays([{ ...REPLAY, replay_key: 'replay-old-empty-teacher', teacher: '' }])
+  const result = db.discoverReplays([{ ...REPLAY, replay_key: 'replay-new-empty-teacher',
+    course_key: 'course-stable', teacher: '' }])
+  assert.equal(result.inserted, 1)
+  assert.equal(result.existing, 0)
+  db.close()
+})
