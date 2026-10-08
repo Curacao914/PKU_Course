@@ -399,6 +399,11 @@ export function createCommands(context) {
       stderr(`账本中没有 ${replayKey}：本次按独立运行处理，不记录阶段。先跑 course discover 可登记回放。`)
       return null
     }
+    const expectedClass = config.account?.resourceClass || 'owner'
+    const expectedOwner = expectedClass === 'member' ? (config.account?.ownerId || '') : ''
+    if (existing.resource_class !== expectedClass || existing.owner_id !== expectedOwner) {
+      throw new Error('该任务不属于当前账户的任务作用域')
+    }
     const claim = store.claimTask({ replayKey, workerId, ...(leaseSeconds ? { leaseSeconds } : {}) })
     if (!claim.claimed) {
       throw new Error(`无法领取 ${replayKey}：${claim.reason}（当前阶段 ${claim.task?.stage}）`)
