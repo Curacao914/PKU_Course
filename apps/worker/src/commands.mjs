@@ -3343,6 +3343,12 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
     const memberSelectedCourseKeys = config.account?.resourceClass === 'member'
       ? new Set(config.account?.selectedCourseKeys || [])
       : null
+    // 旧的临时手工脚本曾插入 owner_id 非空、resource_class=owner 的错误记录。
+    // OWNER 的真实账本作用域始终是 owner_id=''，必须两列同时筛选。
+    const ledgerOwnerId = config.account?.resourceClass === 'member'
+      ? (config.account?.ownerId || '')
+      : ''
+    const ledgerClass = config.account?.resourceClass || 'owner'
 
     // 转录通道是否因付费/凭据问题停摆：用它拦住后续下载（转录本身仍会重试）。
     // 转录跑不动时继续下载只会把盘塞满，而盘满影响的是整机。
@@ -3350,8 +3356,8 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
       const store = openStore(config.ledgerPath)
       try {
         const blocked = store.listTasks({
-          ownerId: config.account?.resourceClass === 'member' ? (config.account?.ownerId || null) : null,
-          resourceClass: config.account?.resourceClass || 'owner',
+          ownerId: ledgerOwnerId,
+          resourceClass: ledgerClass,
           limit: 200
         }).filter(task => !memberSelectedCourseKeys || memberSelectedCourseKeys.has(task.course_key))
           .filter(task => task.last_error && ['downloaded', 'transcribing', 'transcript_ready'].includes(task.stage))
@@ -3431,6 +3437,12 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
       let task = null
       try {
         if (onlyReplay) {
+          const selected = store.getTask(onlyReplay)
+          if (selected && (selected.owner_id !== ledgerOwnerId || selected.resource_class !== ledgerClass)) {
+            summary.tasks.push({ replayKey: onlyReplay, stage: 'unknown',
+              action: 'skip', ok: false, error: '该任务不属于当前账户的任务作用域' })
+            break
+          }
           const claimed = store.claimTask({ replayKey: onlyReplay, workerId, leaseSeconds: 3600 })
           task = claimed.claimed ? claimed.task : null
           if (!claimed.claimed) {
@@ -3448,8 +3460,8 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
           }
         } else {
           const candidate = nextActionableTask(store, {
-            ownerId: config.account?.resourceClass === 'member' ? (config.account?.ownerId || null) : null,
-            resourceClass: config.account?.resourceClass || 'owner',
+            ownerId: ledgerOwnerId,
+            resourceClass: ledgerClass,
             courseKeys: memberSelectedCourseKeys,
             exclude: new Set(skippedNoMaterials.map(item => item.replayKey))
           })
@@ -3717,7 +3729,9 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
       const store = openStore(config.ledgerPath)
       try {
         const maxAttempts = Number(options.options['max-attempts'] || 5)
-        for (const task of store.listTasks({ limit: 200 })) {
+        for (const task of store.listTasks({
+          ownerId: ledgerOwnerId, resourceClass: ledgerClass, limit: 200
+        })) {
           if (['published', 'completed', 'needs_attention'].includes(task.stage)) continue
           if (Number(task.attempts || 0) < maxAttempts) continue
           store.reportStage({
