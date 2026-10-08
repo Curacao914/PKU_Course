@@ -71,7 +71,7 @@ export function openLedger(databasePath = ':memory:', options = {}) {
     `),
     findByReplayKey: db.prepare('SELECT * FROM tasks WHERE replay_key = ?'),
     findLegacyMatch: db.prepare(`
-      SELECT id, replay_key, course_key, stage FROM tasks
+      SELECT id, replay_key, course_key, source_replay_key, stage FROM tasks
       WHERE owner_id = ? AND resource_class = ? AND course_name = ?
         AND title = ? AND starts_at_text = ? AND teacher = ?
       ORDER BY id
@@ -251,12 +251,14 @@ export function openLedger(databasePath = ':memory:', options = {}) {
             }
             if (matches.length === 1) {
               const legacy = matches[0]
-              statements.relinkExternalIdentity.run(sourceCourseKey, sourceReplayKey, courseName, title, startsAt, teacher, at, legacy.id)
-              statements.insertEvent.run(legacy.id, at, legacy.stage, '教学网标识变化，已关联到现有任务', JSON.stringify({
-                previousCourseKey: legacy.course_key, newCourseKey: sourceCourseKey
-              }))
+              if (legacy.course_key !== sourceCourseKey || legacy.source_replay_key !== sourceReplayKey) {
+                statements.relinkExternalIdentity.run(sourceCourseKey, sourceReplayKey, courseName, title, startsAt, teacher, at, legacy.id)
+                statements.insertEvent.run(legacy.id, at, legacy.stage, '教学网标识变化，已关联到现有任务', JSON.stringify({
+                  previousCourseKey: legacy.course_key, newCourseKey: sourceCourseKey
+                }))
+                relinked.push({ replayKey: legacy.replay_key, sourceReplayKey, courseName, title })
+              }
               existing += 1
-              relinked.push({ replayKey: legacy.replay_key, sourceReplayKey, courseName, title })
               continue
             }
           }
