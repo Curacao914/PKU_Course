@@ -468,11 +468,13 @@ export function createCommands(context) {
       }))
     )
     // 在账本重关联之前保留旧 courseKey 别名；控制面据此迁移用户的选课。
+    // OWNER 的任务 key 历来无账户前缀；OWNER 私有阅读的 ownerId 只用于发布鉴权。
+    const ledgerOwnerId = config.account?.resourceClass === 'member' ? (config.account?.ownerId || '') : ''
     const courseCatalog = result.courses.map(course => ({
       courseKey: course.courseKey,
       courseName: course.courseName,
       aliasKeys: withLedger(store => store.courseKeyAliases({
-        ownerId: config.account?.ownerId || '',
+        ownerId: ledgerOwnerId,
         resourceClass: config.account?.resourceClass || 'owner',
         courseName: course.courseName
       }))
@@ -480,7 +482,7 @@ export function createCommands(context) {
     const recorded = options.flags?.has('no-record')
       ? { inserted: 0, existing: 0, created: [] }
       : withLedger(store => store.discoverReplays(flattened, {
-          ownerId: config.account?.ownerId || '',
+          ownerId: ledgerOwnerId,
           priority: config.account?.priority ?? 100,
           resourceClass: config.account?.resourceClass || 'owner'
         }))
