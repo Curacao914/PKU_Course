@@ -101,3 +101,18 @@ test('ambiguous legacy course aliases are never remapped to a guessed course', a
   assert.deepEqual(next.selected, ['course-old'])
   assert.deepEqual(next.pending, ['course-old'])
 })
+
+test('single-course rediscovery uses stable key or unambiguous legacy alias', async () => {
+  const { resolveRequestedCourseKey } = await import('./jobs.mjs')
+  const catalog = [
+    { courseKey: 'stable-a', aliasKeys: ['old-a', 'rotated-a'] },
+    { courseKey: 'stable-b', aliasKeys: ['old-b'] }
+  ]
+  assert.deepEqual(resolveRequestedCourseKey('old-a', catalog), { key: 'stable-a', error: '' })
+  assert.deepEqual(resolveRequestedCourseKey('stable-b', catalog), { key: 'stable-b', error: '' })
+  assert.deepEqual(resolveRequestedCourseKey('', catalog), { key: '', error: '' })
+  assert.match(resolveRequestedCourseKey('expired-unknown', catalog).error, /重新扫描并选择课程/)
+  assert.match(resolveRequestedCourseKey('old-a', [
+    ...catalog, { courseKey: 'stable-c', aliasKeys: ['old-a'] }
+  ]).error, /多门课程/)
+})
