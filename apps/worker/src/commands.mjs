@@ -467,6 +467,16 @@ export function createCommands(context) {
         replayKey: recording.replayKey
       }))
     )
+    // 在账本重关联之前保留旧 courseKey 别名；控制面据此迁移用户的选课。
+    const courseCatalog = result.courses.map(course => ({
+      courseKey: course.courseKey,
+      courseName: course.courseName,
+      aliasKeys: withLedger(store => store.courseKeyAliases({
+        ownerId: config.account?.ownerId || '',
+        resourceClass: config.account?.resourceClass || 'owner',
+        courseName: course.courseName
+      }))
+    }))
     const recorded = options.flags?.has('no-record')
       ? { inserted: 0, existing: 0, created: [] }
       : withLedger(store => store.discoverReplays(flattened, {
@@ -511,6 +521,7 @@ export function createCommands(context) {
     emit({
       loginMode: result.loginMode,
       courses: result.courses.length,
+      courseCatalog,
       replays: flattened.length,
       recorded,
       missingMaterials: missingMaterials.map(item => `${item.courseName}·${item.title}`),
