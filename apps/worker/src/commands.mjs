@@ -3674,12 +3674,15 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
       } else {
         const store = openStore(config.ledgerPath)
         try {
-          const primary = injectedSender || createWechatSender({
-            openclawBin: config.notify.openclawBin,
-            openclawHome: config.notify.openclawHome,
-            openclawStateDir: config.notify.openclawStateDir,
-            target: config.notify.target
-          })
+          const primary = injectedSender || (config.notify.target
+            ? createWechatSender({
+              openclawBin: config.notify.openclawBin,
+              openclawHome: config.notify.openclawHome,
+              openclawStateDir: config.notify.openclawStateDir,
+              target: config.notify.target
+            })
+            : { send: async () => { throw new Error('没有配置微信主通道') },
+                probe: async () => ({ ok: false, detail: '未配置微信主通道' }) })
           const sender = injectedSender || createResilientSender({
             primary, fallback: fallback?.configured ? fallback : null,
             primaryUsable: async () => {
@@ -3687,7 +3690,7 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
                 stateDir: config.notify.openclawStateDir,
                 home: config.notify.openclawHome
               })
-              return !current.needed && current.ok
+              return Boolean(config.notify.target) && !current.needed && current.ok
             },
             onFallback: reason => stderr(`改用备用通道 ${fallbackConfig.kind}：${reason}`)
           })
