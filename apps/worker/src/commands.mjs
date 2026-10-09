@@ -393,17 +393,22 @@ export function createCommands(context) {
    * 所以用默认租约 + renewTaskLease（见 notes 的 saveState）。两种做法各有各的适用场景，
    * 不要为了统一把转写的租约也调小——那会让长转写被第二个 worker 抢走重跑，钱付两次。
    */
+  function assertTaskScope(task) {
+    const expectedClass = config.account?.resourceClass || 'owner'
+    const expectedOwner = expectedClass === 'member' ? (config.account?.ownerId || '') : ''
+    if (!task || task.resource_class !== expectedClass || task.owner_id !== expectedOwner) {
+      throw new Error('该任务不属于当前账户的任务作用域')
+    }
+    return task
+  }
+
   function claimForRun(store, replayKey, workerId, { leaseSeconds } = {}) {
     const existing = store.getTask(replayKey)
     if (!existing) {
       stderr(`账本中没有 ${replayKey}：本次按独立运行处理，不记录阶段。先跑 course discover 可登记回放。`)
       return null
     }
-    const expectedClass = config.account?.resourceClass || 'owner'
-    const expectedOwner = expectedClass === 'member' ? (config.account?.ownerId || '') : ''
-    if (existing.resource_class !== expectedClass || existing.owner_id !== expectedOwner) {
-      throw new Error('该任务不属于当前账户的任务作用域')
-    }
+    assertTaskScope(existing)
     const claim = store.claimTask({ replayKey, workerId, ...(leaseSeconds ? { leaseSeconds } : {}) })
     if (!claim.claimed) {
       throw new Error(`无法领取 ${replayKey}：${claim.reason}（当前阶段 ${claim.task?.stage}）`)
@@ -4542,6 +4547,7 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
     const explicit = options.options.stage || ''
     const current = withLedger(store => store.getTask(replayKey))
     if (!current) throw new Error(`账本里没有这个课次：${replayKey}`)
+    assertTaskScope(current)
     const stage = explicit || inferResumeStage(current)
     const task = withLedger(store => store.resetTask({ replayKey, stage }))
     stderr(`已重置 ${replayKey}：${current.stage} → ${task.stage}（按已有产物推断），失败计数归零，下一轮 cycle 会重新领取`)
@@ -4559,6 +4565,7 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
     const replayKey = requireOption(options.options, 'replay-key', 'refresh-note')
     const current = withLedger(store => store.getTask(replayKey))
     if (!current) throw new Error(`账本里没有这个课次：${replayKey}`)
+    assertTaskScope(current)
     const transcriptPath = String(current.artifacts?.transcriptPath || '')
     if (!transcriptPath || !fs.existsSync(transcriptPath)) {
       throw new Error('这节课还没有可用的转录稿，不能只更新笔记')
