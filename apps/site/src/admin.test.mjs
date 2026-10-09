@@ -1369,3 +1369,48 @@ test('OWNER admin run rejects retry and refresh-note for foreign or misclassifie
     }
   } finally { unchanged.close() }
 })
+
+test('dashboard renders status before slow optional requests and coalesces overlapping loads', async () => {
+  // Extract the exact inline browser loader to exercise async ordering without a browser.
+  const start = ADMIN_HTML.indexOf('var loadInFlight = null')
+  const end = ADMIN_HTML.indexOf('function isDirty () {', start)
+  assert.ok(start > 0 && end > start, 'dashboard loader should be present in the served HTML')
+  const source = ADMIN_HTML.slice(start, end)
+  const requests = []
+  const release = {}
+  const state = { status: null, content: null, config: null, account: null,
+    tab: 'overview', balance: {}, contentDraft: {}, configDraft: {} }
+  const counts = { render: 0, content: 0, settings: 0, runState: 0 }
+  const fetch = async url => {
+    requests.push(url)
+    if (url === '/api/admin/status') return { ok: true, json: async () => ({ ok: true, ledger: { tasks: [] } }) }
+    return new Promise(resolve => { release[url] = resolve })
+  }
+  const load = Function('fetch', 'state', 'render', 'renderRunState', 'renderContent',
+    'renderSettings', 'isDirty', 'refreshBalance', 'headers', 'card', 'esc',
+    '$', 'setRunState', 'window', source + '\nreturn load')(
+    fetch, state, () => { counts.render++ }, () => { counts.runState++ },
+    () => { counts.content++ }, () => { counts.settings++ }, () => false,
+    () => {}, () => ({}), value => value, String, () => ({}),
+    () => {}, { location: { assign() {} } }
+  )
+  const first = load()
+  const second = load({ quiet: true })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(counts.render, 1, 'status should populate the dashboard before slower requests finish')
+  assert.equal(state.status.ok, true)
+  assert.equal(requests.filter(url => url === '/api/admin/status').length, 1, 'interval refresh must not overlap')
+  assert.equal(requests.includes('/api/admin/content'), true)
+  assert.equal(requests.includes('/api/admin/config'), true)
+  assert.equal(requests.includes('/api/account/status'), true)
+  state.tab = 'content'
+  release['/api/admin/content']({ ok: true, json: async () => ({ ok: true, topics: { items: [] } }) })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(counts.content, 1, 'late content should update only its active panel')
+  assert.equal(counts.render, 1, 'late optional data must not redraw the whole dashboard')
+  release['/api/admin/config']({ ok: true, json: async () => ({ editable: {}, values: {} }) })
+  release['/api/account/status']({ ok: true, json: async () => ({ ok: true }) })
+  assert.deepEqual(await Promise.all([first, second]), [true, true])
+  assert.equal(state.account.ok, true)
+  assert.ok(state.config)
+})
