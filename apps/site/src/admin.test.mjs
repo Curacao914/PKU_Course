@@ -1313,3 +1313,27 @@ test('课件区与课次操作保持简洁，技术说明不回到前端', async
   assert.ok(!/settings:/.test(ADMIN_HTML), '设置区的折叠键已经删干净')
 })
 
+
+test('OWNER admin status excludes misclassified MEMBER rows sharing a lesson title', async () => {
+  const { handler, scratchRoot } = fixture()
+  const store = openLedger(path.join(scratchRoot, 'ledger.sqlite'))
+  try {
+    const memberId = '11111111-2222-4333-8444-555555555555'
+    store.discoverReplays([{
+      replay_key: 'replay-foreign-old', course_key: 'course-legacy-jvm',
+      course_name: '刑法分论', title: '第10-12节', resource_class: 'owner'
+    }], { ownerId: memberId, resourceClass: 'owner' })
+    store.discoverReplays([{
+      replay_key: 'replay-foreign-member', course_key: 'course-member',
+      course_name: '刑法分论', title: '第10-12节'
+    }], { ownerId: memberId, resourceClass: 'member' })
+    assert.equal(store.listTasks({ limit: 60 }).length, 3, '生产共享账本确实存在三行同名课次')
+  } finally { store.close() }
+  const { res, body } = await call(handler, { url: '/api/admin/status' })
+  assert.equal(res.state.status, 200)
+  assert.deepEqual(body.ledger.tasks.map(task => task.replayKey), ['replay-1'],
+    'OWNER 管理台不可展示其他账户或错标为 owner 的历史任务')
+  assert.deepEqual(body.ledger.stages, [{ stage: 'discovered', n: 1 }],
+    '课程计数也不能把共享账本中的成员行计入')
+  assert.equal(body.ledger.tasks.length, 1)
+})
