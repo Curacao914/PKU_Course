@@ -565,3 +565,17 @@ test('incomplete recording metadata is never used for identity reattachment', ()
   assert.equal(result.inserted, 1, '真正不同时间的回放仍可加入')
   db.close()
 })
+
+test('countTasks optionally scopes owner and resource class before aggregating', () => {
+  const db = ledger()
+  const member = '11111111-2222-4333-8444-555555555555'
+  db.discoverReplays([{ ...REPLAY, replay_key: 'owner-1' }])
+  db.discoverReplays([{ ...REPLAY, replay_key: 'foreign-legacy' }],
+    { ownerId: member, resourceClass: 'owner' })
+  db.discoverReplays([{ ...REPLAY, replay_key: 'member-1' }],
+    { ownerId: member, resourceClass: 'member' })
+  assert.deepEqual(db.countTasks(), [{ stage: 'discovered', n: 3 }])
+  assert.deepEqual(db.countTasks({ ownerId: '', resourceClass: 'owner' }), [{ stage: 'discovered', n: 1 }])
+  assert.deepEqual(db.countTasks({ ownerId: member, resourceClass: 'member' }), [{ stage: 'discovered', n: 1 }])
+  db.close()
+})
