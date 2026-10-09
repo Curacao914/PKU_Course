@@ -2665,15 +2665,16 @@ export function createAdminHandler({
         sendJson(res, 503, { ok: false, error: 'admin_token_unconfigured' })
         return true
       }
-      if (blocked(req)) {
-        sendJson(res, 429, { ok: false, error: 'too_many_attempts' })
-        return true
-      }
-
       const provided = String(req.headers['x-course-token'] || (req.headers.authorization || '').replace(/^Bearer\s+/i, '') || '')
       const byMasterToken = Boolean(activeToken) && provided === activeToken
       const byOwnerSession = session?.role === 'owner'
       if (!byMasterToken && !byOwnerSession) {
+        // 限制的是未授权的猜测，不是整个来源 IP：同一公网 IP 下的错误请求
+        // 不应让已经持有有效 OWNER 会话或内部主令牌的正常用户也收到 429。
+        if (blocked(req)) {
+          sendJson(res, 429, { ok: false, error: 'too_many_attempts' })
+          return true
+        }
         recordFailure(req)
         sendJson(res, 401, { ok: false, error: 'unauthorized' })
         return true
