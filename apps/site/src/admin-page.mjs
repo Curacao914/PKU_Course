@@ -242,7 +242,13 @@ async function load (options) {
     })())
     var hydration = Promise.all(extras)
     extrasInFlight = hydration
-    hydration.then(function () { if (extrasInFlight === hydration) extrasInFlight = null })
+    hydration.then(function () {
+      if (extrasInFlight === hydration) extrasInFlight = null
+    }, function (error) {
+      // 某个附属面板渲染失败也要释放批次，避免以后永远不再加载专题或账户。
+      if (extrasInFlight === hydration) extrasInFlight = null
+      console.warn('管理台附属资料刷新失败，可于下一轮重试', error)
+    })
     }
 
     var res = await fetch('/api/admin/status', { headers: headers(false) })
