@@ -1403,14 +1403,21 @@ test('dashboard renders status before slow optional requests and coalesces overl
   assert.equal(requests.includes('/api/admin/content'), true)
   assert.equal(requests.includes('/api/admin/config'), true)
   assert.equal(requests.includes('/api/account/status'), true)
+  assert.deepEqual(await Promise.all([first, second]), [true, true],
+    'slow optional requests must not hold the core status load open')
+  await load({ quiet: true })
+  assert.equal(requests.filter(url => url === '/api/admin/status').length, 2,
+    'polling must continue while optional requests are still pending')
+  assert.equal(requests.filter(url => url === '/api/admin/content').length, 1,
+    'pending content requests must be deduplicated')
   state.tab = 'content'
   release['/api/admin/content']({ ok: true, json: async () => ({ ok: true, topics: { items: [] } }) })
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(counts.content, 1, 'late content should update only its active panel')
-  assert.equal(counts.render, 1, 'late optional data must not redraw the whole dashboard')
+  assert.equal(counts.render, 2, 'late optional data must not redraw the whole dashboard')
   release['/api/admin/config']({ ok: true, json: async () => ({ editable: {}, values: {} }) })
   release['/api/account/status']({ ok: true, json: async () => ({ ok: true }) })
-  assert.deepEqual(await Promise.all([first, second]), [true, true])
+  await new Promise(resolve => setImmediate(resolve))
   assert.equal(state.account.ok, true)
   assert.ok(state.config)
 })
