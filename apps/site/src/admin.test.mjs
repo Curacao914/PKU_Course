@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHmac } from 'node:crypto'
 import { execFileSync, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -22,7 +23,7 @@ function pythonAvailable() {
   return spawnSync('python3', ['-c', 'import sys;print(sys.version)'], { encoding: 'utf8' }).status === 0
 }
 
-function fixture({ runCommand, spawnOcr, now } = {}) {
+function fixture({ runCommand, spawnOcr, now, ssoKey } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'course-admin-'))
   const scratchRoot = path.join(dir, 'scratch')
   fs.mkdirSync(scratchRoot, { recursive: true })
@@ -44,6 +45,7 @@ function fixture({ runCommand, spawnOcr, now } = {}) {
     workerPath: '/repo/apps/worker/bin/course.mjs',
     workerEnv: { COURSE_WORKER_SCRATCH_DIR: scratchRoot },
     spawnOcr,
+    ssoKey,
     // 时钟可注入：会话"多久没互动"要能用固定时间断言，不能跟着挂钟走
     ...(now ? { now } : {}),
     runCommand: runCommand || (async (args, options) => {
@@ -604,9 +606,52 @@ test('a wrong token is rejected and repeated failures are throttled', async () =
   const { res } = await call(handler, { url: '/api/admin/status' }, { token: 'wrong' })
   assert.equal(res.state.status, 429, '连续失败后应被限流')
 
-  // 正确令牌同样被限流（窗口期内的保护优先）
-  const blocked = await call(handler, { url: '/api/admin/status' }, { token: TOKEN })
-  assert.equal(blocked.res.state.status, 429)
+  // 即使一个 IP 曾有多次失败，持有合法凭据的请求仍须允许通过。
+  const authorized = await call(handler, { url: '/api/admin/status' }, { token: TOKEN })
+  assert.equal(authorized.res.state.status, 200)
+  const stillBlocked = await call(handler, { url: '/api/admin/status' }, { token: 'wrong' })
+  assert.equal(stillBlocked.res.state.status, 429, '合法请求不得替攻击者解除限流')
+})
+
+test('an authenticated OWNER session can load status after five unauthenticated requests from the same IP', async () => {
+  const ssoKey = 'test-secret-key-for-owner-cookie'
+  const now = () => Date.parse('2026-10-09T12:00:00.000Z')
+  const { handler } = fixture({ now, ssoKey })
+  const address = '198.51.100.42'
+  const issueTicket = payload => {
+    const body = Buffer.from(JSON.stringify(payload)).toString('base64url')
+    return body + '.' + createHmac('sha256', ssoKey)
+      .update('course-sso-v1.' + body).digest('base64url')
+  }
+  // 从同一个公网 IP 先生成合法 OWNER 会话 cookie。
+  const ticket = issueTicket({
+    v: 1, sub: '11111111-2222-4333-8444-555555555555', role: 'owner',
+    email: 'owner@example.com', next: '/admin',
+    exp: Math.floor(now() / 1000) + 300
+  })
+  const req = fakeRequest({ url: '/_auth/callback?token=' + encodeURIComponent(ticket),
+    headers: { 'cf-connecting-ip': address } })
+  const res = fakeResponse()
+  await handler.handle(req, res, '/_auth/callback', new URL(req.url, 'http://x'), { adminToken: TOKEN })
+  assert.equal(res.state.status, 302)
+  const cookie = res.state.headers['set-cookie'].split(';')[0]
+
+  for (let i = 0; i < 5; i++) {
+    const result = await call(handler, { url: '/api/admin/status',
+      headers: { 'cf-connecting-ip': address } }, { token: '' })
+    assert.equal(result.res.state.status, 401)
+  }
+  const attacker = await call(handler, { url: '/api/admin/status',
+    headers: { 'cf-connecting-ip': address } }, { token: '' })
+  assert.equal(attacker.res.state.status, 429)
+
+  const owner = await call(handler, { url: '/api/admin/status',
+    headers: { 'cf-connecting-ip': address, cookie } }, { token: '' })
+  assert.equal(owner.res.state.status, 200, '有效 OWNER 会话不应受其他未授权请求的 IP 锁定影响')
+  assert.equal(owner.body.ok, undefined, '此端点按现有 status 快照结构返回')
+  const blockedAgain = await call(handler, { url: '/api/admin/status',
+    headers: { 'cf-connecting-ip': address } }, { token: '' })
+  assert.equal(blockedAgain.res.state.status, 429, '同 IP 未授权客户端仍保持锁定')
 })
 
 test('status reports the ledger and site without leaking any secret', async () => {
