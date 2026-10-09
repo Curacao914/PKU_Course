@@ -1041,7 +1041,8 @@ function paneMeta (key) {
 
 function accountPane () {
   var data = state.account || {}
-  if (!data.ok) return '<h2>账户</h2><p class="small muted">账户服务暂不可用</p>'
+  if (!data.ok) return '<h2>账户</h2><p class="small muted">' +
+    (state.account ? '账户服务暂不可用' : '账户资料加载中…') + '</p>'
   var profile = data.profile || {}
   var credentials = data.credentials || {}
   var mcp = credentials.mcp || {}
