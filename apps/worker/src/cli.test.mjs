@@ -2633,3 +2633,21 @@ test('direct download cannot claim a misclassified MEMBER task from OWNER contex
   assert.equal(ledger.getTask(key).attempts, 0)
   ledger.close()
 })
+
+test('retry and refresh-note refuse to mutate tasks from a different account scope', async () => {
+  const { deps, ledger, errors } = harness()
+  const memberId = '11111111-2222-4333-8444-555555555555'
+  ledger.discoverReplays([{ replay_key: 'foreign-reset',
+    course_key: 'course-foreign', course_name: '跨账户任务',
+    title: '2026-09-28第5-6节' }], { ownerId: memberId, resourceClass: 'owner' })
+  const replayKey = memberId + '::foreign-reset'
+  for (const command of ['retry', 'refresh-note']) {
+    const result = await runCli([command, '--replay-key', replayKey], deps)
+    assert.equal(result, 1, command + ' must fail for foreign replay')
+    assert.match(errors.at(-1) || errors.join('\\n'), /该任务不属于当前账户的任务作用域/)
+  }
+  const task = ledger.getTask(replayKey)
+  assert.equal(task.stage, 'discovered')
+  assert.equal(task.attempts, 0)
+  ledger.close()
+})
