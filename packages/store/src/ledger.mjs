@@ -57,6 +57,8 @@ export function openLedger(databasePath = ':memory:', options = {}) {
                          stage, artifacts, runtime, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'discovered', ?, ?, ?, ?)
       ON CONFLICT (replay_key) DO UPDATE SET
+        course_key = excluded.course_key,
+        source_replay_key = excluded.source_replay_key,
         -- 空值只补不覆盖：一次只带了部分字段的重复登记，不得把已存的标题/教师清空
         course_name = COALESCE(NULLIF(excluded.course_name, ''), tasks.course_name),
         title = COALESCE(NULLIF(excluded.title, ''), tasks.title),
@@ -68,6 +70,27 @@ export function openLedger(databasePath = ':memory:', options = {}) {
         updated_at = excluded.updated_at
     `),
     findByReplayKey: db.prepare('SELECT * FROM tasks WHERE replay_key = ?'),
+    findLegacyMatch: db.prepare(`
+      SELECT id, replay_key, course_key, source_replay_key, stage FROM tasks
+      WHERE owner_id = ? AND resource_class = ? AND course_name = ?
+        AND title = ? AND starts_at_text = ? AND teacher = ?
+      ORDER BY id
+    `),
+    findSameTimeReplays: db.prepare(`
+      SELECT replay_key, title, teacher FROM tasks
+      WHERE owner_id = ? AND resource_class = ? AND course_name = ?
+        AND starts_at_text = ?
+      LIMIT 2
+    `),
+    relinkExternalIdentity: db.prepare(`
+      UPDATE tasks SET course_key = ?, source_replay_key = ?,
+        course_name = ?, title = ?, starts_at_text = ?, teacher = ?, updated_at = ?
+      WHERE id = ?
+    `),
+    legacyCourseKeys: db.prepare(`
+      SELECT DISTINCT course_key FROM tasks
+      WHERE owner_id = ? AND resource_class = ? AND course_name = ?
+    `),
     selectActionable: db.prepare(`
       SELECT * FROM tasks
       WHERE stage IN (SELECT value FROM json_each(?))
@@ -212,21 +235,49 @@ export function openLedger(databasePath = ':memory:', options = {}) {
         let existing = 0
         // 新增了哪几条也要报出来：发现新课要提醒用户上传课件，光有计数不够用。
         const created = []
+        const relinked = []
         for (const replay of replays) {
           const sourceReplayKey = String(replay.source_replay_key || replay.sourceReplayKey || replay.replay_key || replay.replayKey || '').trim()
           const sourceCourseKey = String(replay.course_key || replay.courseKey || '').trim()
           if (!sourceReplayKey || !sourceCourseKey) throw new Error('登记回放需要 replay_key 与 course_key')
           const replayKey = owner ? owner + '::' + sourceReplayKey : sourceReplayKey
           const courseKey = sourceCourseKey
+          const courseName = String(replay.course_name || replay.courseName || '')
+          const title = String(replay.title || '')
+          const startsAt = String(replay.starts_at_text || replay.startsAtText || '')
+          const teacher = String(replay.teacher || '')
           const before = statements.findByReplayKey.get(replayKey)
+          // 旧任务用易变的 launcher URL 作为 key。仅在同账户、同资源类、
+          // 完整课程名与录像三元组均一致且匹配唯一时，复用旧任务及全部产物。
+          // 不足以唯一识别的录像不做猜测，也不跨 OWNER/MEMBER 迁移。
+          if (!before && courseName && title && startsAt && teacher) {
+            const matches = statements.findLegacyMatch.all(owner, resourceClass, courseName, title, startsAt, teacher)
+            if (matches.length > 1) {
+              throw new Error(`课程回放身份存在歧义：${courseName} · ${title}，发现 ${matches.length} 条历史任务，已停止自动关联`)
+            }
+            if (matches.length === 1) {
+              const legacy = matches[0]
+              if (legacy.course_key !== sourceCourseKey || legacy.source_replay_key !== sourceReplayKey) {
+                statements.relinkExternalIdentity.run(sourceCourseKey, sourceReplayKey, courseName, title, startsAt, teacher, at, legacy.id)
+                statements.insertEvent.run(legacy.id, at, legacy.stage, '教学网标识变化，已关联到现有任务', JSON.stringify({
+                  previousCourseKey: legacy.course_key, newCourseKey: sourceCourseKey
+                }))
+                relinked.push({ replayKey: legacy.replay_key, sourceReplayKey, courseName, title })
+              }
+              existing += 1
+              continue
+            }
+          }
+          if (!before && courseName && startsAt && /^\d{4}-\d{2}-\d{2}/.test(startsAt)) {
+            const near = statements.findSameTimeReplays.all(owner, resourceClass, courseName, startsAt)
+            if (near.length) {
+              throw new Error(`已有同一课程同一开始时间的录像但标题或教师不同：${courseName} · ${startsAt}；需人工核对后关联，拒绝生成重复任务`)
+            }
+          }
           if (before) existing += 1
           else {
             inserted += 1
-            created.push({
-              replayKey,
-              courseName: String(replay.course_name || replay.courseName || ''),
-              title: String(replay.title || '')
-            })
+            created.push({ replayKey, courseName, title })
           }
           statements.insertTask.run(
             replayKey,
@@ -247,8 +298,14 @@ export function openLedger(databasePath = ':memory:', options = {}) {
             at
           )
         }
-        return { inserted, existing, created }
+        return { inserted, existing, created, ...(relinked.length ? { relinked } : {}) }
       })
+    },
+
+    courseKeyAliases({ ownerId = '', resourceClass = 'owner', courseName = '' } = {}) {
+      if (!courseName) return []
+      return statements.legacyCourseKeys.all(String(ownerId), String(resourceClass), String(courseName))
+        .map(row => row.course_key).filter(Boolean)
     },
 
     getTask(replayKey) {
@@ -504,8 +561,13 @@ export function openLedger(databasePath = ':memory:', options = {}) {
       return result.changes > 0
     },
 
-    countTasks() {
-      return db.prepare('SELECT stage, COUNT(*) AS n FROM tasks GROUP BY stage ORDER BY stage').all()
+    countTasks({ ownerId = null, resourceClass = null } = {}) {
+      return db.prepare(`
+        SELECT stage, COUNT(*) AS n FROM tasks
+        WHERE (? IS NULL OR owner_id = ?)
+          AND (? IS NULL OR resource_class = ?)
+        GROUP BY stage ORDER BY stage
+      `).all(ownerId, ownerId, resourceClass, resourceClass)
     },
 
     close() {

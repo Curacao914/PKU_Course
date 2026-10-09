@@ -12,7 +12,8 @@ import {
   normalizeRecordingRow,
   parseCourseLabel,
   replayKey,
-  semanticReplayIdentity
+  semanticReplayIdentity,
+  stableCourseIdentity
 } from './platform-core.mjs'
 
 test('normalizeCourseName strips term suffix, prefix and extra spaces', () => {
@@ -31,6 +32,17 @@ test('parseCourseLabel splits platform code, name and term', () => {
   assert.equal(parsed.name, '国际法学')
   assert.equal(parsed.term, '2025-2026学年第1学期')
   assert.equal(parsed.normalizedName, '国际法学')
+})
+
+test('Blackboard JVM identity rotation does not rotate course or replay keys', () => {
+  const first = 'PkId{key=_102638_1, dataType=blackboard.data.course.Course, container=blackboard.persist.DatabaseContainer@33c441c6}'
+  const second = first.replace('@33c441c6', '@78ab7b9e')
+  assert.equal(stableCourseIdentity(first), '_102638_1')
+  assert.equal(stableCourseIdentity(second), '_102638_1')
+  assert.equal(courseKey(stableCourseIdentity(first)), courseKey(stableCourseIdentity(second)))
+  const recording = { title: '2026-09-28第5-6节', startsAtText: '2026-09-28 13:00:00', teacher: '王华伟' }
+  assert.equal(replayKey(stableCourseIdentity(first), recording), replayKey(stableCourseIdentity(second), recording))
+  assert.throws(() => stableCourseIdentity('PkId{container=broken}'), /无法识别/)
 })
 
 test('courseKey and replayKey are stable and non-reversible', () => {

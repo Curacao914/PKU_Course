@@ -393,12 +393,22 @@ export function createCommands(context) {
    * 所以用默认租约 + renewTaskLease（见 notes 的 saveState）。两种做法各有各的适用场景，
    * 不要为了统一把转写的租约也调小——那会让长转写被第二个 worker 抢走重跑，钱付两次。
    */
+  function assertTaskScope(task) {
+    const expectedClass = config.account?.resourceClass || 'owner'
+    const expectedOwner = expectedClass === 'member' ? (config.account?.ownerId || '') : ''
+    if (!task || task.resource_class !== expectedClass || task.owner_id !== expectedOwner) {
+      throw new Error('该任务不属于当前账户的任务作用域')
+    }
+    return task
+  }
+
   function claimForRun(store, replayKey, workerId, { leaseSeconds } = {}) {
     const existing = store.getTask(replayKey)
     if (!existing) {
       stderr(`账本中没有 ${replayKey}：本次按独立运行处理，不记录阶段。先跑 course discover 可登记回放。`)
       return null
     }
+    assertTaskScope(existing)
     const claim = store.claimTask({ replayKey, workerId, ...(leaseSeconds ? { leaseSeconds } : {}) })
     if (!claim.claimed) {
       throw new Error(`无法领取 ${replayKey}：${claim.reason}（当前阶段 ${claim.task?.stage}）`)
@@ -467,10 +477,22 @@ export function createCommands(context) {
         replayKey: recording.replayKey
       }))
     )
+    // 在账本重关联之前保留旧 courseKey 别名；控制面据此迁移用户的选课。
+    // OWNER 的任务 key 历来无账户前缀；OWNER 私有阅读的 ownerId 只用于发布鉴权。
+    const ledgerOwnerId = config.account?.resourceClass === 'member' ? (config.account?.ownerId || '') : ''
+    const courseCatalog = result.courses.map(course => ({
+      courseKey: course.courseKey,
+      courseName: course.courseName,
+      aliasKeys: withLedger(store => store.courseKeyAliases({
+        ownerId: ledgerOwnerId,
+        resourceClass: config.account?.resourceClass || 'owner',
+        courseName: course.courseName
+      }))
+    }))
     const recorded = options.flags?.has('no-record')
       ? { inserted: 0, existing: 0, created: [] }
       : withLedger(store => store.discoverReplays(flattened, {
-          ownerId: config.account?.ownerId || '',
+          ownerId: ledgerOwnerId,
           priority: config.account?.priority ?? 100,
           resourceClass: config.account?.resourceClass || 'owner'
         }))
@@ -511,6 +533,7 @@ export function createCommands(context) {
     emit({
       loginMode: result.loginMode,
       courses: result.courses.length,
+      courseCatalog,
       replays: flattened.length,
       recorded,
       missingMaterials: missingMaterials.map(item => `${item.courseName}·${item.title}`),
@@ -3232,7 +3255,7 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
       stderr(`备用通道 ${fallback.kind} 缺地址或密钥，本次不使用`)
     }
 
-    const sender = createResilientSender({
+    const sender = injectedSender || createResilientSender({
       primary,
       fallback: fallback && fallback.configured ? fallback : null,
       primaryUsable: async () => {
@@ -3330,6 +3353,12 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
     const memberSelectedCourseKeys = config.account?.resourceClass === 'member'
       ? new Set(config.account?.selectedCourseKeys || [])
       : null
+    // 旧的临时手工脚本曾插入 owner_id 非空、resource_class=owner 的错误记录。
+    // OWNER 的真实账本作用域始终是 owner_id=''，必须两列同时筛选。
+    const ledgerOwnerId = config.account?.resourceClass === 'member'
+      ? (config.account?.ownerId || '')
+      : ''
+    const ledgerClass = config.account?.resourceClass || 'owner'
 
     // 转录通道是否因付费/凭据问题停摆：用它拦住后续下载（转录本身仍会重试）。
     // 转录跑不动时继续下载只会把盘塞满，而盘满影响的是整机。
@@ -3337,8 +3366,8 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
       const store = openStore(config.ledgerPath)
       try {
         const blocked = store.listTasks({
-          ownerId: config.account?.resourceClass === 'member' ? (config.account?.ownerId || null) : null,
-          resourceClass: config.account?.resourceClass || 'owner',
+          ownerId: ledgerOwnerId,
+          resourceClass: ledgerClass,
           limit: 200
         }).filter(task => !memberSelectedCourseKeys || memberSelectedCourseKeys.has(task.course_key))
           .filter(task => task.last_error && ['downloaded', 'transcribing', 'transcript_ready'].includes(task.stage))
@@ -3418,6 +3447,12 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
       let task = null
       try {
         if (onlyReplay) {
+          const selected = store.getTask(onlyReplay)
+          if (selected && (selected.owner_id !== ledgerOwnerId || selected.resource_class !== ledgerClass)) {
+            summary.tasks.push({ replayKey: onlyReplay, stage: 'unknown',
+              action: 'skip', ok: false, error: '该任务不属于当前账户的任务作用域' })
+            break
+          }
           const claimed = store.claimTask({ replayKey: onlyReplay, workerId, leaseSeconds: 3600 })
           task = claimed.claimed ? claimed.task : null
           if (!claimed.claimed) {
@@ -3435,8 +3470,8 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
           }
         } else {
           const candidate = nextActionableTask(store, {
-            ownerId: config.account?.resourceClass === 'member' ? (config.account?.ownerId || null) : null,
-            resourceClass: config.account?.resourceClass || 'owner',
+            ownerId: ledgerOwnerId,
+            resourceClass: ledgerClass,
             courseKeys: memberSelectedCourseKeys,
             exclude: new Set(skippedNoMaterials.map(item => item.replayKey))
           })
@@ -3649,23 +3684,48 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
     summary.wechat = wechat
 
     try {
-      const store = openStore(config.ledgerPath)
-      try {
-        const sender = injectedSender || createWechatSender({
-          openclawBin: config.notify.openclawBin,
-          openclawHome: config.notify.openclawHome,
-          openclawStateDir: config.notify.openclawStateDir,
-          target: config.notify.target
-        })
-        const delivered = await runDeliveryCycle({
-          store, sender,
-          publicSiteUrl: config.notify.publicUrl,
-          maxAttempts: config.notify.maxAttempts,
-          workerId: `${workerId}:notify`
-        })
-        summary.notification = { sent: delivered.sent, retried: delivered.retried, failed: delivered.failed }
-      } finally {
-        store.close()
+      const fallbackConfig = config.notify.fallback || {}
+      const fallback = fallbackConfig.kind ? createFallbackSender({
+        kind: fallbackConfig.kind, url: fallbackConfig.url,
+        sendKey: fallbackConfig.key, token: fallbackConfig.key
+      }) : null
+      // 失效且没有备用通道时保留 pending，不能让 OpenClaw 假回执把它标为 sent，
+      // 也不能消耗最大重试次数。等会话恢复后下一轮再发。
+      if (!injectedSender && wechat.needed && !fallback?.configured) {
+        summary.notification = { sent: 0, retried: 0, failed: 0, blocked: 'wechat_session_unavailable' }
+      } else {
+        const store = openStore(config.ledgerPath)
+        try {
+          const primary = injectedSender || (config.notify.target
+            ? createWechatSender({
+              openclawBin: config.notify.openclawBin,
+              openclawHome: config.notify.openclawHome,
+              openclawStateDir: config.notify.openclawStateDir,
+              target: config.notify.target
+            })
+            : { send: async () => { throw new Error('没有配置微信主通道') },
+                probe: async () => ({ ok: false, detail: '未配置微信主通道' }) })
+          const sender = injectedSender || createResilientSender({
+            primary, fallback: fallback?.configured ? fallback : null,
+            primaryUsable: async () => {
+              const current = checkWechatActivation({
+                stateDir: config.notify.openclawStateDir,
+                home: config.notify.openclawHome
+              })
+              return Boolean(config.notify.target) && !current.needed && current.ok
+            },
+            onFallback: reason => stderr(`改用备用通道 ${fallbackConfig.kind}：${reason}`)
+          })
+          const delivered = await runDeliveryCycle({
+            store, sender,
+            publicSiteUrl: config.notify.publicUrl,
+            maxAttempts: config.notify.maxAttempts,
+            workerId: `${workerId}:notify`
+          })
+          summary.notification = { sent: delivered.sent, retried: delivered.retried, failed: delivered.failed }
+        } finally {
+          store.close()
+        }
       }
     } catch (error) {
       summary.errors.push({ step: 'notify', message: error instanceof Error ? error.message : String(error) })
@@ -3679,7 +3739,9 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
       const store = openStore(config.ledgerPath)
       try {
         const maxAttempts = Number(options.options['max-attempts'] || 5)
-        for (const task of store.listTasks({ limit: 200 })) {
+        for (const task of store.listTasks({
+          ownerId: ledgerOwnerId, resourceClass: ledgerClass, limit: 200
+        })) {
           if (['published', 'completed', 'needs_attention'].includes(task.stage)) continue
           if (Number(task.attempts || 0) < maxAttempts) continue
           store.reportStage({
@@ -4485,6 +4547,7 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
     const explicit = options.options.stage || ''
     const current = withLedger(store => store.getTask(replayKey))
     if (!current) throw new Error(`账本里没有这个课次：${replayKey}`)
+    assertTaskScope(current)
     const stage = explicit || inferResumeStage(current)
     const task = withLedger(store => store.resetTask({ replayKey, stage }))
     stderr(`已重置 ${replayKey}：${current.stage} → ${task.stage}（按已有产物推断），失败计数归零，下一轮 cycle 会重新领取`)
@@ -4502,6 +4565,7 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
     const replayKey = requireOption(options.options, 'replay-key', 'refresh-note')
     const current = withLedger(store => store.getTask(replayKey))
     if (!current) throw new Error(`账本里没有这个课次：${replayKey}`)
+    assertTaskScope(current)
     const transcriptPath = String(current.artifacts?.transcriptPath || '')
     if (!transcriptPath || !fs.existsSync(transcriptPath)) {
       throw new Error('这节课还没有可用的转录稿，不能只更新笔记')

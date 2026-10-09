@@ -1642,7 +1642,11 @@ export function createAdminHandler({
     try {
       const store = openLedger(path.resolve(scratchRoot, 'ledger.sqlite'))
       try {
-        const rawTasks = store.listTasks({ limit: 60 })
+        // OWNER 管理台只展示 owner_id='' 且 resource_class='owner' 的任务。
+        // 历史人工扫描曾产生 owner_id 非空、resource_class='owner' 的成员数据；
+        // 共享账本不能直接全表投影，否则同一课次会在 UI 中出现两份。
+        const ownerScope = { ownerId: '', resourceClass: 'owner' }
+        const rawTasks = store.listTasks({ ...ownerScope, limit: 60 })
         const tasks = rawTasks.map(task => {
           const artifacts = task.artifacts || {}
           const lesson = readLessonState(task)
@@ -1695,7 +1699,7 @@ export function createAdminHandler({
         }), { asrCny: 0, notesCny: 0, totalCny: 0 })
         status.ledger = {
           path: store.path,
-          stages: store.countTasks(),
+          stages: store.countTasks(ownerScope),
           tasks,
           deliveries: store.listDeliveries({ limit: 30 }),
           deliveriesByStatus: store.countDeliveries()
@@ -2247,6 +2251,28 @@ export function createAdminHandler({
       } catch (error) {
         sendJson(res, 400, { ok: false, error: 'bad_arguments', message: error instanceof Error ? error.message : String(error) })
         return true
+      }
+
+      // OWNER 管理台与成员共用底层 SQLite。单凭管理员令牌不得按已知
+      // replayKey 重置或重写任何其他账户的任务；先验证作用域再加入异步队列。
+      if (action === 'retry' || action === 'refresh-note') {
+        let inOwnerScope = false
+        try {
+          const store = openLedger(path.resolve(scratchRoot, 'ledger.sqlite'))
+          try {
+            const task = store.getTask(String(payload.replayKey || ''))
+            inOwnerScope = Boolean(task && task.owner_id === '' && task.resource_class === 'owner')
+          } finally { store.close() }
+        } catch (error) {
+          sendJson(res, 500, { ok: false, error: 'ledger_unavailable',
+            message: '暂时无法校验任务归属，已拒绝执行' })
+          return true
+        }
+        if (!inOwnerScope) {
+          sendJson(res, 404, { ok: false, error: 'task_not_found',
+            message: '该课次不属于当前管理空间，或任务不存在' })
+          return true
+        }
       }
 
       const job = enqueueJob(action, args, payload)

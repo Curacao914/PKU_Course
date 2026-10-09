@@ -32,7 +32,8 @@ export {
   normalizeRecordingRow,
   parseCourseLabel,
   replayKey,
-  semanticReplayIdentity
+  semanticReplayIdentity,
+  stableCourseIdentity
 } from './platform-core.mjs'
 
 export {

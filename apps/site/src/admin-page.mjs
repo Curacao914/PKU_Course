@@ -210,41 +210,67 @@ function taskByKey (key) {
 function tasks () { return (state.status && state.status.ledger && state.status.ledger.tasks) || [] }
 function tagsOf () { return (state.status && state.status.tags) || { order: [], courses: {}, lessons: {} } }
 
+// 单次只运行一轮快照刷新，避免五秒轮询与手动刷新重叠、旧响应覆盖新状态。
+var loadInFlight = null
+var extrasInFlight = null
 async function load (options) {
+  if (loadInFlight) return loadInFlight
   options = options || {}
-  var res = await fetch('/api/admin/status', { headers: headers(false) })
-  var data = await res.json().catch(function () { return {} })
-  if (!res.ok) {
-    if (res.status === 401) {
-      window.location.assign('/')
+  var pending = (async function () {
+    // 非核心请求共享同一批次：慢接口不能阻塞首屏，也不能阻塞后续五秒状态刷新。
+    if (!extrasInFlight) {
+    var extras = [
+      (async function () {
+        try {
+          var res = await fetch('/api/admin/content', { headers: headers(false) })
+          var data = await res.json().catch(function () { return {} })
+          state.content = res.ok ? data : { ok: false, error: data.error || 'content_state_failed' }
+        } catch (e) { state.content = { ok: false, error: String(e) } }
+        if (state.status && state.tab === 'content' && !isDirty()) renderContent()
+      })()
+    ]
+    if (!state.config) extras.push((async function () {
+      try { state.config = await (await fetch('/api/admin/config', { headers: headers(false) })).json() } catch (e) {}
+      if (state.status && state.tab === 'settings' && !isDirty()) renderSettings()
+    })())
+    if (!state.account) extras.push((async function () {
+      try {
+        var res = await fetch('/api/account/status', { headers: headers(false) })
+        state.account = res.ok ? await res.json() : { ok: false }
+      } catch (e) { state.account = { ok: false } }
+      if (state.status && state.tab === 'settings' && !isDirty()) renderSettings()
+    })())
+    var hydration = Promise.all(extras)
+    extrasInFlight = hydration
+    hydration.then(function () {
+      if (extrasInFlight === hydration) extrasInFlight = null
+    }, function (error) {
+      // 某个附属面板渲染失败也要释放批次，避免以后永远不再加载专题或账户。
+      if (extrasInFlight === hydration) extrasInFlight = null
+      console.warn('管理台附属资料刷新失败，可于下一轮重试', error)
+    })
+    }
+
+    var res = await fetch('/api/admin/status', { headers: headers(false) })
+    var data = await res.json().catch(function () { return {} })
+    if (!res.ok) {
+      if (res.status === 401) { window.location.assign('/'); return false }
+      var reason = data.error === 'too_many_attempts' ? '操作过于频繁，请稍后重试' : '课程服务暂不可用'
+      $('tab-overview').innerHTML = card('<h2>暂时无法加载</h2><p class="muted">' + esc(reason) + '</p>')
+      setRunState('暂不可用', 'bad')
       return false
     }
-    var reason = data.error === 'too_many_attempts' ? '操作过于频繁，请稍后重试' : '课程服务暂不可用'
-    $('tab-overview').innerHTML = card('<h2>暂时无法加载</h2><p class="muted">' + esc(reason) + '</p>')
-    setRunState('暂不可用', 'bad')
-    return false
-  }
-  state.status = data
-  try {
-    var contentRes = await fetch('/api/admin/content', { headers: headers(false) })
-    var contentData = await contentRes.json().catch(function () { return {} })
-    state.content = contentRes.ok ? contentData : { ok: false, error: contentData.error || 'content_state_failed' }
-  } catch (e) {
-    state.content = { ok: false, error: String(e) }
-  }
-  if (!state.config) {
-    try { state.config = await (await fetch('/api/admin/config', { headers: headers(false) })).json() } catch (e) {}
-  }
-  if (!state.account) {
-    try {
-      var accountRes = await fetch('/api/account/status', { headers: headers(false) })
-      state.account = accountRes.ok ? await accountRes.json() : { ok: false }
-    } catch (e) { state.account = { ok: false } }
-  }
-  if (options.quiet && isDirty()) { renderRunState(); return true }
-  render()
-  if (!state.balance && !options.quiet) refreshBalance()
-  return true
+    state.status = data
+    // 此时就让页面显示出来。专题、设置、账户资料可在用户阅读课程时陆续补齐。
+    if (options.quiet && isDirty()) renderRunState()
+    else {
+      render()
+      if (!state.balance && !options.quiet) refreshBalance()
+    }
+    return true
+  })()
+  loadInFlight = pending
+  try { return await pending } finally { if (loadInFlight === pending) loadInFlight = null }
 }
 function isDirty () {
   var active = document.activeElement
@@ -888,7 +914,8 @@ function renderContent () {
   if (!box) return
   var data = state.content || {}
   if (!data.ok) {
-    box.innerHTML = card('<h2>专题整合</h2><p class="muted">暂时读不到专题状态：' + esc(data.error || '尚未加载') + '</p>')
+    box.innerHTML = card('<h2>专题整合</h2><p class="muted">' +
+      (state.content ? ('暂时读不到专题状态：' + esc(data.error || '读取失败')) : '专题资料加载中…') + '</p>')
     return
   }
 
@@ -1020,7 +1047,8 @@ function paneMeta (key) {
 
 function accountPane () {
   var data = state.account || {}
-  if (!data.ok) return '<h2>账户</h2><p class="small muted">账户服务暂不可用</p>'
+  if (!data.ok) return '<h2>账户</h2><p class="small muted">' +
+    (state.account ? '账户服务暂不可用' : '账户资料加载中…') + '</p>'
   var profile = data.profile || {}
   var credentials = data.credentials || {}
   var mcp = credentials.mcp || {}

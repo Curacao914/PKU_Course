@@ -69,3 +69,50 @@ test('real ledger OWNER lease blocks MEMBER admission', async()=>{
     assert.equal(ownerHasActiveLease({COURSE_LEDGER_PATH:file}),false)
   } finally {ledger.close();fs.rmSync(root,{recursive:true,force:true})}
 })
+
+test('stable course catalog remaps selections through old MEMBER ledger keys', async () => {
+  const { reconcileScannedCourseSelection } = await import('./store.mjs')
+  const old = { scanned_course_keys: ['course-jvm-old'], selected_course_keys: ['course-jvm-old'] }
+  const catalog = [{ courseKey: 'course-pk-stable', courseName: '刑事执行法',
+    aliasKeys: ['course-jvm-old', 'course-current-jvm'] }]
+  assert.deepEqual(reconcileScannedCourseSelection(old, catalog), {
+    scanned: ['course-pk-stable'], selected: ['course-pk-stable'], pending: []
+  })
+})
+
+test('incomplete scans retain unmatched selected courses for manual reconciliation', async () => {
+  const { reconcileScannedCourseSelection } = await import('./store.mjs')
+  const old = { scanned_course_keys: ['course-old-1', 'course-old-2'],
+    selected_course_keys: ['course-old-1', 'course-old-2'] }
+  const next = reconcileScannedCourseSelection(old, [
+    { courseKey: 'course-stable-1', aliasKeys: ['course-old-1'] }
+  ])
+  assert.deepEqual(next.selected, ['course-stable-1', 'course-old-2'])
+  assert.deepEqual(next.pending, ['course-old-2'])
+})
+
+test('ambiguous legacy course aliases are never remapped to a guessed course', async () => {
+  const { reconcileScannedCourseSelection } = await import('./store.mjs')
+  const next = reconcileScannedCourseSelection(
+    { scanned_course_keys: ['course-old'], selected_course_keys: ['course-old'] },
+    [{ courseKey: 'course-a', aliasKeys: ['course-old'] },
+      { courseKey: 'course-b', aliasKeys: ['course-old'] }]
+  )
+  assert.deepEqual(next.selected, ['course-old'])
+  assert.deepEqual(next.pending, ['course-old'])
+})
+
+test('single-course rediscovery uses stable key or unambiguous legacy alias', async () => {
+  const { resolveRequestedCourseKey } = await import('./jobs.mjs')
+  const catalog = [
+    { courseKey: 'stable-a', aliasKeys: ['old-a', 'rotated-a'] },
+    { courseKey: 'stable-b', aliasKeys: ['old-b'] }
+  ]
+  assert.deepEqual(resolveRequestedCourseKey('old-a', catalog), { key: 'stable-a', error: '' })
+  assert.deepEqual(resolveRequestedCourseKey('stable-b', catalog), { key: 'stable-b', error: '' })
+  assert.deepEqual(resolveRequestedCourseKey('', catalog), { key: '', error: '' })
+  assert.match(resolveRequestedCourseKey('expired-unknown', catalog).error, /重新扫描并选择课程/)
+  assert.match(resolveRequestedCourseKey('old-a', [
+    ...catalog, { courseKey: 'stable-c', aliasKeys: ['old-a'] }
+  ]).error, /多门课程/)
+})

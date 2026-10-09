@@ -14,6 +14,7 @@ import {
   normalizeRecordingRow,
   parseCourseLabel,
   replayKey,
+  stableCourseIdentity,
   assertNoSecrets
 } from './platform-core.mjs'
 import { chooseLoginControls } from './login-core.mjs'
@@ -334,7 +335,7 @@ async function extractCourses(page) {
   return chooseCurrentCourses(raw.filter(item => item.text).map(item => {
     const label = parseCourseLabel(item.text)
     const url = new URL(item.href)
-    const identity = url.searchParams.get('id') || url.searchParams.get('course_id') || url.pathname + url.search
+    const identity = stableCourseIdentity(url.searchParams.get('id') || url.searchParams.get('course_id') || url.pathname + url.search)
     return { ...label, section: item.section, href: item.href, identity, courseKey: courseKey(identity) }
   }))
 }

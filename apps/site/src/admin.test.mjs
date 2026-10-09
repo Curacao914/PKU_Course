@@ -1313,3 +1313,154 @@ test('课件区与课次操作保持简洁，技术说明不回到前端', async
   assert.ok(!/settings:/.test(ADMIN_HTML), '设置区的折叠键已经删干净')
 })
 
+
+test('OWNER admin status excludes misclassified MEMBER rows sharing a lesson title', async () => {
+  const { handler, scratchRoot } = fixture()
+  const store = openLedger(path.join(scratchRoot, 'ledger.sqlite'))
+  try {
+    const memberId = '11111111-2222-4333-8444-555555555555'
+    store.discoverReplays([{
+      replay_key: 'replay-foreign-old', course_key: 'course-legacy-jvm',
+      course_name: '刑法分论', title: '第10-12节', resource_class: 'owner'
+    }], { ownerId: memberId, resourceClass: 'owner' })
+    store.discoverReplays([{
+      replay_key: 'replay-foreign-member', course_key: 'course-member',
+      course_name: '刑法分论', title: '第10-12节'
+    }], { ownerId: memberId, resourceClass: 'member' })
+    assert.equal(store.listTasks({ limit: 60 }).length, 3, '生产共享账本确实存在三行同名课次')
+  } finally { store.close() }
+  const { res, body } = await call(handler, { url: '/api/admin/status' })
+  assert.equal(res.state.status, 200)
+  assert.deepEqual(body.ledger.tasks.map(task => task.replayKey), ['replay-1'],
+    'OWNER 管理台不可展示其他账户或错标为 owner 的历史任务')
+  assert.deepEqual(body.ledger.stages, [{ stage: 'discovered', n: 1 }],
+    '课程计数也不能把共享账本中的成员行计入')
+  assert.equal(body.ledger.tasks.length, 1)
+})
+
+test('OWNER admin run rejects retry and refresh-note for foreign or misclassified tasks', async () => {
+  const { handler, scratchRoot } = fixture()
+  const memberId = '11111111-2222-4333-8444-555555555555'
+  const store = openLedger(path.join(scratchRoot, 'ledger.sqlite'))
+  const legacyKey = memberId + '::replay-misclassified'
+  const memberKey = memberId + '::replay-member'
+  try {
+    store.discoverReplays([{ replay_key: 'replay-misclassified', course_key: 'course-old',
+      course_name: '刑法分论', title: '第10-12节' }], { ownerId: memberId, resourceClass: 'owner' })
+    store.discoverReplays([{ replay_key: 'replay-member', course_key: 'course-current',
+      course_name: '刑法分论', title: '第10-12节' }], { ownerId: memberId, resourceClass: 'member' })
+  } finally { store.close() }
+  for (const replayKey of [legacyKey, memberKey, 'replay-not-exists']) {
+    for (const action of ['retry', 'refresh-note']) {
+      const result = await call(handler, { method: 'POST', url: '/api/admin/run',
+        body: JSON.stringify({ action, replayKey }) })
+      assert.equal(result.res.state.status, 404, action + ' cannot queue ' + replayKey)
+      assert.equal(result.body.error, 'task_not_found')
+    }
+  }
+  const owner = await call(handler, { method: 'POST', url: '/api/admin/run',
+    body: JSON.stringify({ action: 'retry', replayKey: 'replay-1' }) })
+  assert.equal(owner.res.state.status, 202, 'valid OWNER retry must still be accepted')
+  const unchanged = openLedger(path.join(scratchRoot, 'ledger.sqlite'))
+  try {
+    for (const key of [legacyKey, memberKey]) {
+      assert.equal(unchanged.getTask(key).attempts, 0, 'foreign task must not be claimed')
+      assert.equal(unchanged.getTask(key).stage, 'discovered', 'foreign stage must not change')
+    }
+  } finally { unchanged.close() }
+})
+
+test('dashboard renders status before slow optional requests and coalesces overlapping loads', async () => {
+  // Extract the exact inline browser loader to exercise async ordering without a browser.
+  const start = ADMIN_HTML.indexOf('var loadInFlight = null')
+  const end = ADMIN_HTML.indexOf('function isDirty () {', start)
+  assert.ok(start > 0 && end > start, 'dashboard loader should be present in the served HTML')
+  const source = ADMIN_HTML.slice(start, end)
+  const requests = []
+  const release = {}
+  const state = { status: null, content: null, config: null, account: null,
+    tab: 'overview', balance: {}, contentDraft: {}, configDraft: {} }
+  const counts = { render: 0, content: 0, settings: 0, runState: 0 }
+  const fetch = async url => {
+    requests.push(url)
+    if (url === '/api/admin/status') return { ok: true, json: async () => ({ ok: true, ledger: { tasks: [] } }) }
+    return new Promise(resolve => { release[url] = resolve })
+  }
+  const load = Function('fetch', 'state', 'render', 'renderRunState', 'renderContent',
+    'renderSettings', 'isDirty', 'refreshBalance', 'headers', 'card', 'esc',
+    '$', 'setRunState', 'window', source + '\nreturn load')(
+    fetch, state, () => { counts.render++ }, () => { counts.runState++ },
+    () => { counts.content++ }, () => { counts.settings++ }, () => false,
+    () => {}, () => ({}), value => value, String, () => ({}),
+    () => {}, { location: { assign() {} } }
+  )
+  const first = load()
+  const second = load({ quiet: true })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(counts.render, 1, 'status should populate the dashboard before slower requests finish')
+  assert.equal(state.status.ok, true)
+  assert.equal(requests.filter(url => url === '/api/admin/status').length, 1, 'interval refresh must not overlap')
+  assert.equal(requests.includes('/api/admin/content'), true)
+  assert.equal(requests.includes('/api/admin/config'), true)
+  assert.equal(requests.includes('/api/account/status'), true)
+  assert.deepEqual(await Promise.all([first, second]), [true, true],
+    'slow optional requests must not hold the core status load open')
+  await load({ quiet: true })
+  assert.equal(requests.filter(url => url === '/api/admin/status').length, 2,
+    'polling must continue while optional requests are still pending')
+  assert.equal(requests.filter(url => url === '/api/admin/content').length, 1,
+    'pending content requests must be deduplicated')
+  state.tab = 'content'
+  release['/api/admin/content']({ ok: true, json: async () => ({ ok: true, topics: { items: [] } }) })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(counts.content, 1, 'late content should update only its active panel')
+  assert.equal(counts.render, 2, 'late optional data must not redraw the whole dashboard')
+  release['/api/admin/config']({ ok: true, json: async () => ({ editable: {}, values: {} }) })
+  release['/api/account/status']({ ok: true, json: async () => ({ ok: true }) })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(state.account.ok, true)
+  assert.ok(state.config)
+})
+
+test('auxiliary render exception does not strand loader or stop future content refresh', async () => {
+  const start = ADMIN_HTML.indexOf('var loadInFlight = null')
+  const end = ADMIN_HTML.indexOf('function isDirty () {', start)
+  assert.ok(start > 0 && end > start)
+  const source = ADMIN_HTML.slice(start, end)
+  const warnings = []
+  let contentRequests = 0
+  let contentRenderAttempts = 0
+  const state = { status: { ok: true }, content: null, config: null, account: null,
+    tab: 'content', balance: {}, contentDraft: {}, configDraft: {} }
+  const fetch = async url => {
+    if (url === '/api/admin/content') {
+      contentRequests++
+      return { ok: true, json: async () => ({ ok: true, topics: { items: [] } }) }
+    }
+    if (url === '/api/admin/status') return { ok: true, json: async () => ({ ok: true }) }
+    return { ok: true, json: async () => ({ ok: true }) }
+  }
+  const load = Function('fetch', 'state', 'render', 'renderRunState', 'renderContent',
+    'renderSettings', 'isDirty', 'refreshBalance', 'headers', 'card', 'esc',
+    '$', 'setRunState', 'window', 'console', source + '\nreturn load')(
+    fetch, state, () => {}, () => {},
+    () => {
+      contentRenderAttempts++
+      if (contentRenderAttempts === 1) throw new Error('injected panel render failure')
+    },
+    () => {}, () => false, () => {}, () => ({}), value => value,
+    String, () => ({}), () => {}, { location: { assign() {} } },
+    { warn: (...args) => warnings.push(args) }
+  )
+  assert.equal(await load(), true)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(contentRequests, 1)
+  assert.equal(contentRenderAttempts, 1)
+  assert.equal(warnings.length, 1, 'render error must be handled instead of leaving a rejected promise')
+  assert.match(String(warnings[0][1]?.message), /injected panel render failure/)
+  assert.equal(await load(), true)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(contentRequests, 2, 'after rejection the next refresh should issue another content request')
+  assert.equal(contentRenderAttempts, 2, 'the recovered panel should render successfully')
+  assert.equal(warnings.length, 1)
+})

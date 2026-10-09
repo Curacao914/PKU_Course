@@ -294,7 +294,11 @@ export function createFallbackSender({ kind, url = '', sendKey = '', token = '',
  * 那会留下一批「接口说成功、用户没收到」的假记录（之前 21 条消息的处境）。
  */
 export function chooseChannel({ primaryUsable = true, fallback = null } = {}) {
-  if (!primaryUsable && fallback && fallback.configured) return { channel: 'fallback', reason: '主通道会话不可用' }
+  if (!primaryUsable) {
+    return fallback?.configured
+      ? { channel: 'fallback', reason: '主通道会话不可用' }
+      : { channel: 'unavailable', reason: '微信会话不可用且没有可用的备用通知通道' }
+  }
   return { channel: 'primary', reason: '' }
 }
 
@@ -303,8 +307,9 @@ export function createResilientSender({ primary, fallback = null, primaryUsable 
   if (!primary) throw new Error('需要一个主通道')
   return {
     async send(message) {
-      const usable = fallback && fallback.configured ? await primaryUsable() : true
+      const usable = await primaryUsable()
       const decision = chooseChannel({ primaryUsable: usable, fallback })
+      if (decision.channel === 'unavailable') throw new Error(decision.reason)
       if (decision.channel === 'fallback') {
         onFallback(decision.reason)
         return { ...(await fallback.send(message)), channel: fallback.kind }

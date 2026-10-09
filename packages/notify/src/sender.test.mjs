@@ -250,12 +250,26 @@ test('channel choice is explicit and testable', () => {
   const fallback = { configured: true }
   assert.equal(chooseChannel({ primaryUsable: true, fallback }).channel, 'primary')
   assert.equal(chooseChannel({ primaryUsable: false, fallback }).channel, 'fallback')
-  assert.equal(chooseChannel({ primaryUsable: false, fallback: null }).channel, 'primary', '没有备用就只能试主通道')
-  assert.equal(chooseChannel({ primaryUsable: false, fallback: { configured: false } }).channel, 'primary', '备用没配好等于没有')
+  assert.equal(chooseChannel({ primaryUsable: false, fallback: null }).channel, 'unavailable', '没有备用不能制造虚假投递成功')
+  assert.equal(chooseChannel({ primaryUsable: false, fallback: { configured: false } }).channel, 'unavailable', '备用没配好也不能尝试失效的主通道')
   assert.equal(plainTextForChannel('[看笔记](https://x.test/a)'), '看笔记 https://x.test/a')
 })
 
 test('the cycle refuses to run without a ledger or sender', async () => {
   await assert.rejects(() => runDeliveryCycle({ sender: {} }), /需要一个账本/)
   await assert.rejects(() => runDeliveryCycle({ store: {} }), /需要一个发送器/)
+})
+
+test('expired primary without fallback does not call WeChat and cannot be marked sent', async () => {
+  const store = seededLedger()
+  let attempted = 0
+  const sender = createResilientSender({
+    primary: { send: async () => { attempted++; return { externalId: 'false-positive' } } },
+    primaryUsable: async () => false
+  })
+  const report = await runDeliveryCycle({ store, sender, at: '2026-09-25T00:00:01.000Z' })
+  assert.equal(report.sent, 0)
+  assert.equal(report.retried, 1)
+  assert.equal(attempted, 0)
+  store.close()
 })

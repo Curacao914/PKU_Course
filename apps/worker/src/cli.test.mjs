@@ -10,6 +10,7 @@ import { markdownChecksum } from '@course/publish'
 import { openLedger } from '@course/store'
 
 import { runCli } from './cli.mjs'
+import { nextActionableTask } from './commands.mjs'
 
 const SECRETS = {
   PKU_USERNAME: 'student-id-2026',
@@ -2402,6 +2403,46 @@ test('微信会话过期时如实记录"不能自动激活"，不假装试过', 
   assert.equal(code, 0)
 })
 
+test('微信会话过期且没有备用通道：不投递、不消耗重试、保留 pending 等会话恢复', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'openclaw-state-'))
+  const accounts = path.join(stateDir, 'openclaw-weixin', 'accounts')
+  fs.mkdirSync(accounts, { recursive: true })
+  const tokens = path.join(accounts, 'bot.context-tokens.json')
+  fs.writeFileSync(tokens, JSON.stringify({ 'user@im.wechat': 'token' }))
+  // 固定时钟 + 23 小时前的互动：超过 12 小时阈值即"已过期"
+  const fixed = new Date('2026-09-25T00:30:00Z')
+  fs.utimesSync(tokens, new Date(fixed.getTime() - 23 * 3600 * 1000), new Date(fixed.getTime() - 23 * 3600 * 1000))
+
+  // 刻意不注入 sender：走真实的通道判定。会话已过期，且没有配置备用通道。
+  const { deps, lines, ledger } = harness({ now: () => fixed })
+  ledger.enqueueDelivery({
+    dedupeKey: 'course-note:expired', purpose: 'course-note', bodyText: '正文', objectUrl: '/n.html',
+    scheduledFor: '2026-01-01T00:00:00.000Z'
+  })
+
+  const env = {
+    ...deps.env,
+    COURSE_WECHAT_TARGET: 'wxid',
+    OPENCLAW_STATE_DIR: stateDir,
+    OPENCLAW_HOME: stateDir
+  }
+  const code = await runCli(['cycle', '--max-tasks', '1'], { ...deps, env })
+  const summary = parse(lines.at(-1))
+
+  assert.equal(summary.wechat.needed, true)
+  assert.equal(summary.notification.blocked, 'wechat_session_unavailable',
+    '会话不可用又没有备用通道时，必须如实记录阻塞，而不是试一次主通道')
+  assert.equal(summary.notification.sent, 0)
+  assert.equal(summary.notification.retried, 0, '阻塞不是发送失败，不该消耗最大重试次数')
+  assert.equal(summary.notification.failed, 0)
+
+  const row = ledger.listDeliveries({ limit: 50 }).find(item => item.dedupe_key === 'course-note:expired')
+  assert.equal(row.status, 'pending', '会话恢复前必须保留 pending，等下一轮再发')
+  assert.equal(row.attempts, 0, '不应产生任何投递尝试')
+  assert.equal(row.external_id, '', '不能留下"接口说成功、微信没收到"的假回执')
+  assert.equal(code, 0)
+})
+
 test('cycle skips media work when the disk is full but still delivers notifications', async () => {
   const sent = []
   const sender = {
@@ -2541,4 +2582,72 @@ test('a crashing command exits 1 and reports the message without a stack dump', 
   })
   assert.equal(await runCli(['discover'], deps), 1)
   assert.match(errors.join('\n'), /命令 discover 失败：AUTH_EXPIRED/)
+})
+
+test('OWNER worker excludes MEMBER-owned rows incorrectly marked resource_class=owner', async () => {
+  const { deps, ledger, lines } = harness({
+    sender: { target: 'mock', probe: async () => ({ ok: true }),
+      send: async () => ({ externalId: 'mock' }) }
+  })
+  const memberOwnerId = '11111111-2222-4333-8444-555555555555'
+  ledger.discoverReplays([{ replay_key: 'owner-normal', course_key: 'course-owner',
+    course_name: 'OWNER课程', title: '正常课次' }])
+  // 历史污染记录：owner_id 为 MEMBER，但 resource_class 错写成 owner。
+  ledger.discoverReplays([{ replay_key: 'replay-legacy-member',
+    course_key: 'course-member', course_name: 'MEMBER课程', title: '异常记录',
+    resource_class: 'owner' }], { ownerId: memberOwnerId, resourceClass: 'owner' })
+  const normal = nextActionableTask(ledger, { ownerId: '', resourceClass: 'owner' })
+  assert.equal(normal.replay_key, 'owner-normal')
+  const result = await runCli(['cycle', '--replay-key', memberOwnerId + '::replay-legacy-member'], deps)
+  assert.equal(result, 1, '显式指定不属于 OWNER 的任务也必须拒绝')
+  const report = JSON.parse(lines.at(-1))
+  assert.match(report.tasks[0].error, /不属于当前账户/)
+  assert.equal(ledger.getTask(memberOwnerId + '::replay-legacy-member').attempts, 0)
+  assert.equal(ledger.getTask(memberOwnerId + '::replay-legacy-member').stage, 'discovered')
+  ledger.close()
+})
+
+test('owner auto candidate selection cannot pick wrongly scoped high-priority member tasks', () => {
+  const ledger = openLedger(':memory:')
+  const member = '22222222-3333-4444-8555-666666666666'
+  ledger.discoverReplays([{ replay_key: 'bad', course_key: 'c1', course_name: 'C1',
+    title: '错误成员', priority: 999, resource_class: 'owner' }],
+    { ownerId: member, resourceClass: 'owner' })
+  ledger.discoverReplays([{ replay_key: 'good', course_key: 'c2', course_name: 'C2',
+    title: 'OWNER', priority: 10 }])
+  assert.equal(nextActionableTask(ledger, { ownerId: '', resourceClass: 'owner' }).replay_key, 'good')
+  assert.equal(nextActionableTask(ledger, { ownerId: member, resourceClass: 'member' }), null)
+  ledger.close()
+})
+
+test('direct download cannot claim a misclassified MEMBER task from OWNER context', async () => {
+  const { deps, ledger, errors } = harness()
+  const member = '33333333-4444-4555-8666-777777777777'
+  ledger.discoverReplays([{ replay_key: 'foreign-download', course_key: 'course-foreign',
+    course_name: '外部成员', title: '不应被下载', resource_class: 'owner' }],
+    { ownerId: member, resourceClass: 'owner' })
+  const key = member + '::foreign-download'
+  const code = await runCli(['download', '--course-key', 'course-foreign', '--replay-key', key], deps)
+  assert.equal(code, 1)
+  assert.match(errors.join('\n'), /不属于当前账户的任务作用域/)
+  assert.equal(ledger.getTask(key).attempts, 0)
+  ledger.close()
+})
+
+test('retry and refresh-note refuse to mutate tasks from a different account scope', async () => {
+  const { deps, ledger, errors } = harness()
+  const memberId = '11111111-2222-4333-8444-555555555555'
+  ledger.discoverReplays([{ replay_key: 'foreign-reset',
+    course_key: 'course-foreign', course_name: '跨账户任务',
+    title: '2026-09-28第5-6节' }], { ownerId: memberId, resourceClass: 'owner' })
+  const replayKey = memberId + '::foreign-reset'
+  for (const command of ['retry', 'refresh-note']) {
+    const result = await runCli([command, '--replay-key', replayKey], deps)
+    assert.equal(result, 1, command + ' must fail for foreign replay')
+    assert.match(errors.at(-1) || errors.join('\\n'), /该任务不属于当前账户的任务作用域/)
+  }
+  const task = ledger.getTask(replayKey)
+  assert.equal(task.stage, 'discovered')
+  assert.equal(task.attempts, 0)
+  ledger.close()
 })
