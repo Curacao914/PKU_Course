@@ -1642,7 +1642,11 @@ export function createAdminHandler({
     try {
       const store = openLedger(path.resolve(scratchRoot, 'ledger.sqlite'))
       try {
-        const rawTasks = store.listTasks({ limit: 60 })
+        // OWNER 管理台只展示 owner_id='' 且 resource_class='owner' 的任务。
+        // 历史人工扫描曾产生 owner_id 非空、resource_class='owner' 的成员数据；
+        // 共享账本不能直接全表投影，否则同一课次会在 UI 中出现两份。
+        const ownerScope = { ownerId: '', resourceClass: 'owner' }
+        const rawTasks = store.listTasks({ ...ownerScope, limit: 60 })
         const tasks = rawTasks.map(task => {
           const artifacts = task.artifacts || {}
           const lesson = readLessonState(task)
