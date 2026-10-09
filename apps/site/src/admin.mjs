@@ -2253,6 +2253,28 @@ export function createAdminHandler({
         return true
       }
 
+      // OWNER 管理台与成员共用底层 SQLite。单凭管理员令牌不得按已知
+      // replayKey 重置或重写任何其他账户的任务；先验证作用域再加入异步队列。
+      if (action === 'retry' || action === 'refresh-note') {
+        let inOwnerScope = false
+        try {
+          const store = openLedger(path.resolve(scratchRoot, 'ledger.sqlite'))
+          try {
+            const task = store.getTask(String(payload.replayKey || ''))
+            inOwnerScope = Boolean(task && task.owner_id === '' && task.resource_class === 'owner')
+          } finally { store.close() }
+        } catch (error) {
+          sendJson(res, 500, { ok: false, error: 'ledger_unavailable',
+            message: '暂时无法校验任务归属，已拒绝执行' })
+          return true
+        }
+        if (!inOwnerScope) {
+          sendJson(res, 404, { ok: false, error: 'task_not_found',
+            message: '该课次不属于当前管理空间，或任务不存在' })
+          return true
+        }
+      }
+
       const job = enqueueJob(action, args, payload)
 
       sendJson(res, 202, {
