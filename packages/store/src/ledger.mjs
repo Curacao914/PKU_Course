@@ -561,8 +561,13 @@ export function openLedger(databasePath = ':memory:', options = {}) {
       return result.changes > 0
     },
 
-    countTasks() {
-      return db.prepare('SELECT stage, COUNT(*) AS n FROM tasks GROUP BY stage ORDER BY stage').all()
+    countTasks({ ownerId = null, resourceClass = null } = {}) {
+      return db.prepare(`
+        SELECT stage, COUNT(*) AS n FROM tasks
+        WHERE (? IS NULL OR owner_id = ?)
+          AND (? IS NULL OR resource_class = ?)
+        GROUP BY stage ORDER BY stage
+      `).all(ownerId, ownerId, resourceClass, resourceClass)
     },
 
     close() {
