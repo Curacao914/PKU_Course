@@ -1337,3 +1337,35 @@ test('OWNER admin status excludes misclassified MEMBER rows sharing a lesson tit
     '课程计数也不能把共享账本中的成员行计入')
   assert.equal(body.ledger.tasks.length, 1)
 })
+
+test('OWNER admin run rejects retry and refresh-note for foreign or misclassified tasks', async () => {
+  const { handler, scratchRoot } = fixture()
+  const memberId = '11111111-2222-4333-8444-555555555555'
+  const store = openLedger(path.join(scratchRoot, 'ledger.sqlite'))
+  const legacyKey = memberId + '::replay-misclassified'
+  const memberKey = memberId + '::replay-member'
+  try {
+    store.discoverReplays([{ replay_key: 'replay-misclassified', course_key: 'course-old',
+      course_name: '刑法分论', title: '第10-12节' }], { ownerId: memberId, resourceClass: 'owner' })
+    store.discoverReplays([{ replay_key: 'replay-member', course_key: 'course-current',
+      course_name: '刑法分论', title: '第10-12节' }], { ownerId: memberId, resourceClass: 'member' })
+  } finally { store.close() }
+  for (const replayKey of [legacyKey, memberKey, 'replay-not-exists']) {
+    for (const action of ['retry', 'refresh-note']) {
+      const result = await call(handler, { method: 'POST', url: '/api/admin/run',
+        body: JSON.stringify({ action, replayKey }) })
+      assert.equal(result.res.state.status, 404, action + ' cannot queue ' + replayKey)
+      assert.equal(result.body.error, 'task_not_found')
+    }
+  }
+  const owner = await call(handler, { method: 'POST', url: '/api/admin/run',
+    body: JSON.stringify({ action: 'retry', replayKey: 'replay-1' }) })
+  assert.equal(owner.res.state.status, 202, 'valid OWNER retry must still be accepted')
+  const unchanged = openLedger(path.join(scratchRoot, 'ledger.sqlite'))
+  try {
+    for (const key of [legacyKey, memberKey]) {
+      assert.equal(unchanged.getTask(key).attempts, 0, 'foreign task must not be claimed')
+      assert.equal(unchanged.getTask(key).stage, 'discovered', 'foreign stage must not change')
+    }
+  } finally { unchanged.close() }
+})
