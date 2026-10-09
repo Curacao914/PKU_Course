@@ -212,12 +212,13 @@ function tagsOf () { return (state.status && state.status.tags) || { order: [], 
 
 // 单次只运行一轮快照刷新，避免五秒轮询与手动刷新重叠、旧响应覆盖新状态。
 var loadInFlight = null
+var extrasInFlight = null
 async function load (options) {
   if (loadInFlight) return loadInFlight
   options = options || {}
   var pending = (async function () {
-    // 非核心数据同时发请求，但不拦住概览/课程的首次渲染。
-    // 账户状态可能经 control/Supabase，不能把这段网络延迟转嫁给每一个课次列表。
+    // 非核心请求共享同一批次：慢接口不能阻塞首屏，也不能阻塞后续五秒状态刷新。
+    if (!extrasInFlight) {
     var extras = [
       (async function () {
         try {
@@ -239,6 +240,10 @@ async function load (options) {
       } catch (e) { state.account = { ok: false } }
       if (state.status && state.tab === 'settings' && !isDirty()) renderSettings()
     })())
+    var hydration = Promise.all(extras)
+    extrasInFlight = hydration
+    hydration.then(function () { if (extrasInFlight === hydration) extrasInFlight = null })
+    }
 
     var res = await fetch('/api/admin/status', { headers: headers(false) })
     var data = await res.json().catch(function () { return {} })
@@ -247,7 +252,6 @@ async function load (options) {
       var reason = data.error === 'too_many_attempts' ? '操作过于频繁，请稍后重试' : '课程服务暂不可用'
       $('tab-overview').innerHTML = card('<h2>暂时无法加载</h2><p class="muted">' + esc(reason) + '</p>')
       setRunState('暂不可用', 'bad')
-      await Promise.all(extras)
       return false
     }
     state.status = data
@@ -257,7 +261,6 @@ async function load (options) {
       render()
       if (!state.balance && !options.quiet) refreshBalance()
     }
-    await Promise.all(extras)
     return true
   })()
   loadInFlight = pending
