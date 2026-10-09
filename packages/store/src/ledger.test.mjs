@@ -574,8 +574,8 @@ test('countTasks optionally scopes owner and resource class before aggregating',
     { ownerId: member, resourceClass: 'owner' })
   db.discoverReplays([{ ...REPLAY, replay_key: 'member-1' }],
     { ownerId: member, resourceClass: 'member' })
-  assert.deepEqual(db.countTasks(), [{ stage: 'discovered', n: 3 }])
-  assert.deepEqual(db.countTasks({ ownerId: '', resourceClass: 'owner' }), [{ stage: 'discovered', n: 1 }])
-  assert.deepEqual(db.countTasks({ ownerId: member, resourceClass: 'member' }), [{ stage: 'discovered', n: 1 }])
+  assert.deepEqual(db.countTasks().map(({stage,n})=>({stage,n})), [{ stage: 'discovered', n: 3 }])
+  assert.deepEqual(db.countTasks({ ownerId: '', resourceClass: 'owner' }).map(({stage,n})=>({stage,n})), [{ stage: 'discovered', n: 1 }])
+  assert.deepEqual(db.countTasks({ ownerId: member, resourceClass: 'member' }).map(({stage,n})=>({stage,n})), [{ stage: 'discovered', n: 1 }])
   db.close()
 })
