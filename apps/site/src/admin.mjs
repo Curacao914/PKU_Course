@@ -1699,7 +1699,7 @@ export function createAdminHandler({
         }), { asrCny: 0, notesCny: 0, totalCny: 0 })
         status.ledger = {
           path: store.path,
-          stages: store.countTasks(),
+          stages: store.countTasks(ownerScope),
           tasks,
           deliveries: store.listDeliveries({ limit: 30 }),
           deliveriesByStatus: store.countDeliveries()
