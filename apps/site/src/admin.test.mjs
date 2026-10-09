@@ -1421,3 +1421,46 @@ test('dashboard renders status before slow optional requests and coalesces overl
   assert.equal(state.account.ok, true)
   assert.ok(state.config)
 })
+
+test('auxiliary render exception does not strand loader or stop future content refresh', async () => {
+  const start = ADMIN_HTML.indexOf('var loadInFlight = null')
+  const end = ADMIN_HTML.indexOf('function isDirty () {', start)
+  assert.ok(start > 0 && end > start)
+  const source = ADMIN_HTML.slice(start, end)
+  const warnings = []
+  let contentRequests = 0
+  let contentRenderAttempts = 0
+  const state = { status: { ok: true }, content: null, config: null, account: null,
+    tab: 'content', balance: {}, contentDraft: {}, configDraft: {} }
+  const fetch = async url => {
+    if (url === '/api/admin/content') {
+      contentRequests++
+      return { ok: true, json: async () => ({ ok: true, topics: { items: [] } }) }
+    }
+    if (url === '/api/admin/status') return { ok: true, json: async () => ({ ok: true }) }
+    return { ok: true, json: async () => ({ ok: true }) }
+  }
+  const load = Function('fetch', 'state', 'render', 'renderRunState', 'renderContent',
+    'renderSettings', 'isDirty', 'refreshBalance', 'headers', 'card', 'esc',
+    '$', 'setRunState', 'window', 'console', source + '\nreturn load')(
+    fetch, state, () => {}, () => {},
+    () => {
+      contentRenderAttempts++
+      if (contentRenderAttempts === 1) throw new Error('injected panel render failure')
+    },
+    () => {}, () => false, () => {}, () => ({}), value => value,
+    String, () => ({}), () => {}, { location: { assign() {} } },
+    { warn: (...args) => warnings.push(args) }
+  )
+  assert.equal(await load(), true)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(contentRequests, 1)
+  assert.equal(contentRenderAttempts, 1)
+  assert.equal(warnings.length, 1, 'render error must be handled instead of leaving a rejected promise')
+  assert.match(String(warnings[0][1]?.message), /injected panel render failure/)
+  assert.equal(await load(), true)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(contentRequests, 2, 'after rejection the next refresh should issue another content request')
+  assert.equal(contentRenderAttempts, 2, 'the recovered panel should render successfully')
+  assert.equal(warnings.length, 1)
+})
