@@ -56,7 +56,7 @@ const AUTH_FAILURE_WINDOW_MS = 5 * 60 * 1000
 const DEFAULT_RUN_TIMEOUT_MS = 15 * 60 * 1000
 
 const COURSE_SESSION_COOKIE = 'lawtech_course_session'
-const COURSE_SSO_ORIGIN = 'https://desk.law-tech.dev'
+const COURSE_SSO_ORIGIN = 'https://law-tech.dev'
 const COURSE_SESSION_TTL_SECONDS = 60 * 60
 
 function base64urlJson(value) {

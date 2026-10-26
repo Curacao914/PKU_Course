@@ -187,7 +187,7 @@ test('未登录的阅读路径回 SSO 并带原路径；/api/search 明确 401',
   try {
     const home = await fetch(site.url + '/', { redirect: 'manual' })
     assert.equal(home.status, 302)
-    assert.match(String(home.headers.get('location')), /^https:\/\/desk\.law-tech\.dev\/api\/course\/sso\?next=%2F$/)
+    assert.match(String(home.headers.get('location')), /^https:\/\/law-tech\.dev\/api\/course\/sso\?next=%2F$/)
     assert.equal(home.headers.get('cache-control'), 'no-store')
 
     const note = await fetch(site.url + '/' + NOTE_A1.slug + '.html', { redirect: 'manual' })
