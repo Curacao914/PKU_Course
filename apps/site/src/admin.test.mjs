@@ -866,7 +866,7 @@ test('the console page redirects unauthenticated browsers to law-tech SSO', asyn
   const handled = await handler.handle(req, res, '/admin', new URL('http://x/admin'), { adminToken: TOKEN })
   assert.equal(handled, true)
   assert.equal(res.state.status, 302)
-  assert.match(res.state.headers.location, /^https:\/\/desk\.law-tech\.dev\/api\/course\/sso\?next=/)
+  assert.match(res.state.headers.location, /^https:\/\/law-tech\.dev\/api\/course\/sso\?next=/)
 })
 
 test('the todo list only asks for courseware that would still change the outcome', async () => {
