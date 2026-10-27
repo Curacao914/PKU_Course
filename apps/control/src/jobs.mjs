@@ -43,7 +43,9 @@ export function sanitizeMemberEnv(base, ownerId, accountRoot, credentials, pku, 
   env.COURSE_KEEP_MEDIA = '0'
   env.COURSE_DOWNLOAD_CONCURRENCY = '1'
   env.COURSE_MEMBER_MIN_FREE_BYTES = String(base.COURSE_MEMBER_MIN_FREE_BYTES || 12 * 1024 * 1024 * 1024)
-  env.COURSE_ASR_ALLOW_PAID = '1'
+  // Never silently authorize paid transcription for MEMBER jobs.
+  // Only an explicit account-control operator setting may enable billing.
+  env.COURSE_ASR_ALLOW_PAID = base.COURSE_MEMBER_ASR_ALLOW_PAID === '1' ? '1' : '0'
   env.COURSE_CONTROL_LOCAL_URL = base.COURSE_CONTROL_LOCAL_URL || ('http://127.0.0.1:' + String(base.COURSE_CONTROL_PORT || 3102))
   env.PADDLEOCR_ACCESS_TOKEN = credentials.ocr || ''
   env.DASHSCOPE_API_KEY = credentials.dashscope || ''
