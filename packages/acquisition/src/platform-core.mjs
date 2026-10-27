@@ -110,7 +110,7 @@ export function resolveRecordingForDownload(recordings, task = {}) {
   const direct = sourceKey && entries.find(item => item.replayKey === sourceKey)
   if (direct) return { recording: direct, method: 'replay-key' }
 
-  const normalize = value => String(value || '').normalize('NFKC').replace(/\\s+/g, ' ').trim()
+  const normalize = value => String(value || '').normalize('NFKC').replace(/\s+/g, ' ').trim()
   const title = normalize(task.title)
   if (!title) return { recording: null, method: 'not_found' }
 
@@ -128,7 +128,7 @@ export function resolveRecordingForDownload(recordings, task = {}) {
 
   // Blackboard sometimes changes the displayed start time or teacher. Permit
   // title-only fallback exclusively for a unique title containing a full date.
-  if (candidates.length === 1 && /20\\d{2}[-/.年]\\d{1,2}[-/.月]\\d{1,2}/.test(title)) {
+  if (candidates.length === 1 && /20\d{2}[-.\/年]\d{1,2}[-.\/月]\d{1,2}/.test(title)) {
     return { recording: candidates[0], method: 'unique-dated-title' }
   }
   return { recording: null, method: 'ambiguous_or_changed' }
