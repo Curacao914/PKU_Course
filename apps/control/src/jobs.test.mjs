@@ -14,7 +14,14 @@ test('MEMBER whitelist never inherits OWNER secrets or runtime injection variabl
   assert.equal(env.PKU_USERNAME, 'member')
   assert.equal(Object.values(env).includes('OWNER_SECRET'), false)
   assert.equal(env.PATH, '/bin')
+  assert.equal(env.COURSE_ASR_ALLOW_PAID, '0', 'MEMBER ASR must be unpaid by default')
 })
+test('MEMBER paid ASR requires an explicit control-level override', () => {
+  const env = sanitizeMemberEnv({ COURSE_MEMBER_ASR_ALLOW_PAID: '1' }, ownerId, '/member/account', {}, { row: {} }, {})
+  assert.equal(env.COURSE_ASR_ALLOW_PAID, '1')
+  assert.equal(env.COURSE_MEMBER_ASR_ALLOW_PAID, undefined)
+})
+
 test('MEMBER cannot fall back to OWNER env file', () => {
   assert.throws(() => resolveEnvFile({ COURSE_RESOURCE_CLASS: 'member' }), /MEMBER/)
 })
