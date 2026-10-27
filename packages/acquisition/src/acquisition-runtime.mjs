@@ -14,6 +14,7 @@ import {
   normalizeRecordingRow,
   parseCourseLabel,
   replayKey,
+  resolveRecordingForDownload,
   stableCourseIdentity,
   assertNoSecrets
 } from './platform-core.mjs'
@@ -403,6 +404,53 @@ async function scanCourse(page, course) {
     if (!after.signature || after.signature === parsed.signature) break
   }
   return dedupeRecordings(recordings)
+}
+
+/**
+ * Some replay players require an explicit play gesture before requesting HLS.
+ * Never click arbitrary buttons or links: only known video player controls.
+ * Diagnostic lines contain only counts, no page URLs or credentials.
+ */
+async function encourageHlsPlayback(context, log = () => {}) {
+  const selectors = [
+    '.vjs-big-play-button',
+    '.jw-icon-playback',
+    '.dplayer-play-icon',
+    'button[aria-label="Play"]',
+    'button[aria-label="播放"]'
+  ]
+  let frames = 0
+  let clicked = 0
+  let videos = 0
+  for (const page of context.pages()) {
+    for (const frame of page.frames()) {
+      frames += 1
+      try {
+        const count = await frame.evaluate(() => {
+          let count = 0
+          for (const media of document.querySelectorAll('video,audio')) {
+            count += 1
+            if (media.paused) {
+              try { Promise.resolve(media.play()).catch(() => {}) } catch {}
+            }
+          }
+          return count
+        })
+        videos += count
+      } catch {}
+      for (const selector of selectors) {
+        try {
+          const element = frame.locator(selector).first()
+          if (await element.count() && await element.isVisible()) {
+            await element.click({ timeout: 2500 })
+            clicked += 1
+            break
+          }
+        } catch {}
+      }
+    }
+  }
+  log('HLS_PLAYER_PROBE frames=' + frames + ' videos=' + videos + ' playControls=' + clicked)
 }
 
 async function waitForM3u8(capture, timeout = 60_000) {
@@ -804,23 +852,49 @@ export function createValidatedAcquisitionRuntime(input = {}) {
     }
 
     const recordings = await scanCourse(portalPage, course)
-    const recording = recordings.find(item => item.replayKey === sourceReplayKeyValue)
+    const selection = resolveRecordingForDownload(recordings, {
+      sourceReplayKey: sourceReplayKeyValue,
+      title: task.title,
+      startsAtText: task.starts_at_text,
+      teacher: task.teacher
+    })
+    const recording = selection.recording
     if (!recording?.watchHref) {
-      const error = new Error('当前课堂实录列表无法定位目标回放')
+      const error = new Error('当前课堂实录列表无法定位目标回放（' + selection.method + '）')
       error.code = 'COURSE_REPLAY_NOT_FOUND'
       throw error
+    }
+    if (selection.method !== 'replay-key') {
+      log('REPLAY_RELINK method=' + selection.method + ' (unique match in current course)')
     }
 
     const capture = createCapture(log)
     for (const page of browser.context.pages()) capture.attach(page)
     browser.context.on('page', capture.attach)
-    await portalPage.goto(recording.watchHref, { waitUntil: 'domcontentloaded', timeout: 90_000 })
-    const m3u8 = await waitForM3u8(capture.state)
-    await portalPage.waitForTimeout(1500)
-    await pauseMedia(browser.context)
-    const rawTracks = await resolveTracks(browser.context, capture.state, m3u8.url)
-    browser.context.off('page', capture.attach)
-    capture.detach()
+    let rawTracks
+    try {
+      await portalPage.goto(recording.watchHref, { waitUntil: 'domcontentloaded', timeout: 90_000 })
+      await sleep(2000)
+      if (!capture.state.candidate) await encourageHlsPlayback(browser.context, log)
+      let m3u8
+      try {
+        m3u8 = await waitForM3u8(capture.state, 23_000)
+      } catch (error) {
+        // Some versions of the player wait for a user gesture, and may defer
+        // loading until a reload. Do not silently loop or retry indefinitely.
+        log('HLS_CAPTURE_RETRY: no playlist after first player attempt')
+        await portalPage.reload({ waitUntil: 'domcontentloaded', timeout: 90_000 })
+        await sleep(1500)
+        if (!capture.state.candidate) await encourageHlsPlayback(browser.context, log)
+        m3u8 = await waitForM3u8(capture.state, 28_000)
+      }
+      await portalPage.waitForTimeout(1500)
+      await pauseMedia(browser.context)
+      rawTracks = await resolveTracks(browser.context, capture.state, m3u8.url)
+    } finally {
+      browser.context.off('page', capture.attach)
+      capture.detach()
+    }
 
     const tracks = rawTracks.map(track => parseMediaPlaylist(track.playlistText, track.sourceUrl, track.trackKey))
     const playlistFingerprint = sha256(JSON.stringify(tracks.map(track => ({
