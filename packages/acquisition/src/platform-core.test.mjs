@@ -12,6 +12,7 @@ import {
   normalizeRecordingRow,
   parseCourseLabel,
   replayKey,
+  resolveRecordingForDownload,
   semanticReplayIdentity,
   stableCourseIdentity
 } from './platform-core.mjs'
@@ -125,4 +126,27 @@ test('assertNoSecrets rejects URLs, credentials and forbidden fields', () => {
   assert.throws(() => assertNoSecrets({ link: 'https://x/y?token=abcdef' }), /URL/)
   assert.throws(() => assertNoSecrets({ cookie: 'anything' }), /forbidden field/)
   assert.throws(() => assertNoSecrets({ nested: [{ Authorization: 'x' }] }), /forbidden field/)
+})
+
+
+test('download fallback recovers only an unambiguous current recording', () => {
+  const old = 'replay-old'
+  const current = [
+    { replayKey: 'replay-new', title: '2026-10-21第5-6节', startsAtText: '2026-10-21 13:00', teacher: '张老师', watchHref: 'mock:watch' },
+    { replayKey: 'replay-other', title: '2026-10-14第5-6节', startsAtText: '2026-10-14 13:00', teacher: '张老师', watchHref: 'mock:other' }
+  ]
+  assert.equal(resolveRecordingForDownload(current, { sourceReplayKey: 'replay-new', title: 'wrong' }).method, 'replay-key')
+  const exact = resolveRecordingForDownload(current, {
+    sourceReplayKey: old, title: '2026-10-21第5-6节', startsAtText: '2026-10-21 13:00', teacher: '张老师'
+  })
+  assert.equal(exact.method, 'semantic')
+  assert.equal(exact.recording.replayKey, 'replay-new')
+  assert.equal(resolveRecordingForDownload(current, {
+    sourceReplayKey: old, title: '2026-10-21第5-6节', startsAtText: '2026-10-21 13:01', teacher: '张老师'
+  }).method, 'unique-dated-title')
+  assert.equal(resolveRecordingForDownload(current, { sourceReplayKey: old, title: '第5-6节' }).recording, null)
+  assert.equal(resolveRecordingForDownload([...current, { ...current[0], replayKey: 'replay-duplicate' }], {
+    sourceReplayKey: old, title: '2026-10-21第5-6节', startsAtText: '2026-10-21 13:00', teacher: '张老师'
+  }).method, 'ambiguous')
+  assert.equal(resolveRecordingForDownload(current, { sourceReplayKey: old, title: '2026-10-28第5-6节' }).recording, null)
 })
