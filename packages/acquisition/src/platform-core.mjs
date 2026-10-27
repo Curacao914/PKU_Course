@@ -99,6 +99,41 @@ export function normalizeRecordingRow(cells) {
   }
 }
 
+/**
+ * Recover an old replay identity only when the current course contains one
+ * unambiguous matching recording. Never guess between identically named lessons.
+ * A replay key match always wins; the fallback is only for stale IDs.
+ */
+export function resolveRecordingForDownload(recordings, task = {}) {
+  const entries = Array.isArray(recordings) ? recordings : []
+  const sourceKey = String(task.sourceReplayKey || task.source_replay_key || '').trim()
+  const direct = sourceKey && entries.find(item => item.replayKey === sourceKey)
+  if (direct) return { recording: direct, method: 'replay-key' }
+
+  const normalize = value => String(value || '').normalize('NFKC').replace(/\s+/g, ' ').trim()
+  const title = normalize(task.title)
+  if (!title) return { recording: null, method: 'not_found' }
+
+  const candidates = entries.filter(item => normalize(item.title) === title)
+  if (candidates.length === 0) return { recording: null, method: 'not_found' }
+  const startsAt = normalize(task.startsAtText || task.starts_at_text)
+  const teacher = normalize(task.teacher)
+  // Exact semantic identity is the safest reconciliation, especially for
+  // generic titles such as "第5-6节".
+  const precise = candidates.filter(item =>
+    (!startsAt || normalize(item.startsAtText) === startsAt) &&
+    (!teacher || normalize(item.teacher) === teacher))
+  if (precise.length === 1) return { recording: precise[0], method: 'semantic' }
+  if (precise.length > 1) return { recording: null, method: 'ambiguous' }
+
+  // Blackboard sometimes changes the displayed start time or teacher. Permit
+  // title-only fallback exclusively for a unique title containing a full date.
+  if (candidates.length === 1 && /20\d{2}[-.\/年]\d{1,2}[-.\/月]\d{1,2}/.test(title)) {
+    return { recording: candidates[0], method: 'unique-dated-title' }
+  }
+  return { recording: null, method: 'ambiguous_or_changed' }
+}
+
 export function dedupeRecordings(recordings) {
   const map = new Map()
   for (const recording of recordings || []) {

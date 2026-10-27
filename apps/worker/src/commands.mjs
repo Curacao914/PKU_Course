@@ -4634,6 +4634,8 @@ function verifyRecordSourceMap(sourceMap, { slug = '', noteMarkdown = '', onepag
             course_key: courseKey,
             course_name: options.options.course || task?.course_name || '',
             title: options.options.title || task?.title || '',
+            starts_at_text: task?.starts_at_text || '',
+            teacher: task?.teacher || '',
             runtime: task?.runtime || {}
           },
           { log: message => stderr(String(message)) }
