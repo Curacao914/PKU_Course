@@ -10,6 +10,8 @@ COURSE_LEDGER_PATH=/home/ubuntu/.course-worker/ledger.sqlite
 COURSE_MEMBER_SYNC_INTERVAL_MINUTES=60
 COURSE_MEMBER_MIN_FREE_BYTES=12884901888
 COURSE_MEMBER_AI_MODEL=deepseek-chat
+# Safe default: do not incur additional transcription charges unless explicitly enabled.
+COURSE_MEMBER_ASR_ALLOW_PAID=0
 COURSE_CHROME_PATH=
 COURSE_PYTHON=/home/ubuntu/venvs/course/bin/python
 # Dedicated MEMBER bucket/token. Never use OWNER R2 token. Control uses the same MEMBER bucket.
