@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process'
 import { chromium } from 'playwright-core'
 
 import { describePkuFailure } from './pku-network.mjs'
+import { acquisitionDispatcher, resolveAcquisitionProxy } from './proxy.mjs'
 
 import {
   chooseCurrentCourses,
@@ -496,10 +497,12 @@ async function fetchAuthenticated(context, capture, rawUrl, options = {}) {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), options.timeoutMs || segmentTimeoutMs)
     try {
+      const proxyDispatcher = acquisitionDispatcher()
       const response = await fetch(rawUrl, {
         headers: await authHeaders(context, capture, rawUrl, options.range),
         redirect: 'follow',
-        signal: controller.signal
+        signal: controller.signal,
+        ...(proxyDispatcher ? { dispatcher: proxyDispatcher } : {})
       })
       clearTimeout(timer)
       if (response.status === 429 || response.status >= 500) throw new Error(`upstream HTTP ${response.status}`)
@@ -698,10 +701,12 @@ export function createValidatedAcquisitionRuntime(input = {}) {
       if (stale.cleared && stale.removed?.length) {
         input.log?.(`清理陈旧的浏览器 profile 锁：${stale.removed.join(', ')}`)
       }
+      const acquisitionProxy = resolveAcquisitionProxy()
       const browserOptions = {
         executablePath,
         headless: input.headless ?? process.env.COURSE_HEADLESS !== '0',
-        args: process.env.COURSE_HEADLESS === '0' ? ['--start-maximized'] : []
+        args: process.env.COURSE_HEADLESS === '0' ? ['--start-maximized'] : [],
+        ...(acquisitionProxy ? { proxy: { server: acquisitionProxy } } : {})
       }
       if (storageStatePath) {
         browserProcess = await chromium.launch(browserOptions)
