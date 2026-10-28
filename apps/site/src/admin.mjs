@@ -876,6 +876,8 @@ export function storageReport(scratchRoot) {
   }
 }
 
+import { readOwnerLocalState } from './owner-local.mjs'
+
 export function createAdminHandler({
   root,
   scratchRoot,
@@ -897,9 +899,17 @@ export function createAdminHandler({
    * 经 nginx 进来的读者却只看到 SSO 跳转。
    */
   privateContent = false,
+  ownerOnly = false,
+  ownerId = '',
+  ownerLocalContent = false,
   /** 私有检索与 /mcp 共用同一本预算：由进程侧注入；拿不到预算时回 503，而不是放行。 */
   searchBudget = null
 } = {}) {
+  const expectedOwner = String(ownerId || '').trim()
+  if (ownerOnly && (!privateContent || !/^[0-9a-f-]{36}$/i.test(expectedOwner))) {
+    throw new Error('OWNER-only 模式必须启用私有内容并配置有效的 OWNER UUID')
+  }
+  const isOwnerSession = session => Boolean(session && session.role === 'owner' && (!ownerOnly || String(session.sub) === expectedOwner))
   const failures = new Map()
   let running = null
   const pendingJobs = []
@@ -968,6 +978,9 @@ export function createAdminHandler({
 
 
   async function privateReadingState(session) {
+    if (ownerOnly && ownerLocalContent && isOwnerSession(session)) {
+      return readOwnerLocalState(root)
+    }
     const result = await controlCall(session, { target: '/v1/private/content' })
     if (!result.ok) {
       throw Object.assign(new Error(result.payload?.error || 'PRIVATE_CONTENT_FAILED'), { status: result.status || 502 })
@@ -988,6 +1001,9 @@ export function createAdminHandler({
   }
 
   async function privateFullRecord(session, state, summary) {
+    if (state.source === 'owner-local') {
+      return state.records.find(record => record.slug === summary.slug) || null
+    }
     const note = state.notes.find(item => String(item.slug || item.index?.slug || '') === String(summary.slug || ''))
     if (!note) return null
     const result = await controlCall(session, { target: '/v1/private/note?id=' + encodeURIComponent(note.id) })
@@ -1027,6 +1043,11 @@ export function createAdminHandler({
         page: '/' + topicSlug(topic) + '.html'
       })),
       readTopicMarkdown: async topicId => {
+        if (state.source === 'owner-local') {
+          const topic = state.topics.find(item => String(item.id || '') === String(topicId || ''))
+          if (!topic) throw new Error('找不到专题')
+          return renderTopicMarkdown(topic, { notes: state.records })
+        }
         const topicRow = (await controlCall(session, { target: '/v1/private/content' })).payload?.topics
           ?.find(item => String(item.topicId || '') === String(topicId || '') && item.status === 'fresh')
         if (!topicRow) throw new Error('找不到专题')
@@ -2584,6 +2605,10 @@ export function createAdminHandler({
           res.end()
           return true
         }
+        if (ownerOnly && (ticket.role !== 'owner' || String(ticket.sub) !== expectedOwner)) {
+          sendJson(res, 403, { ok: false, error: 'owner_only', message: '课程空间暂不开放其他账户' })
+          return true
+        }
         const next = safeCoursePath(ticket.next, '/')
         const session = {
           v: 1,
@@ -2609,6 +2634,15 @@ export function createAdminHandler({
         'course-session-v1',
         nowSeconds
       )
+
+      if (ownerOnly && session && !isOwnerSession(session)) {
+        sendJson(res, 403, { ok: false, error: 'owner_only', message: '课程空间暂不开放其他账户' })
+        return true
+      }
+      if (ownerOnly && pathname.startsWith('/assets/') && !isOwnerSession(session)) {
+        sendJson(res, 403, { ok: false, error: 'owner_only' })
+        return true
+      }
 
       if (pathname === '/_auth/start') {
         const next = safeCoursePath(url.searchParams.get('next'), '/')
