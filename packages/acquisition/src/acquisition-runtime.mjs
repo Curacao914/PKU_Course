@@ -1,5 +1,6 @@
 import crypto from 'node:crypto'
 import fs from 'node:fs'
+import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
@@ -7,6 +8,7 @@ import { chromium } from 'playwright-core'
 
 import { describePkuFailure } from './pku-network.mjs'
 import { acquisitionDispatcher, resolveAcquisitionProxy } from './proxy.mjs'
+import { shouldRetryThroughVpn, isDirectFirst, waitForLoopbackProxy } from './transport-policy.mjs'
 
 import {
   chooseCurrentCourses,
@@ -497,7 +499,10 @@ async function fetchAuthenticated(context, capture, rawUrl, options = {}) {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), options.timeoutMs || segmentTimeoutMs)
     try {
-      const proxyDispatcher = acquisitionDispatcher()
+      const useFallbackProxy = Boolean(capture.useProxyFallback) && attempt >= 2
+      const proxyDispatcher = capture.transportProxy
+        ? acquisitionDispatcher({ COURSE_ACQUISITION_HTTP_PROXY: capture.transportProxy })
+        : useFallbackProxy ? acquisitionDispatcher() : undefined
       const response = await fetch(rawUrl, {
         headers: await authHeaders(context, capture, rawUrl, options.range),
         redirect: 'follow',
@@ -678,6 +683,8 @@ export function createValidatedAcquisitionRuntime(input = {}) {
   let portalPage = null
   let profileLock = null
   let browserProcess = null
+  const configuredProxy = resolveAcquisitionProxy()
+  let activeAcquisitionProxy = isDirectFirst() ? '' : configuredProxy
   const storageStatePath = String(input.storageStatePath || '').trim()
 
   async function ensureBrowser() {
@@ -701,7 +708,7 @@ export function createValidatedAcquisitionRuntime(input = {}) {
       if (stale.cleared && stale.removed?.length) {
         input.log?.(`清理陈旧的浏览器 profile 锁：${stale.removed.join(', ')}`)
       }
-      const acquisitionProxy = resolveAcquisitionProxy()
+      const acquisitionProxy = activeAcquisitionProxy
       const browserOptions = {
         executablePath,
         headless: input.headless ?? process.env.COURSE_HEADLESS !== '0',
@@ -816,7 +823,7 @@ export function createValidatedAcquisitionRuntime(input = {}) {
     return result
   }
 
-  async function download(task, runtime = {}) {
+  async function downloadOnce(task, runtime = {}) {
     const limits = resolveAcquisitionLimits()
     const replayKeyValue = String(task.replay_key || '')
     const sourceReplayKeyValue = String(task.source_replay_key || task.runtime?.sourceReplayKey || task.replay_key || '')
@@ -874,6 +881,8 @@ export function createValidatedAcquisitionRuntime(input = {}) {
     }
 
     const capture = createCapture(log)
+    capture.state.transportProxy = activeAcquisitionProxy
+    capture.state.useProxyFallback = !activeAcquisitionProxy && isDirectFirst() && Boolean(configuredProxy)
     for (const page of browser.context.pages()) capture.attach(page)
     browser.context.on('page', capture.attach)
     let rawTracks
@@ -991,6 +1000,38 @@ export function createValidatedAcquisitionRuntime(input = {}) {
         reusedResources,
         streamTypes: media.streams.map(item => item.codecType),
         loginMode: login.mode
+      }
+    }
+  }
+
+  /**
+   * Download direct first; a playback transport failure (not a wrong lesson,
+   * auth error, or checksum drift) retries once via the owner's campus tunnel.
+   * Keep completed fragments; never silently fall back to direct when VPN drops.
+   */
+  async function download(task, runtime = {}) {
+    if (!isDirectFirst() || !configuredProxy) return downloadOnce(task, runtime)
+    activeAcquisitionProxy = ''
+    try {
+      return await downloadOnce(task, runtime)
+    } catch (error) {
+      if (!shouldRetryThroughVpn(error)) throw error
+      runtime.log?.('ACQUISITION_FALLBACK: direct replay transport unavailable; checking campus VPN tunnel')
+      if (!await waitForLoopbackProxy(configuredProxy)) {
+        runtime.log?.('ACQUISITION_VPN_UNAVAILABLE: tunnel not online; retain prior media fragments')
+        const unavailable = new Error('校园 VPN 采集通道暂时未连接；已保留已完成分片，下次夜间继续')
+        unavailable.code = 'ACQUISITION_VPN_UNAVAILABLE'
+        unavailable.retryable = true
+        throw unavailable
+      }
+      await close()
+      activeAcquisitionProxy = configuredProxy
+      runtime.log?.('ACQUISITION_FALLBACK: retrying replay through private VPN route')
+      try {
+        return await downloadOnce(task, runtime)
+      } finally {
+        await close()
+        activeAcquisitionProxy = ''
       }
     }
   }
