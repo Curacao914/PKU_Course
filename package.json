@@ -23,6 +23,7 @@
     "course": "node apps/worker/bin/course.mjs"
   },
   "dependencies": {
-    "@supabase/supabase-js": "2.117.2"
+    "@supabase/supabase-js": "2.117.2",
+    "undici": "7.30.1"
   }
 }
