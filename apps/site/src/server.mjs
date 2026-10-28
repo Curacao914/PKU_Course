@@ -2,7 +2,8 @@ import fs from 'node:fs'
 import http from 'node:http'
 import path from 'node:path'
 
-import { readSiteIndex, topicSlug } from '@course/publish'
+import { readSiteIndex, topicSlug, renderTopicMarkdown } from '@course/publish'
+import { readOwnerLocalState } from './owner-local.mjs'
 
 import { signRequest as signControlRequest } from '../../control/src/server/auth.mjs'
 import { createAdminHandler, parseMcpAccessToken, verifyMcpAccessToken } from './admin.mjs'
@@ -122,6 +123,9 @@ export function createRequestHandler({
   controlUrl = 'http://127.0.0.1:3102',
   controlFetch = fetch,
   contentVisibility = 'public',
+  ownerOnly = false,
+  ownerId = '',
+  ownerLocalContent = false,
   scratchRoot = '',
   workerPath = '',
   workerEnv = {},
@@ -184,6 +188,9 @@ export function createRequestHandler({
       // 私有阅读站（/、/notes/*、/topics/*…）只在私有内容模式下由管理进程渲染；
       // 公开模式必须原样交回站点处理器，否则整站被要求登录。
       privateContent,
+      ownerOnly,
+      ownerId,
+      ownerLocalContent,
       // 私有检索与 /mcp 共用同一本预算：这里注入进程侧那一个实例，不在管理进程里另起一本账。
       searchBudget: async () => {
         const budget = await ensureBudget()
@@ -387,8 +394,25 @@ export function createRequestHandler({
     if (privateMcpHandlers.has(ownerId)) return privateMcpHandlers.get(ownerId)
     const budget = await ensureBudget()
     if (!budget) throw new Error(budgetFailed || '请求预算不可用')
-    const { createNotesService, createMcpHttpHandler, normalizeRecord } = await import('@course/notes-mcp')
-    const service = createNotesService({ source: privateSource(ownerId, normalizeRecord), siteOrigin })
+    const { createNotesService, createMcpHttpHandler, normalizeRecord, createLocalLibrarySource } = await import('@course/notes-mcp')
+    const baseSource = ownerOnly && ownerLocalContent
+      ? createLocalLibrarySource({ file: path.join(normalizedRoot, 'library.json') })
+      : privateSource(ownerId, normalizeRecord)
+    const source = ownerOnly && ownerLocalContent ? {
+      ...baseSource,
+      listTopics: async () => readOwnerLocalState(normalizedRoot).topics.map(topic => ({
+        id: topic.id, course: topic.course, title: topic.title,
+        summary: topic.summary || '', lessons: topic.lessons || [],
+        page: '/' + topicSlug(topic) + '.html'
+      })),
+      readTopicMarkdown: async id => {
+        const state = readOwnerLocalState(normalizedRoot)
+        const topic = state.topics.find(topic => String(topic.id) === String(id))
+        if (!topic) throw new Error('找不到专题')
+        return renderTopicMarkdown(topic, { notes: state.records })
+      }
+    } : baseSource
+    const service = createNotesService({ source, siteOrigin })
     const siteHost = (() => { try { return new URL(siteOrigin).hostname } catch { return '' } })()
     const handler = createMcpHttpHandler({
       service,
@@ -466,6 +490,10 @@ export function createRequestHandler({
         }
         const bearer = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '')
         const parsed = parseMcpAccessToken(bearer)
+        if (ownerOnly && String(parsed?.sub || '') !== String(ownerId || '')) {
+          sendJson(res, 401, { ok: false, error: 'owner_only' })
+          return
+        }
         let identity = null
         if (parsed) {
           try {
@@ -719,6 +747,7 @@ export function startSiteServer({
   // admin:false，结果 /api/admin 仍然按"未配置令牌"回 503，而不是根本不存在的 404）。
   admin = true, adminOrigin = '', ssoKey = '', controlUrl = 'http://127.0.0.1:3102',
   controlFetch = fetch, contentVisibility = 'public',
+  ownerOnly = false, ownerId = '', ownerLocalContent = false,
   mcp = true, mcpOrigins = [], mcpHosts = [],
   // 公开接口共用的预算（/api/search 与 /mcp 同一本账）：整块透传，避免只改了一半
   rateLimit = undefined, maxConcurrent = undefined, requestTimeoutMs = undefined, maxQueryChars = undefined,
@@ -729,6 +758,7 @@ export function startSiteServer({
 } = {}) {
   const server = createSiteServer({
     root, adminToken, admin, adminOrigin, ssoKey, controlUrl, controlFetch, contentVisibility,
+    ownerOnly, ownerId, ownerLocalContent,
     mcp, mcpOrigins, mcpHosts, siteOrigin,
     ...(rateLimit ? { rateLimit } : {}),
     ...(maxConcurrent ? { maxConcurrent } : {}),

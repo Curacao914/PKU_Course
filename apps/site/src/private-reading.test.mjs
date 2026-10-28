@@ -435,3 +435,55 @@ test('MCP 报的专题页指向阅读站，不是管理页', async () => {
     await site.close()
   }
 })
+
+test('OWNER-only mode blocks member SSO, stale member cookies, member MCP and assets, but reads OWNER notes locally', async () => {
+  const fs = await import('node:fs')
+  const os = await import('node:os')
+  const path = await import('node:path')
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'course-owneronly-test-'))
+  const topicDir = path.join(root, 'topics')
+  fs.mkdirSync(topicDir, { recursive: true })
+  fs.writeFileSync(path.join(root, 'library.json'), JSON.stringify([{
+    ...NOTE_A1.index, slug: NOTE_A1.slug, markdown: NOTE_A1.markdown,
+    courseName: COURSE_A, lessonTitle: NOTE_A1.lessonTitle
+  }]))
+  fs.writeFileSync(path.join(root,'topics.json'),JSON.stringify({topics:[{id:TOPIC_A.artifact.id,json:'topics/topic.json'}]}))
+  fs.writeFileSync(path.join(topicDir,'topic.json'),JSON.stringify(TOPIC_A.artifact))
+  const { site: oldSite } = await startPrivateSite()
+  let staleMemberCookie
+  try { staleMemberCookie = (await login(oldSite, OWNER_B)).cookie }
+  finally { await oldSite.close() }
+  const { site, control } = await startPrivateSite({server:{
+    root,ownerOnly:true,ownerId:OWNER_A,ownerLocalContent:true
+  }})
+  try {
+    const member = await fetch(site.url + '/_auth/callback?token=' + encodeURIComponent(ticket({sub:OWNER_B})),{redirect:'manual'})
+    assert.equal(member.status,403)
+    assert.equal(member.headers.get('set-cookie'),null)
+    for(const target of ['/','/admin','/api/account/workspace','/assets/presentation.png','/api/search?q=test']){
+      const res=await fetch(site.url+target,{headers:{cookie:staleMemberCookie},redirect:'manual'})
+      assert.equal(res.status,403,target+' must refuse old MEMBER session')
+    }
+    assert.equal((await toolsList(site,bearer(OWNER_B,SECRET_B))).status,401)
+    const ownerTicket=ticket({sub:OWNER_A,role:'owner'})
+    const callback=await fetch(site.url+'/_auth/callback?token='+encodeURIComponent(ownerTicket),{redirect:'manual'})
+    assert.equal(callback.status,302)
+    const cookie=String(callback.headers.get('set-cookie')).split(';')[0]
+    assert.ok(cookie.startsWith('lawtech_course_session='))
+    const home=await getHtml(site,'/',cookie)
+    assert.equal(home.res.status,200)
+    assert.match(home.html,/国际刑法学/)
+    const note=await getHtml(site,'/'+NOTE_A1.slug+'.html',cookie)
+    assert.equal(note.res.status,200)
+    assert.match(note.html,/国际刑法是规定国际犯罪/)
+    const topic=await getHtml(site,'/topics/国际刑法学/topic-a.html',cookie)
+    assert.equal(topic.res.status,200)
+    assert.equal((await fetch(site.url+'/api/search?q='+encodeURIComponent('概念'),{headers:{cookie}})).status,200)
+    assert.equal((await toolsList(site,bearer(OWNER_A,SECRET_A))).status,200)
+    assert.ok(!control.calls.some(call=>call.path==='/v1/private/content'||call.path.startsWith('/v1/private/note')),
+      'OWNER local reading should not call Supabase-backed content endpoints')
+  }finally{
+    await site.close()
+    fs.rmSync(root,{recursive:true,force:true})
+  }
+})

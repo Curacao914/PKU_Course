@@ -71,6 +71,11 @@ function publicPku(row) {
 
 export function createControlServer({ env = process.env, store = createAccountStore(env), r2 = createR2(env), qr = createQrSessions({env, store}), jobTokens = createJobTokens() } = {}) {
   const authenticate = createRequestVerifier({ key: env.COURSE_CONTROL_SIGNING_KEY })
+  const ownerOnly = env.COURSE_OWNER_ONLY === '1'
+  const ownerUuid = String(env.COURSE_ACCOUNT_OWNER_ID || '').trim()
+  if (ownerOnly && !/^[0-9a-f-]{36}$/i.test(ownerUuid)) {
+    throw new Error('OWNER-only 控制服务缺少 OWNER UUID')
+  }
   const jobs = createJobQueue({ env, store, r2, jobTokens })
 
   const syncIntervalMs = Math.max(15, Number(env.COURSE_MEMBER_SYNC_INTERVAL_MINUTES || 60)) * 60 * 1000
@@ -81,9 +86,13 @@ export function createControlServer({ env = process.env, store = createAccountSt
       process.stderr.write('member auto-sync failed: ' + (error?.message || error) + '\n')
     }
   }
-  const timer = setInterval(enqueueAutoSync, syncIntervalMs)
-  timer.unref?.()
-  setTimeout(enqueueAutoSync, 15_000).unref?.()
+  // Private OWNER mode never schedules MEMBER syncs from previously saved account settings.
+  let timer = null
+  if (!ownerOnly) {
+    timer = setInterval(enqueueAutoSync, syncIntervalMs)
+    timer.unref?.()
+    setTimeout(enqueueAutoSync, 15_000).unref?.()
+  }
 
   const server = http.createServer(async (req, res) => {
     try {
@@ -116,6 +125,10 @@ export function createControlServer({ env = process.env, store = createAccountSt
         ownerId = authenticate({ headers: req.headers, method: req.method, path: req.url, body: req.rawBody })
       }
       const profile = await store.profile(ownerId)
+      if (ownerOnly && (profile.role !== 'owner' || String(ownerId) !== ownerUuid)) {
+        send(res, 403, { ok: false, error: 'OWNER_ONLY' })
+        return
+      }
 
       if (req.method === 'GET' && url.pathname === '/v1/tasks') {
         const ledgerPath = env.COURSE_LEDGER_PATH || path.join(env.COURSE_WORKER_SCRATCH_DIR || path.join(os.homedir(), '.course-worker'), 'ledger.sqlite')
