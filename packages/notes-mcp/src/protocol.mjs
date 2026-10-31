@@ -48,7 +48,7 @@ export const INSTRUCTIONS = [
 
 const NOTIFICATION = Symbol('notification')
 
-export function createProtocolServer({ service, serverInfo = SERVER_INFO, instructions = INSTRUCTIONS, logger = () => {}, limits = {} } = {}) {
+export function createProtocolServer({ service, serverInfo = SERVER_INFO, instructions = INSTRUCTIONS, logger = () => {}, limits = {}, oauthScopes = null } = {}) {
   if (!service) throw new Error('createProtocolServer 需要 service')
   const maxQueryChars = Number(limits.maxQueryChars) > 0 ? Math.trunc(Number(limits.maxQueryChars)) : DEFAULT_MAX_QUERY_CHARS
 
@@ -123,7 +123,7 @@ export function createProtocolServer({ service, serverInfo = SERVER_INFO, instru
       case 'ping':
         return {}
       case 'tools/list':
-        return { tools: toolDefinitions() }
+        return { tools: toolDefinitions().map(tool => oauthScopes ? { ...tool, securitySchemes: [{ type: 'oauth2', scopes: oauthScopes }] } : tool) }
       case 'tools/call':
         return callTool(params, context)
       case 'resources/list':
