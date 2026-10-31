@@ -82,6 +82,8 @@ const { url } = await startSiteServer({
   adminOrigin: isPublic ? (process.env.COURSE_ADMIN_ORIGIN || 'https://course.law-tech.dev') : '',
   adminToken,
   ssoKey: isPublic ? '' : String(process.env.COURSE_CONTROL_SIGNING_KEY || ''),
+  passkeyMode: isPublic ? 'legacy' : String(process.env.COURSE_AUTH_MODE || 'legacy'),
+  passkeyOwnerId: isPublic ? '' : String(process.env.COURSE_ACCOUNT_OWNER_ID || ''),
   controlUrl: isPublic ? '' : String(process.env.COURSE_CONTROL_LOCAL_URL || 'http://127.0.0.1:3102'),
   contentVisibility,
   ownerOnly: process.env.COURSE_OWNER_ONLY === '1',

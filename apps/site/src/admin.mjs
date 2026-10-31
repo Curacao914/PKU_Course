@@ -1,3 +1,4 @@
+import { createPasskeyAuth } from './passkey-auth.mjs'
 import { spawn } from 'node:child_process'
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import fs from 'node:fs'
@@ -58,6 +59,7 @@ const DEFAULT_RUN_TIMEOUT_MS = 15 * 60 * 1000
 const COURSE_SESSION_COOKIE = 'lawtech_course_session'
 const COURSE_SSO_ORIGIN = 'https://law-tech.dev'
 const COURSE_SESSION_TTL_SECONDS = 60 * 60
+const PASSKEY_SESSION_TTL_SECONDS = 14 * 86400
 
 function base64urlJson(value) {
   return Buffer.from(JSON.stringify(value)).toString('base64url')
@@ -118,10 +120,10 @@ function safeCoursePath(value, fallback = '/') {
   }
 }
 
-function sessionCookie(payload, key) {
+function sessionCookie(payload, key, ttlSeconds = COURSE_SESSION_TTL_SECONDS) {
   const token = signEnvelope(payload, key, 'course-session-v1')
   return COURSE_SESSION_COOKIE + '=' + encodeURIComponent(token) +
-    '; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=' + COURSE_SESSION_TTL_SECONDS
+    '; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=' + ttlSeconds
 }
 
 function ssoLocation(next = '/') {
@@ -888,6 +890,9 @@ export function createAdminHandler({
   spawnOcr = defaultSpawnOcr,
   now = () => Date.now(),
   ssoKey = '',
+  passkeyMode = 'legacy',
+  passkeyOwnerId = '',
+  passkeyOrigin = 'https://course.law-tech.dev',
   controlUrl = 'http://127.0.0.1:3102',
   controlFetch = fetch,
   /**
@@ -928,6 +933,12 @@ export function createAdminHandler({
 
 
   const controlBase = String(controlUrl || '').replace(/\/$/, '')
+  const passkey = ['hybrid', 'passkey'].includes(passkeyMode) ? createPasskeyAuth({
+    root: scratchRoot, ownerId: passkeyOwnerId, origin: passkeyOrigin,
+    sessionCookie: (payload, ttlSeconds) => sessionCookie(payload, ssoKey, ttlSeconds || PASSKEY_SESSION_TTL_SECONDS),
+    now
+  }) : null
+  const loginLocation = next => passkeyMode === 'passkey' ? passkey.loginLocation(next) : ssoLocation(next)
 
   async function controlCall(session, { method = 'GET', target = '/', body = null } = {}) {
     if (!session?.sub) throw Object.assign(new Error('ACCOUNT_SESSION_REQUIRED'), { status: 401 })
@@ -1099,7 +1110,7 @@ export function createAdminHandler({
         return true
       }
       const next = safeCoursePath(pathname + String(url.search || ''), '/')
-      res.writeHead(302, { location: ssoLocation(next), 'cache-control': 'no-store' })
+      res.writeHead(302, { location: loginLocation(next), 'cache-control': 'no-store' })
       res.end()
       return true
     }
@@ -2598,6 +2609,14 @@ export function createAdminHandler({
     async handle(req, res, pathname, url, { adminToken } = {}) {
       const nowSeconds = Math.floor(now() / 1000)
 
+      if (passkey && await passkey.handle(req, res, pathname, url, null)) return true
+
+      if (pathname === '/_auth/callback' && passkeyMode === 'passkey') {
+        res.writeHead(303, { location: '/login', 'cache-control': 'no-store' })
+        res.end()
+        return true
+      }
+
       if (pathname === '/_auth/callback') {
         const ticket = verifyEnvelope(url.searchParams.get('token'), ssoKey, 'course-sso-v1', nowSeconds)
         if (!ticket || !['owner', 'member'].includes(ticket.role)) {
@@ -2628,12 +2647,16 @@ export function createAdminHandler({
         return true
       }
 
-      const session = verifyEnvelope(
+      const candidateSession = verifyEnvelope(
         cookieValue(req, COURSE_SESSION_COOKIE),
         ssoKey,
         'course-session-v1',
         nowSeconds
       )
+      const session = passkeyMode === 'passkey'
+        ? (candidateSession?.amr === 'passkey' && candidateSession.role === 'owner' &&
+           candidateSession.sub === passkeyOwnerId ? candidateSession : null)
+        : candidateSession
 
       if (ownerOnly && session && !isOwnerSession(session)) {
         sendJson(res, 403, { ok: false, error: 'owner_only', message: '课程空间暂不开放其他账户' })
@@ -2646,7 +2669,7 @@ export function createAdminHandler({
 
       if (pathname === '/_auth/start') {
         const next = safeCoursePath(url.searchParams.get('next'), '/')
-        const destination = session ? next : ssoLocation(next)
+        const destination = session ? next : loginLocation(next)
         res.writeHead(302, { location: destination, 'cache-control': 'no-store' })
         res.end()
         return true
@@ -2677,7 +2700,7 @@ export function createAdminHandler({
           return true
         }
         if (!session) {
-          res.writeHead(302, { location: ssoLocation('/admin'), 'cache-control': 'no-store' })
+          res.writeHead(302, { location: loginLocation('/admin'), 'cache-control': 'no-store' })
           res.end()
           return true
         }
