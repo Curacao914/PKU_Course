@@ -63,6 +63,11 @@ test('owner consent, S256 authorization grant, rotating refresh and durable toke
   // The browser's same-origin form POST must carry its actual Origin.
   // "no-referrer" changes it to "null" and breaks the owner consent flow.
   assert.equal(approval.headers.get('referrer-policy'),'same-origin')
+  // Chrome enforces form-action on POST redirects: allow only the ChatGPT callback origin.
+  const csp=approval.headers.get('content-security-policy') || ''
+  assert.match(csp,/form-action 'self' https:\/\/chatgpt\.com;/)
+  assert.match(csp,/default-src 'none'/)
+  assert.match(csp,/frame-ancestors 'none'/)
   const flow=(await approval.text()).match(/name="flow" value="([^"]+)"/)?.[1]
   assert.ok(flow)
   const crossOrigin=await post(app.url+'/oauth/authorize',{flow,decision:'allow'},
