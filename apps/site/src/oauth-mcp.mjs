@@ -170,7 +170,7 @@ export function createCourseOAuth({ownerId,signingKey,root,now=Date.now}={}) {
             '<style>body{font:16px system-ui,sans-serif;max-width:470px;margin:12vh auto;padding:20px;line-height:1.8}button{margin:6px;padding:10px 15px}</style>'+
             '<h2>允许 ChatGPT 读取课程笔记？</h2><p>授权后可以搜索、读取已发布的笔记和专题。无法修改内容或启动补课。</p>'+form+'</html>'
           res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-store',
-            'content-security-policy':"default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+            'content-security-policy':"default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://chatgpt.com; frame-ancestors 'none'; base-uri 'none'",
             'referrer-policy':'same-origin','x-content-type-options':'nosniff'})
           res.end(page)
           return true
