@@ -80,6 +80,8 @@ var state = {
   status: null, balance: null, config: null, storage: null, content: null,
   tab: 'overview', busy: false, requests: {}, uploads: {}, open: {}, overviewStage: '',
   account: null,
+  // In-memory only: no localStorage or logs; survives five-second DOM redraws.
+  mcpToken: '',
   contentDraft: { id: '', course: '', topic: '', lessons: [], enabled: true },
   sel: { tag: '', year: 'all', stage: '', course: '', lesson: '', sort: 'desc', rail: false, pane: 'account' },
   preview: null,
@@ -1045,6 +1047,15 @@ function paneMeta (key) {
 }
 
 
+function mcpTokenHtml () {
+  if (!state.mcpToken) return ''
+  return '<div class="field" style="margin-top:10px"><label>Bearer Token</label><textarea id="ownerMcpTokenValue" rows="4" readonly>' +
+    esc(state.mcpToken) + '</textarea></div>' +
+    '<div class="row"><button class="act primary" data-act="copy-mcp-token">复制令牌</button>' +
+    '<button class="act" data-act="hide-mcp-token">隐藏</button></div>' +
+    '<p class="tiny muted">该令牌长期有效，重新打开页面也可通过“查看令牌”再次获取。</p>'
+}
+
 function accountPane () {
   var data = state.account || {}
   if (!data.ok) return '<h2>账户</h2><p class="small muted">' +
@@ -1067,7 +1078,13 @@ function accountPane () {
     credentialRow('deepseek', 'DeepSeek API') +
     credentialRow('dashscope', '阿里云 API') +
     credentialRow('ocr', 'OCR API') +
-    '<div class="field"><label>MCP</label><p class="small muted">令牌长期有效，直到主动删除或重新生成。</p><div class="row"><button class="act" data-act="create-mcp-token">' + (mcp.configured ? '重新生成访问令牌' : '生成访问令牌') + '</button>' + (mcp.configured ? '<button class="act danger" data-act="delete-mcp-token">删除令牌</button>' : '') + '</div><div id="ownerMcpToken"></div></div>' +
+    '<div class="field"><label>MCP</label><p class="small muted">' + (mcp.configured ? '已启用 · 长期有效' : '尚未启用') + '</p>' +
+      '<div class="field"><label>服务地址</label><input value="' + esc(location.origin + '/mcp') + '" readonly></div>' +
+      '<div class="row">' +
+        (mcp.configured
+          ? '<button class="act primary" data-act="show-mcp-token">查看连接令牌</button><button class="act" data-act="rotate-mcp-token">更换令牌</button><button class="act danger" data-act="delete-mcp-token">删除令牌</button>'
+          : '<button class="act primary" data-act="create-mcp-token">启用 MCP</button>') +
+      '</div><div id="ownerMcpToken">' + mcpTokenHtml() + '</div></div>' +
     '<div class="row pane-actions"><button class="act" data-act="import-owner-library">同步现有笔记到个人空间</button></div>'
 }
 
@@ -1120,20 +1137,43 @@ async function deleteAccountSecret (provider, btn) {
 }
 
 
-async function createMcpToken (btn) {
-  var restore = busyButton(btn, '生成中…')
+async function showMcpToken (btn, method) {
+  if (method === 'POST' && state.account && state.account.credentials &&
+      state.account.credentials.mcp && state.account.credentials.mcp.configured &&
+      !window.confirm('更换令牌会立即使已连接的 MCP 客户端失效，确定更换吗？')) return
+  var restore = busyButton(btn, method === 'GET' ? '读取中…' : '生成中…')
   try {
-    var res = await fetch('/api/account/mcp-token', { method: 'POST', headers: headers(true), body: '{}' })
+    var res = await fetch('/api/account/mcp-token', {
+      method: method, headers: headers(method === 'POST'),
+      ...(method === 'POST' ? { body: '{}' } : {}),
+      cache: 'no-store'
+    })
     var data = await res.json().catch(function () { return {} })
-    if (!res.ok || !data.ok) throw new Error(data.message || data.error || '生成失败')
-    var box = $('ownerMcpToken')
-    if (box) box.innerHTML =
-      '<div class="field" style="margin-top:10px"><label>MCP 地址</label><input value="' + esc(location.origin + '/mcp') + '" readonly></div>' +
-      '<div class="field"><label>Bearer Token</label><textarea rows="4" readonly>' + esc(data.token || '') + '</textarea></div>' +
-      '<p class="tiny muted">长期有效，直到删除或重新生成；这个值只显示这一次，请自行保存。</p>'
+    if (!res.ok || !data.ok || !data.token) throw new Error(data.message || data.error || '获取令牌失败')
+    state.mcpToken = data.token
+    if (state.account && state.account.credentials) {
+      state.account.credentials.mcp = { configured: true }
+    }
+    renderSettings()
+    // Refresh status without discarding the in-memory secret during polling.
     state.account = null
-    toast('MCP 长期访问令牌已生成', 'ok')
-  } catch (error) { toast('生成失败：' + error.message, 'error') } finally { restore() }
+    toast(method === 'GET' ? '已读取现有令牌，原连接保持有效' : 'MCP 令牌已生成', 'ok')
+  } catch (error) { toast('获取令牌失败：' + error.message, 'error') } finally { restore() }
+}
+async function copyMcpToken () {
+  if (!state.mcpToken) return
+  try {
+    await navigator.clipboard.writeText(state.mcpToken)
+    toast('已复制令牌', 'ok')
+  } catch (error) {
+    var field = $('ownerMcpTokenValue')
+    if (field) { field.focus(); field.select() }
+    toast('无法自动复制，请从文本框手动复制', 'error')
+  }
+}
+function hideMcpToken () {
+  state.mcpToken = ''
+  renderSettings()
 }
 
 async function deleteMcpToken (btn) {
@@ -1143,6 +1183,7 @@ async function deleteMcpToken (btn) {
     var res = await fetch('/api/account/mcp-token', { method: 'DELETE', headers: headers(false) })
     var data = await res.json().catch(function () { return {} })
     if (!res.ok || !data.ok) throw new Error(data.message || data.error || '删除失败')
+    state.mcpToken = ''
     state.account = null
     await load()
     toast('MCP 访问令牌已删除', 'ok')
@@ -1769,7 +1810,10 @@ function handleAct (act, btn) {
   if (act === 'save-notify-email') return saveNotifyEmail(btn)
   if (act === 'save-account-secret') return saveAccountSecret(btn.dataset.provider || '', btn)
   if (act === 'delete-account-secret') return deleteAccountSecret(btn.dataset.provider || '', btn)
-  if (act === 'create-mcp-token') return createMcpToken(btn)
+  if (act === 'create-mcp-token' || act === 'rotate-mcp-token') return showMcpToken(btn, 'POST')
+  if (act === 'show-mcp-token') return showMcpToken(btn, 'GET')
+  if (act === 'copy-mcp-token') return copyMcpToken()
+  if (act === 'hide-mcp-token') return hideMcpToken()
   if (act === 'delete-mcp-token') return deleteMcpToken(btn)
   if (act === 'import-owner-library') return importOwnerLibrary(btn)
   toast('这个按钮还没有接上处理逻辑：' + act, 'error')

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHmac } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -10,7 +11,7 @@ const OWNER = '550e8400-e29b-41d4-a716-446655440000'
 const SIGNING_KEY = 'local-test-signing-key-32-characters-minimum'
 const ORIGIN = 'https://course.law-tech.dev'
 
-async function serverFixture(mode) {
+async function serverFixture(mode, controlFetch = fetch) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'course-passkey-test-'))
   const scratchRoot = path.join(root, 'private')
   fs.mkdirSync(scratchRoot, { recursive: true })
@@ -18,7 +19,7 @@ async function serverFixture(mode) {
     root, port: 0, host: '127.0.0.1', admin: true,
     adminToken: 'test-admin-token', scratchRoot, mcp: false,
     ssoKey: SIGNING_KEY, passkeyMode: mode, passkeyOwnerId: OWNER,
-    contentVisibility: 'private'
+    contentVisibility: 'private', controlFetch
   })
   return {
     url: site.url,
@@ -127,4 +128,50 @@ test('hybrid automatically retires SSO once the first owner passkey is persisted
   const callback = await fetch(s.url + '/_auth/callback?token=old-sso-token', { redirect: 'manual' })
   assert.equal(callback.status, 303)
   assert.equal(callback.headers.get('location'), '/login')
+})
+
+function ownerSession(amr = 'passkey') {
+  const iat = Math.floor(Date.now() / 1000)
+  const payload = { v: 1, sub: OWNER, role: 'owner', amr, iat, exp: iat + 3600 }
+  const body = Buffer.from(JSON.stringify(payload)).toString('base64url')
+  const signature = createHmac('sha256', SIGNING_KEY).update('course-session-v1.' + body).digest('base64url')
+  return 'lawtech_course_session=' + body + '.' + signature
+}
+
+test('owner can retrieve the same long-lived MCP token under passkey session without rotating', async t => {
+  const secret = 'a-reusable-mcp-secret-with-more-than-32-characters'
+  const calls = []
+  const controlFetch = async (url, options) => {
+    calls.push({ url: String(url), method: options.method || 'GET' })
+    return new Response(JSON.stringify({ ok: true, configured: true, secret }), {
+      status: 200, headers: { 'content-type': 'application/json' }
+    })
+  }
+  const s = await serverFixture('passkey', controlFetch)
+  t.after(s.close)
+  const noSession = await fetch(s.url + '/api/account/mcp-token')
+  assert.equal(noSession.status, 401)
+  const legacySession = await fetch(s.url + '/api/account/mcp-token', { headers: { cookie: ownerSession('sso') } })
+  assert.equal(legacySession.status, 401)
+  for (let i = 0; i < 2; i++) {
+    const res = await fetch(s.url + '/api/account/mcp-token', { headers: { cookie: ownerSession() } })
+    assert.equal(res.status, 200)
+    assert.match(res.headers.get('cache-control'), /no-store/)
+    assert.deepEqual(await res.json(), {
+      ok: true, token: 'cmcp1.' + OWNER + '.' + secret,
+      endpoint: '/mcp', persistent: true
+    })
+  }
+  assert.equal(calls.length, 2)
+  assert.ok(calls.every(c => c.url.endsWith('/v1/account/mcp-secret') && c.method === 'GET'))
+})
+
+test('MCP secret read cannot be used without Passkey OWNER role or when unconfigured', async t => {
+  const s = await serverFixture('passkey', async () => new Response(JSON.stringify({ ok: true, configured: false, secret: '' }), {
+    status: 200, headers: { 'content-type': 'application/json' }
+  }))
+  t.after(s.close)
+  const absent = await fetch(s.url + '/api/account/mcp-token', { headers: { cookie: ownerSession() } })
+  assert.equal(absent.status, 404)
+  assert.equal((await absent.json()).error, 'mcp_not_configured')
 })

@@ -2386,6 +2386,31 @@ export function createAdminHandler({
         sendJson(res, result.status, result.payload)
         return true
       }
+      // OWNER Passkey session can retrieve its existing MCP connection details
+      // without rotating the shared long-lived secret.
+      if (req.method === 'GET' && pathname === '/api/account/mcp-token') {
+        if (session.role !== 'owner' || session.amr !== 'passkey' ||
+            (ownerOnly && !isOwnerSession(session))) {
+          sendJson(res, 403, { ok: false, error: 'passkey_owner_required' })
+          return true
+        }
+        const stored = await controlCall(session, { target: '/v1/account/mcp-secret' })
+        if (!stored.ok) {
+          sendJson(res, stored.status, { ok: false, error: stored.payload?.error || 'mcp_unavailable' })
+          return true
+        }
+        if (!stored.payload?.configured || !stored.payload?.secret) {
+          sendJson(res, 404, { ok: false, error: 'mcp_not_configured' })
+          return true
+        }
+        sendJson(res, 200, {
+          ok: true,
+          token: issueMcpAccessToken(session, stored.payload.secret),
+          endpoint: '/mcp',
+          persistent: true
+        }, { 'cache-control': 'private, no-store' })
+        return true
+      }
       if (req.method === 'POST' && pathname === '/api/account/mcp-token') {
         const secret = randomBytes(32).toString('base64url')
         const saved = await controlCall(session, {
