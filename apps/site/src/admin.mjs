@@ -938,7 +938,8 @@ export function createAdminHandler({
     sessionCookie: (payload, ttlSeconds) => sessionCookie(payload, ssoKey, ttlSeconds || PASSKEY_SESSION_TTL_SECONDS),
     now
   }) : null
-  const loginLocation = next => passkeyMode === 'passkey' ? passkey.loginLocation(next) : ssoLocation(next)
+  const passkeyRequired = () => passkeyMode === 'passkey' || (passkeyMode === 'hybrid' && passkey.credentialCount() > 0)
+  const loginLocation = next => passkeyRequired() ? passkey.loginLocation(next) : ssoLocation(next)
 
   async function controlCall(session, { method = 'GET', target = '/', body = null } = {}) {
     if (!session?.sub) throw Object.assign(new Error('ACCOUNT_SESSION_REQUIRED'), { status: 401 })
@@ -2611,7 +2612,7 @@ export function createAdminHandler({
 
       if (passkey && await passkey.handle(req, res, pathname, url, null)) return true
 
-      if (pathname === '/_auth/callback' && passkeyMode === 'passkey') {
+      if (pathname === '/_auth/callback' && passkeyRequired()) {
         res.writeHead(303, { location: '/login', 'cache-control': 'no-store' })
         res.end()
         return true
@@ -2653,7 +2654,7 @@ export function createAdminHandler({
         'course-session-v1',
         nowSeconds
       )
-      const session = passkeyMode === 'passkey'
+      const session = passkeyRequired()
         ? (candidateSession?.amr === 'passkey' && candidateSession.role === 'owner' &&
            candidateSession.sub === passkeyOwnerId ? candidateSession : null)
         : candidateSession

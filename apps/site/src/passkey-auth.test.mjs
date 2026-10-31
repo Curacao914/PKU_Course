@@ -112,3 +112,19 @@ test('bootstrap expiration and owner binding are enforced', async () => {
     assert.ok(!stored.includes(code))
   } finally { fs.rmSync(root, { recursive: true, force: true }) }
 })
+
+test('hybrid automatically retires SSO once the first owner passkey is persisted', async t => {
+  const s = await serverFixture('hybrid')
+  t.after(s.close)
+  const dir = path.join(s.scratchRoot, 'passkey-auth')
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
+  fs.writeFileSync(path.join(dir, 'credentials.json'), JSON.stringify({
+    v: 1, ownerId: OWNER,
+    credentials: [{ id: 'credential-id', publicKey: 'AQAB', counter: 0, transports: [] }]
+  }), { mode: 0o600 })
+  const index = await fetch(s.url + '/', { redirect: 'manual' })
+  assert.match(index.headers.get('location'), /^\/login\?next=/)
+  const callback = await fetch(s.url + '/_auth/callback?token=old-sso-token', { redirect: 'manual' })
+  assert.equal(callback.status, 303)
+  assert.equal(callback.headers.get('location'), '/login')
+})
