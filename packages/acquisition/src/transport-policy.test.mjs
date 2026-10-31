@@ -38,7 +38,7 @@ test('VPN fallback probe requires a successful PKU CONNECT, not just an open TCP
 })
 
 test('VPN fallback probe rejects a stalled or unavailable forwarded port',async t=>{
- const {server,url}=await startProxy(()=>{})
+ const {server,url}=await startProxy(socket=>{socket.resume()})
  t.after(()=>{ if(server.listening) server.close() })
  assert.equal(await waitForLoopbackProxy(url,75),false)
  const address=server.address()
