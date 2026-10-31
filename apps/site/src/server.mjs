@@ -119,7 +119,7 @@ export function createRequestHandler({
   // 公开进程上访问管理路径时，把浏览器导向管理台域名（API 调用则明确 404）
   adminOrigin = '',
   adminToken = '',
-  ssoKey = '',
+  ssoKey = '', passkeyMode = 'legacy', passkeyOwnerId = '',
   controlUrl = 'http://127.0.0.1:3102',
   controlFetch = fetch,
   contentVisibility = 'public',
@@ -182,7 +182,7 @@ export function createRequestHandler({
       workerPath,
       workerEnv,
       runCommand,
-      ssoKey,
+      ssoKey, passkeyMode, passkeyOwnerId, passkeyOrigin: siteOrigin,
       controlUrl,
       controlFetch,
       // 私有阅读站（/、/notes/*、/topics/*…）只在私有内容模式下由管理进程渲染；
@@ -745,7 +745,7 @@ export function startSiteServer({
   root, port = 3100, host = '127.0.0.1', adminToken = '',
   // 角色相关的三项必须透传下去：否则"公开进程"照样会挂上管理台（实测踩到：以为设了
   // admin:false，结果 /api/admin 仍然按"未配置令牌"回 503，而不是根本不存在的 404）。
-  admin = true, adminOrigin = '', ssoKey = '', controlUrl = 'http://127.0.0.1:3102',
+  admin = true, adminOrigin = '', ssoKey = '', passkeyMode = 'legacy', passkeyOwnerId = '', controlUrl = 'http://127.0.0.1:3102',
   controlFetch = fetch, contentVisibility = 'public',
   ownerOnly = false, ownerId = '', ownerLocalContent = false,
   mcp = true, mcpOrigins = [], mcpHosts = [],
@@ -757,7 +757,7 @@ export function startSiteServer({
   scratchRoot = '', workerPath = '', workerEnv = {}, assetsDir = '', materialsRoot = '', runCommand
 } = {}) {
   const server = createSiteServer({
-    root, adminToken, admin, adminOrigin, ssoKey, controlUrl, controlFetch, contentVisibility,
+    root, adminToken, admin, adminOrigin, ssoKey, passkeyMode, passkeyOwnerId, controlUrl, controlFetch, contentVisibility,
     ownerOnly, ownerId, ownerLocalContent,
     mcp, mcpOrigins, mcpHosts, siteOrigin,
     ...(rateLimit ? { rateLimit } : {}),
