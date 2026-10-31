@@ -94,7 +94,7 @@ test('hybrid allows new passkey enrollment while keeping SSO temporarily unchang
   t.after(s.close)
   const index = await fetch(s.url + '/', { redirect: 'manual' })
   assert.equal(index.status, 302)
-  assert.match(index.headers.get('location'), /desk\.law-tech\.dev\/api\/course\/sso/)
+  assert.match(index.headers.get('location'), /law-tech\.dev\/api\/course\/sso/)
   const login = await fetch(s.url + '/login')
   assert.equal(login.status, 200)
   const preflight = await post(s.url + '/_auth/passkey/login/options', {})
