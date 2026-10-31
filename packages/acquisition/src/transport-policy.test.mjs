@@ -32,14 +32,14 @@ test('VPN fallback probe requires a successful PKU CONNECT, not just an open TCP
        socket.write('HTTP/1.1 '+status+' '+(status===200?'Connection Established':'Unavailable')+'\r\n\r\n')
      })
    })
-   t.after(()=>server.close())
+   t.after(()=>{ if(server.listening) server.close() })
    assert.equal(await waitForLoopbackProxy(url,500),expected,'CONNECT '+status)
  }
 })
 
 test('VPN fallback probe rejects a stalled or unavailable forwarded port',async t=>{
  const {server,url}=await startProxy(()=>{})
- t.after(()=>server.close())
+ t.after(()=>{ if(server.listening) server.close() })
  assert.equal(await waitForLoopbackProxy(url,75),false)
  const address=server.address()
  await new Promise(resolve=>server.close(resolve))
