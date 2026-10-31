@@ -893,6 +893,7 @@ export function createAdminHandler({
   passkeyMode = 'legacy',
   passkeyOwnerId = '',
   passkeyOrigin = 'https://course.law-tech.dev',
+  oauth = null,
   controlUrl = 'http://127.0.0.1:3102',
   controlFetch = fetch,
   /**
@@ -2683,6 +2684,8 @@ export function createAdminHandler({
         ? (candidateSession?.amr === 'passkey' && candidateSession.role === 'owner' &&
            candidateSession.sub === passkeyOwnerId ? candidateSession : null)
         : candidateSession
+
+      if (oauth && await oauth.handle(req, res, pathname, url, session)) return true
 
       if (ownerOnly && session && !isOwnerSession(session)) {
         sendJson(res, 403, { ok: false, error: 'owner_only', message: '课程空间暂不开放其他账户' })

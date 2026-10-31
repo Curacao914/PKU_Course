@@ -89,6 +89,7 @@ const { url } = await startSiteServer({
   ownerOnly: process.env.COURSE_OWNER_ONLY === '1',
   ownerId: String(process.env.COURSE_ACCOUNT_OWNER_ID || ''),
   ownerLocalContent: process.env.COURSE_OWNER_LOCAL_CONTENT === '1',
+  mcpOAuth: !isPublic && process.env.COURSE_MCP_OAUTH === '1',
   mcp: !(isPublic && contentVisibility === 'private'),
   scratchRoot,
   assetsDir,

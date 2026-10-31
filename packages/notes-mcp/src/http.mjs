@@ -28,6 +28,7 @@ export function createMcpHttpHandler({
   service,
   serverInfo,
   instructions,
+  oauthScopes = null,
   log = () => {},
   maxBodyBytes = 1_000_000,
   path: mountPath = '/mcp',
@@ -64,6 +65,7 @@ export function createMcpHttpHandler({
     service,
     serverInfo,
     instructions,
+    oauthScopes,
     logger: log,
     limits: { maxQueryChars: budget.limits.maxQueryChars }
   })

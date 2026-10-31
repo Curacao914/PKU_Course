@@ -4,6 +4,7 @@ import path from 'node:path'
 
 import { readSiteIndex, topicSlug, renderTopicMarkdown } from '@course/publish'
 import { readOwnerLocalState } from './owner-local.mjs'
+import { createCourseOAuth } from './oauth-mcp.mjs'
 
 import { signRequest as signControlRequest } from '../../control/src/server/auth.mjs'
 import { createAdminHandler, parseMcpAccessToken, verifyMcpAccessToken } from './admin.mjs'
@@ -119,7 +120,7 @@ export function createRequestHandler({
   // 公开进程上访问管理路径时，把浏览器导向管理台域名（API 调用则明确 404）
   adminOrigin = '',
   adminToken = '',
-  ssoKey = '', passkeyMode = 'legacy', passkeyOwnerId = '',
+  ssoKey = '', passkeyMode = 'legacy', passkeyOwnerId = '', mcpOAuth = false,
   controlUrl = 'http://127.0.0.1:3102',
   controlFetch = fetch,
   contentVisibility = 'public',
@@ -174,6 +175,8 @@ export function createRequestHandler({
   const normalizedAssets = assetsDir ? path.resolve(assetsDir) : ''
   const privateContent = String(contentVisibility || 'public').toLowerCase() === 'private'
   const controlBase = String(controlUrl || '').replace(/\/$/, '')
+  const oauth = adminEnabled && privateContent && ownerOnly && mcpOAuth
+    ? createCourseOAuth({ ownerId, signingKey: ssoKey, root: scratchRoot || normalizedRoot }) : null
   const admin = adminEnabled
     ? createAdminHandler({
       root: normalizedRoot,
@@ -182,7 +185,7 @@ export function createRequestHandler({
       workerPath,
       workerEnv,
       runCommand,
-      ssoKey, passkeyMode, passkeyOwnerId, passkeyOrigin: siteOrigin,
+      ssoKey, passkeyMode, passkeyOwnerId, passkeyOrigin: siteOrigin, oauth,
       controlUrl,
       controlFetch,
       // 私有阅读站（/、/notes/*、/topics/*…）只在私有内容模式下由管理进程渲染；
@@ -417,8 +420,9 @@ export function createRequestHandler({
     const handler = createMcpHttpHandler({
       service,
       log: line => process.stderr.write(`${line}\n`),
-      allowedOrigins: [siteOrigin, ...mcpOrigins].filter(Boolean),
+      allowedOrigins: [siteOrigin, ...(oauth ? ['https://chatgpt.com'] : []), ...mcpOrigins].filter(Boolean),
       allowedHosts: [siteHost, 'localhost', '127.0.0.1', ...mcpHosts].filter(Boolean),
+      oauthScopes: oauth ? ['notes:read', 'offline_access'] : null,
       budget
     })
     privateMcpHandlers.set(ownerId, handler)
@@ -490,12 +494,13 @@ export function createRequestHandler({
         }
         const bearer = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '')
         const parsed = parseMcpAccessToken(bearer)
-        if (ownerOnly && String(parsed?.sub || '') !== String(ownerId || '')) {
+        const oauthIdentity = oauth?.verifyAccessToken(bearer) || null
+        if (ownerOnly && (oauthIdentity || parsed) && String((oauthIdentity || parsed)?.sub || '') !== String(ownerId || '')) {
           sendJson(res, 401, { ok: false, error: 'owner_only' })
           return
         }
-        let identity = null
-        if (parsed) {
+        let identity = oauthIdentity
+        if (!identity && parsed) {
           try {
             const stored = await controlGetFor(parsed.sub, '/v1/account/mcp-secret')
             identity = stored?.configured ? verifyMcpAccessToken(bearer, stored.secret) : null
@@ -507,9 +512,10 @@ export function createRequestHandler({
           res.writeHead(401, {
             'content-type': 'application/json; charset=utf-8',
             'cache-control': 'no-store',
-            'www-authenticate': 'Bearer realm="course-notes-mcp"'
+            'www-authenticate': oauth ? oauth.challenge : 'Bearer realm="course-notes-mcp"'
           })
-          res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32000, message: '需要有效的个人 MCP 访问令牌' } }))
+          res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32000, message: '需要有效的个人 MCP 访问令牌' },
+            ...(oauth ? { _meta: { 'mcp/www_authenticate': [oauth.challenge] } } : {}) }))
           return
         }
         try {
@@ -747,7 +753,7 @@ export function startSiteServer({
   // admin:false，结果 /api/admin 仍然按"未配置令牌"回 503，而不是根本不存在的 404）。
   admin = true, adminOrigin = '', ssoKey = '', passkeyMode = 'legacy', passkeyOwnerId = '', controlUrl = 'http://127.0.0.1:3102',
   controlFetch = fetch, contentVisibility = 'public',
-  ownerOnly = false, ownerId = '', ownerLocalContent = false,
+  ownerOnly = false, ownerId = '', ownerLocalContent = false, mcpOAuth = false,
   mcp = true, mcpOrigins = [], mcpHosts = [],
   // 公开接口共用的预算（/api/search 与 /mcp 同一本账）：整块透传，避免只改了一半
   rateLimit = undefined, maxConcurrent = undefined, requestTimeoutMs = undefined, maxQueryChars = undefined,
@@ -758,7 +764,7 @@ export function startSiteServer({
 } = {}) {
   const server = createSiteServer({
     root, adminToken, admin, adminOrigin, ssoKey, passkeyMode, passkeyOwnerId, controlUrl, controlFetch, contentVisibility,
-    ownerOnly, ownerId, ownerLocalContent,
+    ownerOnly, ownerId, ownerLocalContent, mcpOAuth,
     mcp, mcpOrigins, mcpHosts, siteOrigin,
     ...(rateLimit ? { rateLimit } : {}),
     ...(maxConcurrent ? { maxConcurrent } : {}),
