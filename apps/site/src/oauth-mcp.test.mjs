@@ -60,8 +60,19 @@ test('owner consent, S256 authorization grant, rotating refresh and durable toke
   assert.match(unauth.headers.get('location'),/^\/login\?next=/)
   const approval=await fetch(endpoint,{headers:{'x-test-owner':'yes'}})
   assert.equal(approval.status,200)
+  // The browser's same-origin form POST must carry its actual Origin.
+  // "no-referrer" changes it to "null" and breaks the owner consent flow.
+  assert.equal(approval.headers.get('referrer-policy'),'same-origin')
   const flow=(await approval.text()).match(/name="flow" value="([^"]+)"/)?.[1]
   assert.ok(flow)
+  const crossOrigin=await post(app.url+'/oauth/authorize',{flow,decision:'allow'},
+    {origin:'null','x-test-owner':'yes'})
+  assert.equal(crossOrigin.status,403)
+  assert.equal((await crossOrigin.json()).error,'invalid_authorization')
+  const notOwner=await post(app.url+'/oauth/authorize',{flow,decision:'allow'},
+    {origin:BASE})
+  assert.equal(notOwner.status,403)
+  assert.equal((await notOwner.json()).error,'invalid_authorization')
   const confirmed=await post(app.url+'/oauth/authorize',{flow,decision:'allow'},
     {origin:BASE,'x-test-owner':'yes'})
   const callback=new URL(confirmed.headers.get('location'))
